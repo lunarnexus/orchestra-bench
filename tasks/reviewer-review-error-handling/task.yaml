@@ -1,0 +1,7 @@
+task_id: reviewer-review-error-handling
+description: "Review error handling for correctness gaps"
+family: reviewer
+batch: role-focused
+scoring_type: pass_fail
+timeout_minutes: 8
+evaluator: evaluate/run.sh

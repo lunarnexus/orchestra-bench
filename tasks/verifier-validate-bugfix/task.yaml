@@ -1,0 +1,7 @@
+task_id: verifier-validate-bugfix
+description: "Verify a proposed bugfix against evidence"
+family: verifier
+batch: role-focused
+scoring_type: pass_fail
+timeout_minutes: 8
+evaluator: evaluate/run.sh

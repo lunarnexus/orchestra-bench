@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# 04-run-suite — Run a suite through Pi --auto, grade, and summarize.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/.."
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <suite> [--auto|--collect-only]
+       $(basename "$0") --list
+
+Run every task in a suite with scripts/02-open-pi <task-id> --auto, grade each
+run, then print the summary. This is the default dogfood suite flow.
+
+Options:
+  --auto          Run each task with 02-open-pi --auto before grading (default)
+  --collect-only  Do not run Pi; only grade latest prepared/ungraded runs
+
+Suites:
+  smoke
+  role-focused
+  contract
+  capability
+
+Examples:
+  scripts/04-run-suite --list
+  scripts/04-run-suite smoke
+  scripts/04-run-suite role-focused --auto
+  scripts/04-run-suite smoke --collect-only
+EOF
+}
+
+list_suites() {
+  python3 - "$ROOT/tasks" <<'PY'
+from pathlib import Path
+from collections import Counter
+base=Path(__import__('sys').argv[1])
+c=Counter()
+for y in base.glob('*/task.yaml'):
+    for line in y.read_text().splitlines():
+        s=line.strip()
+        if s.startswith('batch:'):
+            c[s.split(':',1)[1].strip().strip('"')]+=1
+for name in ['smoke','role-focused','contract','capability']:
+    if c[name]: print(f"  {name:<14} {c[name]} tasks")
+PY
+}
+
+tasks_for_suite() {
+  local suite="$1"
+  python3 - "$ROOT/tasks" "$suite" <<'PY'
+from pathlib import Path
+import sys
+base=Path(sys.argv[1]); suite=sys.argv[2]
+for y in sorted(base.glob('*/task.yaml')):
+    data={}
+    for line in y.read_text().splitlines():
+        s=line.strip()
+        if not s or s.startswith('#') or ':' not in s: continue
+        k,v=s.split(':',1); data[k.strip()]=v.strip().strip('"')
+    if data.get('batch') == suite:
+        print(data.get('task_id', y.parent.name))
+PY
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --list) list_suites; exit 0 ;;
+esac
+
+suite="${1:-}"
+if [ -z "$suite" ]; then usage; exit 1; fi
+shift || true
+
+run_auto=true
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --auto) run_auto=true; shift ;;
+    --collect-only) run_auto=false; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "[bench] unknown option: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+mapfile -t task_ids < <(tasks_for_suite "$suite")
+if [ ${#task_ids[@]} -eq 0 ]; then
+  echo "[bench] unknown or empty suite: $suite" >&2
+  echo "[bench] available suites:" >&2
+  list_suites >&2
+  exit 1
+fi
+
+failures=0
+for task_id in "${task_ids[@]}"; do
+  echo ""
+  echo "=== $suite / $task_id ==="
+  if $run_auto; then
+    if ! "$ROOT/scripts/02-open-pi" "$task_id" --auto; then
+      echo "[bench] auto run failed: $task_id" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+  fi
+  if ! "$ROOT/scripts/03-collect-results" "$task_id"; then
+    echo "[bench] grading failed: $task_id" >&2
+    failures=$((failures + 1))
+  fi
+done
+
+echo ""
+echo "=== suite summary: $suite ==="
+python3 "$ROOT/cli.py" collect-results --results-dir "$ROOT/results"
+if [ "$failures" -gt 0 ]; then
+  echo "[bench] $failures task(s) failed during suite run" >&2
+  exit 1
+fi

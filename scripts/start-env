@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# start-env — Start a long-lived benchmark container from the shared image.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/.."
+
+IMAGE_NAME="${BENCH_IMAGE_NAME:-orchestra-bench-env}"
+CONTAINER_NAME="orchestra-bench-runner"
+
+# Paths inside repo — mounted into the container
+# Tasks/evaluators are intentionally not mounted; public scripts copy only
+# agent-visible materials into the workdir and copy evaluator code only during grading.
+RESULTS_DIR="$ROOT/results"
+ARTIFACTS_DIR="$ROOT/artifacts"
+CONFIG_DIR="$ROOT/config/orchestra"
+LMSTUDIO_CONFIG_FILE="$ROOT/config/pi/lmstudio.json"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [start|restart|recreate|reset|init-runtime|exec <cmd>|logs]
+
+Commands:
+  start          Start the long-lived benchmark container if needed.
+                 Reuses a valid running container by default.
+  restart        Restart the existing container when present, or start it.
+  recreate       Remove any existing container and start a fresh one.
+  reset          Reset the in-container workspace via bench-entrypoint reset.
+  init-runtime   Re-copy benchmark config and run bench-entrypoint init-runtime.
+  exec CMD       Execute a command inside the running container.
+  logs           Show container logs.
+
+Environment:
+  BENCH_IMAGE_NAME    Image name (default: orchestra-bench-env)
+
+Examples:
+  scripts/start-env start
+  scripts/start-env recreate
+  scripts/start-env reset
+EOF
+}
+
+image_exists() {
+  docker image inspect "$IMAGE_NAME" >/dev/null 2>&1
+}
+
+container_exists() {
+  docker inspect "$CONTAINER_NAME" >/dev/null 2>&1
+}
+
+container_running() {
+  [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)" = "true" ]
+}
+
+ensure_image() {
+  if ! image_exists; then
+    echo "[bench] image not found — run 'scripts/build-env build' first" >&2
+    exit 1
+  fi
+}
+
+start_fresh_container() {
+  mkdir -p "$RESULTS_DIR" "$ARTIFACTS_DIR" "$CONFIG_DIR"
+
+  docker run -d \
+    --name "$CONTAINER_NAME" \
+    -v "$RESULTS_DIR:/bench/results" \
+    -v "$ARTIFACTS_DIR:/bench/artifacts" \
+    -v "$CONFIG_DIR:/bench/orchestra-config:ro" \
+    -v "$LMSTUDIO_CONFIG_FILE:/bench/pi/lmstudio.json:ro" \
+    -v "$ROOT/docker/entrypoint.sh:/usr/local/bin/bench-entrypoint:ro" \
+    "$IMAGE_NAME" >/dev/null
+}
+
+start_or_reuse_container() {
+  ensure_image
+  if container_running; then
+    echo "[bench] reusing container $CONTAINER_NAME"
+    return 0
+  fi
+
+  if container_exists; then
+    echo "[bench] starting stopped container $CONTAINER_NAME ..."
+    docker start "$CONTAINER_NAME" >/dev/null
+    echo "[bench] container started: $CONTAINER_NAME"
+    return 0
+  fi
+
+  echo "[bench] starting container $CONTAINER_NAME ..."
+  start_fresh_container
+  echo "[bench] container started: $CONTAINER_NAME"
+}
+
+recreate_container() {
+  ensure_image
+  mkdir -p "$RESULTS_DIR" "$ARTIFACTS_DIR" "$CONFIG_DIR"
+
+  if container_exists; then
+    echo "[bench] recreating container $CONTAINER_NAME ..."
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  else
+    echo "[bench] creating container $CONTAINER_NAME ..."
+  fi
+
+  start_fresh_container
+  echo "[bench] container started: $CONTAINER_NAME"
+}
+
+restart_container() {
+  ensure_image
+  if container_running; then
+    echo "[bench] restarting container $CONTAINER_NAME ..."
+    docker restart "$CONTAINER_NAME" >/dev/null
+    echo "[bench] container restarted: $CONTAINER_NAME"
+    return 0
+  fi
+
+  if container_exists; then
+    echo "[bench] starting stopped container $CONTAINER_NAME ..."
+    docker start "$CONTAINER_NAME" >/dev/null
+    echo "[bench] container started: $CONTAINER_NAME"
+    return 0
+  fi
+
+  start_or_reuse_container
+}
+
+require_running_container() {
+  if ! container_running; then
+    echo "[bench] container $CONTAINER_NAME not running — start it first" >&2
+    exit 1
+  fi
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+  start|"")
+    start_or_reuse_container
+    ;;
+
+  recreate)
+    recreate_container
+    ;;
+
+  restart)
+    restart_container
+    ;;
+
+  reset)
+    require_running_container
+    docker exec "$CONTAINER_NAME" bench-entrypoint reset
+    ;;
+
+  init-runtime)
+    require_running_container
+    docker exec "$CONTAINER_NAME" bench-entrypoint init-runtime
+    ;;
+
+  exec)
+    shift
+    if [ $# -eq 0 ]; then
+      echo "usage: $(basename "$0") exec <cmd> [args...]" >&2
+      exit 1
+    fi
+    require_running_container
+    docker exec "$CONTAINER_NAME" "$@"
+    ;;
+
+  logs)
+    docker logs -f "$CONTAINER_NAME"
+    ;;
+
+  -h|--help)
+    usage
+    ;;
+
+  *)
+    echo "unknown command: $cmd" >&2
+    usage
+    exit 1
+    ;;
+esac

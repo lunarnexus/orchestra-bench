@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# 01-start — Build the image, start/recreate the container, or stop/remove it.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/.."
+
+IMAGE_NAME="${BENCH_IMAGE_NAME:-orchestra-bench-env}"
+CONTAINER_NAME="orchestra-bench-runner"
+
+container_exists() {
+  docker inspect "$CONTAINER_NAME" >/dev/null 2>&1
+}
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [start|stop]
+
+Commands:
+  start   Build the benchmark image, then recreate the shared container.
+  stop    Stop and remove the benchmark container. Leaves image/results/artifacts intact.
+
+Defaults to 'start' when no command is given.
+
+Environment:
+  BENCH_IMAGE_NAME    Image name (default: orchestra-bench-env)
+
+Examples:
+  scripts/01-start
+  scripts/01-start start
+  scripts/01-start stop
+EOF
+}
+
+start_container() {
+  echo "[bench] building image $IMAGE_NAME ..."
+  docker build -f "$ROOT/docker/Dockerfile" -t "$IMAGE_NAME" "$ROOT"
+  echo "[bench] image built: $IMAGE_NAME"
+
+  "$ROOT/scripts/start-env" recreate
+
+  echo "[bench] initializing Pi/Orchestra runtime ..."
+  docker exec "$CONTAINER_NAME" bench-entrypoint init-runtime
+
+  echo "[bench] verifying runtime ..."
+  docker exec "$CONTAINER_NAME" sh -c 'which pi >/dev/null && which orchestra >/dev/null && orchestra doctor >/dev/null && pi list >/dev/null'
+  echo "[bench] runtime ready: $CONTAINER_NAME"
+}
+
+stop_and_remove_container() {
+  if container_exists; then
+    echo "[bench] stopping/removing container $CONTAINER_NAME ..."
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    if container_exists; then
+      echo "[bench] failed to remove container $CONTAINER_NAME" >&2
+      return 1
+    fi
+    echo "[bench] container removed: $CONTAINER_NAME"
+  else
+    echo "[bench] no container to remove: $CONTAINER_NAME"
+  fi
+}
+
+cmd="${1:-start}"
+case "$cmd" in
+  start|"")
+    start_container
+    ;;
+  stop)
+    stop_and_remove_container
+    ;;
+  -h|--help)
+    usage; exit 0
+    ;;
+  *)
+    echo "unknown command: $cmd" >&2
+    usage
+    exit 1
+    ;;
+esac

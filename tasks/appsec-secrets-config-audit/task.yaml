@@ -1,0 +1,7 @@
+task_id: appsec-secrets-config-audit
+description: "Audit config for secret exposure risks"
+family: appsec
+batch: role-focused
+scoring_type: pass_fail
+timeout_minutes: 8
+evaluator: evaluate/run.sh

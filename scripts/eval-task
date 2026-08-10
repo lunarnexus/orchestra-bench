@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# eval-task — Grade a prepared task inside the shared container.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/.."
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <task-id> --run-id <run-id>
+
+Grade a task by running its evaluator inside the shared container.
+
+Arguments:
+  task-id   Task identifier (e.g., smoke)
+  run-id    The run id of the completed execution (required for eval)
+
+Environment:
+  BENCH_RUN_ID  Override run id (overrides --run-id if set)
+
+Examples:
+  scripts/eval-task smoke --run-id myrun-123
+EOF
+}
+
+task_id="${1:-}"
+shift || { usage; exit 1; }
+
+run_id=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-id) run_id="$2"; shift 2 ;;
+    *) echo "[bench] unknown option: $1"; usage; exit 1 ;;
+  esac
+done
+
+# Use env var override if set, else require explicit arg
+effective_run_id="${BENCH_RUN_ID:-$run_id}"
+if [ -z "$effective_run_id" ]; then
+  echo "[bench] --run-id is required for eval-task (or set BENCH_RUN_ID)" >&2
+  usage
+  exit 1
+fi
+
+export BENCH_RUN_ID="$effective_run_id"
+
+exec python3 "$ROOT/cli.py" eval-task "$task_id" --run-id "$BENCH_RUN_ID"

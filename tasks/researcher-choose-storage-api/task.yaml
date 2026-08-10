@@ -1,0 +1,7 @@
+task_id: researcher-choose-storage-api
+description: "Research and choose a storage API"
+family: researcher
+batch: role-focused
+scoring_type: pass_fail
+timeout_minutes: 8
+evaluator: evaluate/run.sh

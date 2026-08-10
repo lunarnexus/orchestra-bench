@@ -1,0 +1,7 @@
+task_id: smoke-public-admin-handoff
+description: "Record a public request and expose it for admin triage"
+family: orchestrator
+batch: smoke
+scoring_type: pass_fail
+timeout_minutes: 12
+evaluator: evaluate/run.sh

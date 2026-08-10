@@ -1,0 +1,100 @@
+default_return_format: >-
+  Return the smallest complete answer. If yes/no is enough, answer yes/no plus
+  blockers. For research/options/plans, return concise findings with sources or
+  file refs. For changes, return files changed, checks run, results, blockers,
+  and risks.
+tool_description: >-
+  Dispatch one small scoped worker slice. Each slice has one goal, exact scope,
+  one stop condition, and one return shape. Research answers one small question
+  against one exact source scope, not a topic. The parent keeps sequencing,
+  approvals, and final synthesis. Use an exact configured role; omit role for
+  the default. {roles}
+tool_prompt_snippet: >-
+  Dispatch one small scoped worker slice. Research is one small answerable
+  question, not a topic. {roles}
+tool_prompt_guidelines:
+  - >-
+    Before calling orch_dispatch, reduce the task to one worker slice: one goal,
+    one exact scope, one stop condition, and one return shape.
+  - >-
+    For research, ask one small answerable question with one exact source scope:
+    one file, one docs page/section, one URL, or one tight file cluster.
+  - >-
+    Do not dispatch broad topics such as API support, install behavior,
+    notification APIs, or overall design. Convert them into small questions
+    first.
+  - >-
+    Do not dispatch implementation, verification, or review that depends on
+    unresolved research. Wait for the research result, then continue.
+  - >-
+    If a research worker times out, shrink to one source and one exact question,
+    then re-dispatch once. If the retry times out, record the missing fact as a
+    blocker and stop.
+  - Do not perform failed worker work yourself.
+  - After dispatch, do not wait or poll. Continue independent work or stop; Orchestra will return worker results.
+  - Use exact enabled roles; omit role for the default.
+tool_goal_description: >-
+  One small worker slice: goal, exact scope, stop condition, and return shape.
+tool_role_description: >-
+  (Optional) specific role; omit for default. {roles}
+tool_task_label_description: Optional short request label.
+budget_exceeded_prompt: |-
+  Orchestra worker budget exceeded. Stop new work now.
+
+  Do not continue implementation, research, review, or tool use except what is absolutely necessary to write this handoff.
+
+  Return a continuation handoff for the calling agent. Start with:
+
+  ORCHESTRA_STATUS: incomplete
+  ORCHESTRA_STOP_REASON: budget_exceeded
+
+  Then include:
+
+  ## Budget Handoff
+
+  Completed:
+  - Specific work completed.
+  - Files changed, files inspected, commands run, or evidence gathered.
+
+  Current state and data locations:
+  - Relevant file paths, logs, artifacts, transcripts, notes, run ids, or database/state locations.
+  - Anything the next worker needs to avoid rediscovering or redoing work.
+
+  Remaining work:
+  - Specific incomplete items.
+  - Known decisions still needed.
+
+  Suggested smaller redispatch slices:
+  - 2-5 minute continuation tasks.
+  - Mark slices as sequential, parallel-safe, or blocked.
+  - Make the next slice small enough to avoid hitting the same budget.
+
+  Verification:
+  - Checks already run and results.
+  - Checks still needed.
+
+  Blockers and risks:
+  - Anything that may prevent continuation or require caller approval.
+
+  Caller guidance:
+  - Tell the calling agent to redispatch from this handoff rather than restarting completed work.
+host_help: |-
+  Orchestra commands:
+    /orch help                         Show this help
+    /orch on                           Load the orchestra orchestrator skill
+    /orch doctor                       Check Orchestra setup
+    /orch do <request>                 Dispatch a subagent
+    /orch do --role ROLE <request>     Start a worker with a role
+    /orch roles                        Show configured roles
+    /orch roles ROLE SETTING VALUE     Update a role setting
+                                       Settings: harness, enabled, model, profile, agent
+                                       VALUE for enabled: true, yes, y, 1, on | false, no, n, 0, off
+    /orch status                       Show active workers for this session
+    /orch stop <run-id>                Stop an active worker.
+    /orch history [limit]              Show recent results for this session
+
+  Plain text: ask me to delegate, dispatch, use a subagent/sub-agent, ask a worker,
+  or ask another agent.
+  auto_return: prompt orchestrator upon return of workers
+
+  {roles}

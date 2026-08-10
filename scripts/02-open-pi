@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# 02-open-pi — Prepare a task run, then open Pi interactively inside the benchmark container.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/.."
+CONTAINER_NAME="orchestra-bench-runner"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <task-id> [--auto] [--no-orch-on]
+       $(basename "$0") --list
+       $(basename "$0") config
+
+Open Pi for one benchmark task. A fresh run id and isolated workdir are created
+automatically. The parent Pi session uses the catalog-derived model for the default parent role.
+
+Use --auto to run Pi non-interactively with Prompt.md and exit. By default,
+--auto first runs /orch on, then continues the same Pi session with the task
+prompt. For role-focused tasks, --auto asks the parent session to dispatch the
+target Orchestra role.
+
+Commands:
+  --auto       Run Pi with Prompt.md in non-interactive print mode and exit
+  --no-orch-on Skip the automatic /orch on preflight for baseline/debug runs
+  --list   List tasks grouped by suite/role
+  config   Open Pi's package/resource config TUI inside the benchmark container
+
+Examples:
+  scripts/02-open-pi --list
+  scripts/02-open-pi config
+  scripts/02-open-pi smoke-public-admin-handoff
+  scripts/02-open-pi smoke-dependent-setup-chain --auto
+EOF
+}
+
+_yaml_value() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1]); key = sys.argv[2]
+for line in path.read_text().splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith('#') or ':' not in stripped:
+        continue
+    k, v = stripped.split(':', 1)
+    if k.strip() == key:
+        print(v.strip().strip('"'))
+        break
+PY
+}
+
+list_tasks() {
+  python3 - "$ROOT/tasks" <<'PY'
+from pathlib import Path
+import collections
+base = Path(__import__('sys').argv[1])
+rows = []
+for y in sorted(base.glob('*/task.yaml')):
+    data = {}
+    for line in y.read_text().splitlines():
+        s = line.strip()
+        if not s or s.startswith('#') or ':' not in s:
+            continue
+        k, v = s.split(':', 1)
+        data[k.strip()] = v.strip().strip('"')
+    rows.append(data)
+
+order = ['smoke', 'role-focused', 'contract', 'capability']
+by_batch = collections.defaultdict(list)
+for r in rows:
+    by_batch[r.get('batch','')].append(r)
+
+for batch in order:
+    items = by_batch.get(batch, [])
+    if not items:
+        continue
+    print(f"\n[{batch}]")
+    if batch == 'role-focused':
+        by_role = collections.defaultdict(list)
+        for r in items:
+            by_role[r.get('family','')].append(r)
+        for role in ['planner','researcher','verifier','reviewer','builder','appsec']:
+            role_items = sorted(by_role.get(role, []), key=lambda x: x.get('task_id',''))
+            if not role_items:
+                continue
+            print(f"  {role}:")
+            for r in role_items:
+                print(f"    {r.get('task_id',''):<34} {r.get('description','')}")
+    else:
+        for r in sorted(items, key=lambda x: x.get('task_id','')):
+            fam = r.get('family','')
+            label = f"/{fam}" if fam and fam != batch else ''
+            print(f"  {r.get('task_id',''):<36} ({batch}{label}) {r.get('description','')}")
+PY
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --list) list_tasks; exit 0 ;;
+  config)
+    if ! docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" >/dev/null 2>&1; then
+      echo "[bench] container not running — run 'scripts/01-start start' first" >&2
+      exit 1
+    fi
+    exec docker exec -it "$CONTAINER_NAME" bash -lc "cd /workspace && exec pi config"
+    ;;
+esac
+
+auto=false
+auto_orch_on=true
+
+task_id="${1:-}"
+if [ -z "$task_id" ]; then
+  echo "[bench] task id required — run 'scripts/02-open-pi --list'" >&2
+  usage
+  exit 1
+fi
+shift || true
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --auto) auto=true; shift ;;
+    --no-orch-on) auto_orch_on=false; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "[bench] unexpected argument: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+TASK_DIR="$ROOT/tasks/$task_id"
+TASK_YAML="$TASK_DIR/task.yaml"
+if [ ! -f "$TASK_YAML" ]; then
+  echo "[bench] task not found: $task_id" >&2
+  echo "[bench] available tasks:" >&2
+  list_tasks >&2
+  exit 1
+fi
+
+if ! docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" >/dev/null 2>&1; then
+  echo "[bench] container not running — run 'scripts/01-start start' first" >&2
+  exit 1
+fi
+
+BENCH_RUN_ID="$(date +%Y%m%dT%H%M%S)"
+export BENCH_RUN_ID BENCH_TASK_ID="$task_id"
+
+family="$(_yaml_value "$TASK_YAML" family || true)"
+batch="$(_yaml_value "$TASK_YAML" batch || true)"
+parent_role="builder"
+target_role=""
+case "$family" in
+  planner|researcher|verifier|reviewer|builder|appsec) target_role="$family" ;;
+esac
+
+echo "[bench] preparing task run..."
+BENCH_TARGET_ROLE="$target_role" "$ROOT/scripts/_prepare-task-run" "$task_id" --run-id "$BENCH_RUN_ID" --role "$parent_role"
+
+config_path="$ROOT/results/$BENCH_RUN_ID-$task_id/.bench_run.json"
+model_to_use=""
+if [ -f "$config_path" ]; then
+  model_to_use=$(python3 -c "import json; print(json.load(open('$config_path')).get('model',''))") || true
+fi
+
+WORKDIR="/workspace/$BENCH_RUN_ID-$task_id"
+PROMPT_MD="$WORKDIR/Prompt.md"
+
+echo "[bench] task:   $task_id"
+echo "[bench] run:    $BENCH_RUN_ID"
+echo "[bench] role:   $parent_role"
+if [ -n "$target_role" ]; then
+  echo "[bench] target: $target_role"
+fi
+echo "[bench] model:  ${model_to_use:-<default>}"
+echo "[bench] grade:  scripts/03-collect-results $task_id"
+
+role_instruction=""
+if [ -n "$target_role" ]; then
+  role_instruction="This is a role-focused benchmark for the $target_role role. If Orchestra is enabled, keep this Pi session as the parent/coordinator and dispatch the $target_role role to do the task. If Orchestra is unavailable or disabled, complete the task directly."
+fi
+
+if $auto; then
+  echo "[bench] auto:   running Prompt.md with pi -p"
+  if $auto_orch_on; then
+    echo "[bench] orch:   /orch on preflight enabled"
+  else
+    echo "[bench] orch:   /orch on preflight skipped"
+  fi
+  auto_orch_on_value="false"
+  if $auto_orch_on; then auto_orch_on_value="true"; fi
+
+  docker exec \
+    -e BENCH_RUN_ID="$BENCH_RUN_ID" \
+    -e BENCH_TASK_ID="$task_id" \
+    -e BENCH_WORKDIR="$WORKDIR" \
+    -e BENCH_MODEL="$model_to_use" \
+    -e BENCH_ROLE_INSTRUCTION="$role_instruction" \
+    -e BENCH_AUTO_ORCH_ON="$auto_orch_on_value" \
+    "$CONTAINER_NAME" sh -c '
+      set -eu
+      cd "$BENCH_WORKDIR"
+      if [ -f Prompt.md ]; then
+        prompt=$(cat Prompt.md)
+      elif [ -f PRD.md ]; then
+        prompt="Read PRD.md, inspect the fixture, implement the requested behavior, and leave the workspace in a runnable state."
+      else
+        prompt="Inspect the workspace and complete the benchmark task."
+      fi
+      if [ -n "$BENCH_ROLE_INSTRUCTION" ]; then
+        prompt="$BENCH_ROLE_INSTRUCTION
+
+$prompt"
+      fi
+      if [ "$BENCH_AUTO_ORCH_ON" = "true" ]; then
+        pi --model "$BENCH_MODEL" -p "/orch on"
+        exec pi --continue --model "$BENCH_MODEL" -p "$prompt"
+      fi
+      exec pi --model "$BENCH_MODEL" -p "$prompt"
+    '
+  echo "[bench] auto complete; grade with: scripts/03-collect-results $task_id"
+  exit 0
+fi
+
+if docker exec "$CONTAINER_NAME" test -f "$PROMPT_MD"; then
+  docker exec -it \
+    -e BENCH_RUN_ID="$BENCH_RUN_ID" \
+    -e BENCH_TASK_ID="$task_id" \
+    "$CONTAINER_NAME" bash -c "
+      cd $WORKDIR && \
+      echo '=== Task: $task_id ===' && \
+      if [ -n '$role_instruction' ]; then echo '$role_instruction'; echo ''; fi && \
+      cat $PROMPT_MD && \
+      echo '' && \
+      echo '--- Starting Pi in workdir: $WORKDIR ---' && \
+      exec pi --model '$model_to_use'
+    "
+else
+  docker exec -it \
+    -e BENCH_RUN_ID="$BENCH_RUN_ID" \
+    -e BENCH_TASK_ID="$task_id" \
+    "$CONTAINER_NAME" bash -c "cd $WORKDIR && echo '=== Task: $task_id (no Prompt.md) ===' && exec pi --model '$model_to_use'"
+fi

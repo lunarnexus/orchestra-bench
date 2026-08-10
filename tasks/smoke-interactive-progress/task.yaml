@@ -1,0 +1,7 @@
+task_id: smoke-interactive-progress
+description: "Complete an interactive lesson progression with immediate feedback"
+family: orchestrator
+batch: smoke
+scoring_type: pass_fail
+timeout_minutes: 12
+evaluator: evaluate/run.sh

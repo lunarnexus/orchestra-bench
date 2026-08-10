@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# 03-collect-results — Grade prepared runs, then report status.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/.."
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [task-id] [options]
+
+Without a task id, grade every prepared/ungraded run under results/ and show the
+historical dashboard. With a task id, grade the latest prepared run for that task.
+Already-graded runs are skipped unless --force is used.
+
+Options:
+  --run-id <id>   With task-id, grade a specific run id
+  --force         Re-grade even if result.json already exists
+  --no-eval       Do not grade; only show historical dashboard
+  --splits        Show split-aware summary
+  --compare       Show comparison view instead of dashboard
+  --aggregate     Use aggregated comparison view (with --compare)
+
+Examples:
+  scripts/03-collect-results
+  scripts/03-collect-results smoke-public-admin-handoff
+  scripts/03-collect-results smoke-public-admin-handoff --force
+  scripts/03-collect-results --compare --aggregate
+EOF
+}
+
+latest_run_for_task() {
+  local task_id="$1"
+  find "$ROOT/results" -name .bench_run.json -path "*-${task_id}/.bench_run.json" 2>/dev/null \
+    | sort \
+    | tail -1 \
+    | python3 -c 'import json,sys; p=sys.stdin.read().strip(); print(json.load(open(p))["run_id"] if p else "")'
+}
+
+prepared_ungraded_runs() {
+  python3 - "$ROOT/results" <<'PY'
+from pathlib import Path
+import json, sys
+base = Path(sys.argv[1])
+if not base.is_dir():
+    raise SystemExit(0)
+for cfg in sorted(base.glob('*/.bench_run.json')):
+    if (cfg.parent / 'result.json').exists():
+        continue
+    try:
+        d = json.loads(cfg.read_text())
+    except Exception:
+        continue
+    run_id = d.get('run_id')
+    task_id = d.get('task_id')
+    if run_id and task_id:
+        print(f'{run_id}\t{task_id}')
+PY
+}
+
+grade_one() {
+  local run_id="$1"
+  local task_id="$2"
+  local force="$3"
+  local result_file="$ROOT/results/$run_id-$task_id/result.json"
+  if [ -f "$result_file" ] && [ "$force" != "true" ]; then
+    echo "[bench] skip already graded: $run_id-$task_id"
+    return 0
+  fi
+  echo "[bench] grading: $run_id-$task_id"
+  set +e
+  "$ROOT/scripts/eval-task" "$task_id" --run-id "$run_id"
+  local status=$?
+  set -e
+  echo "[bench] result:    results/$run_id-$task_id/result.json"
+  echo "[bench] artifacts: results/$run_id-$task_id/artifacts/"
+  return "$status"
+}
+
+task_id=""
+run_id=""
+do_eval=true
+force=false
+show_splits=false
+show_compare=false
+show_aggregate=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-id) run_id="$2"; shift 2 ;;
+    --force) force=true; shift ;;
+    --no-eval) do_eval=false; shift ;;
+    --splits) show_splits=true; shift ;;
+    --compare) show_compare=true; shift ;;
+    --aggregate) show_aggregate=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) echo "[bench] unknown option: $1" >&2; usage; exit 1 ;;
+    *)
+      if [ -z "$task_id" ]; then task_id="$1"; shift
+      else echo "[bench] unexpected argument: $1" >&2; usage; exit 1
+      fi
+      ;;
+  esac
+done
+
+if $show_compare; then
+  if $show_aggregate; then exec python3 "$ROOT/cli.py" compare --results-dir "$ROOT/results" --aggregate; fi
+  exec python3 "$ROOT/cli.py" compare --results-dir "$ROOT/results"
+fi
+if $show_splits; then exec python3 "$ROOT/cli.py" collect-results --results-dir "$ROOT/results" --splits; fi
+
+status=0
+if $do_eval; then
+  if [ -n "$task_id" ]; then
+    if [ -z "$run_id" ]; then run_id="$(latest_run_for_task "$task_id")"; fi
+    if [ -z "$run_id" ]; then
+      echo "[bench] no prepared run found for task '$task_id'" >&2
+      echo "[bench] start one with: scripts/02-open-pi $task_id" >&2
+      exit 1
+    fi
+    grade_one "$run_id" "$task_id" "$force" || status=$?
+  else
+    found=false
+    while IFS=$'\t' read -r pending_run pending_task; do
+      [ -n "$pending_run" ] || continue
+      found=true
+      grade_one "$pending_run" "$pending_task" "$force" || status=$?
+    done < <(prepared_ungraded_runs)
+    if ! $found; then
+      echo "[bench] no prepared/ungraded runs found"
+    fi
+  fi
+fi
+
+"$ROOT/scripts/05-results"
+exit "$status"

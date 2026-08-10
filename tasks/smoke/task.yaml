@@ -1,0 +1,8 @@
+# tasks/smoke/task.yaml — contract task metadata for the harness loader
+task_id: smoke
+description: "Verify container workdir reset and BENCH_OK contract"
+family: contract
+batch: contract
+scoring_type: pass_fail
+timeout_minutes: 5
+evaluator: evaluate/run.sh

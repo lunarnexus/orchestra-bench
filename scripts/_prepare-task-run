@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# _prepare-task-run — Internal helper used by 02-open-pi.
+# Requires the shared container to already be built and started, copies the
+# fixture into the workdir, and writes .bench_run.json with run metadata for
+# later evaluation.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/.."
+
+IMAGE_NAME="${BENCH_IMAGE_NAME:-orchestra-bench-env}"
+CONTAINER_NAME="orchestra-bench-runner"
+TASKS_DIR="$ROOT/tasks"
+RESULTS_DIR="$ROOT/results"
+CATALOG_PATH="$ROOT/config/orchestra/agent-catalog.yaml"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <task-id> [options]
+
+Internal helper: prepare a task workspace for 02-open-pi.
+
+Arguments:
+  task-id   Task identifier (e.g., smoke, builder-add-endpoint)
+
+Options:
+  --run-id <id>     Override run id (default: auto-generated timestamp)
+  --role <name>     Target role in agent-catalog.yaml (default: builder)
+  --orchestra       Enable Orchestra (store true in metadata)
+  --no-orchestra    Disable Orchestra (store false in metadata)
+
+Environment variables:
+  BENCH_RUN_ID      Override run id
+  BENCH_ROLE        Target role (defaults to builder)
+  ORCHESTRA         true/false — whether Orchestra is enabled
+  BENCH_EXTRA_SKILLS Comma-separated list of extra skills
+  BENCH_NOTES       Free-form run notes
+  BENCH_TARGET_ROLE Role this task is intended to exercise, if any
+
+The script:
+  1. Verifies the shared container is already running
+  2. Copies task fixture into a per-run workdir inside the container
+  3. Writes .bench_run.json with run metadata from agent-catalog.yaml
+
+Normally do not run this directly. Use scripts/02-open-pi <task-id>.
+
+Examples:
+  scripts/_prepare-task-run smoke --run-id my-test-run
+EOF
+}
+
+# Check for --help as first arg before anything else
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
+task_id="${1:-}"
+[ -z "$task_id" ] && { usage; exit 1; }
+
+# Parse arguments
+export BENCH_RUN_ID="${BENCH_RUN_ID:-$(date +%Y%m%dT%H%M%S)}"
+role=""
+orchestra_json="null"
+
+shift || true
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-id) BENCH_RUN_ID="$2"; shift 2 ;;
+    --role) role="$2"; shift 2 ;;
+    --orchestra) orchestra_json="true"; shift ;;
+    --no-orchestra) orchestra_json="false"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "[bench] unknown option: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+if [ -z "$role" ] && [ -n "${BENCH_ROLE:-}" ]; then
+  role="$BENCH_ROLE"
+fi
+role="${role:-builder}"
+
+# Orchestra from env override (ORCHESTRA=true/false)
+orch_env="${ORCHESTRA:-}"
+if [ -n "$orch_env" ]; then
+  orchestra_json="true"
+  if [ "$orch_env" = "false" ] || [ "$orch_env" = "0" ] || [ "$orch_env" = "off" ]; then
+    orchestra_json="false"
+  fi
+fi
+
+# Extra skills from env (comma-separated list of skill names)
+extra_skills="${BENCH_EXTRA_SKILLS:-}"
+notes="${BENCH_NOTES:-}"
+
+# Build extra_skills as JSON array
+if [ -n "$extra_skills" ]; then
+  skills_json=$(echo "$extra_skills" | tr ',' '\n' | python3 -c "import sys,json; print(json.dumps([s.strip() for s in sys.stdin if s.strip()]))")
+else
+  skills_json="[]"
+fi
+
+run_dir="$RESULTS_DIR/$BENCH_RUN_ID-$task_id"
+
+# Verify the container is running
+if ! docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" >/dev/null 2>&1; then
+  echo "[bench] container not running — run 'scripts/01-start start' first" >&2
+  exit 1
+fi
+
+# Ensure task directory exists on host
+TASK_DIR="$ROOT/tasks/$task_id"
+if [ ! -d "$TASK_DIR" ]; then
+  echo "[bench] task directory not found: $TASK_DIR" >&2
+  echo "[bench] available tasks:" >&2
+  for d in "$ROOT"/tasks/*/; do
+    [ -f "$d/task.yaml" ] && echo "  $(basename "$d")" >&2
+  done
+  exit 1
+fi
+
+# Resolve run metadata from the benchmark-local catalog and write .bench_run.json
+mkdir -p "$run_dir"
+env \
+  BENCH_RUN_ID="$BENCH_RUN_ID" \
+  BENCH_TASK_ID="$task_id" \
+  BENCH_ROLE="$role" \
+  BENCH_ORCHESTRA_JSON="$orchestra_json" \
+  BENCH_EXTRA_SKILLS_JSON="$skills_json" \
+  BENCH_NOTES="$notes" \
+  BENCH_TARGET_ROLE="${BENCH_TARGET_ROLE:-}" \
+  BENCH_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  BENCH_STARTED_EPOCH="$(date +%s)" \
+  python3 - "$ROOT" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+
+from eval_harness import build_run_metadata  # noqa: E402
+
+meta = build_run_metadata(
+    task_id=os.environ["BENCH_TASK_ID"],
+    run_id=os.environ["BENCH_RUN_ID"],
+    catalog_path=root / "config" / "orchestra" / "agent-catalog.yaml",
+    catalog_label="config/orchestra/agent-catalog.yaml",
+    role=os.environ.get("BENCH_ROLE") or None,
+    orchestra=json.loads(os.environ["BENCH_ORCHESTRA_JSON"]),
+    extra_skills=json.loads(os.environ["BENCH_EXTRA_SKILLS_JSON"]),
+    notes=os.environ.get("BENCH_NOTES", ""),
+)
+target_role = os.environ.get("BENCH_TARGET_ROLE", "").strip()
+if target_role:
+    meta["target_role"] = target_role
+meta["started_at"] = os.environ.get("BENCH_STARTED_AT", "")
+try:
+    meta["started_epoch"] = int(os.environ.get("BENCH_STARTED_EPOCH", "0"))
+except ValueError:
+    meta["started_epoch"] = 0
+
+out = root / "results" / f"{meta['run_id']}-{meta['task_id']}" / ".bench_run.json"
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(json.dumps(meta, indent=2) + "\n")
+print(out)
+PY
+
+# Set up workdir inside the container. Copy only agent-visible materials.
+WORKDIR="/workspace/$BENCH_RUN_ID-$task_id"
+docker exec \
+  -e BENCH_RUN_ID="$BENCH_RUN_ID" \
+  -e BENCH_TASK_ID="$task_id" \
+  "$CONTAINER_NAME" bench-entrypoint sync-orchestra-config >/dev/null
+
+docker exec "$CONTAINER_NAME" sh -c "rm -rf '$WORKDIR' && mkdir -p '$WORKDIR'"
+
+if [ -d "$TASK_DIR/fixture" ]; then
+  docker cp "$TASK_DIR/fixture/." "$CONTAINER_NAME:$WORKDIR/"
+fi
+if [ -f "$TASK_DIR/PRD.md" ]; then
+  docker cp "$TASK_DIR/PRD.md" "$CONTAINER_NAME:$WORKDIR/PRD.md"
+fi
+if [ -f "$TASK_DIR/Prompt.md" ]; then
+  docker cp "$TASK_DIR/Prompt.md" "$CONTAINER_NAME:$WORKDIR/Prompt.md"
+fi
+if [ -d "$TASK_DIR/kb" ]; then
+  docker cp "$TASK_DIR/kb/." "$CONTAINER_NAME:$WORKDIR/"
+fi
+if [ -f "$TASK_DIR/kb.md" ]; then
+  docker cp "$TASK_DIR/kb.md" "$CONTAINER_NAME:$WORKDIR/kb.md"
+fi
+
+echo "[bench] workdir: $WORKDIR"
+echo "[bench] config:  results/$BENCH_RUN_ID-$task_id/.bench_run.json"
+echo "[bench] role:    $role"
+echo "[bench] workdir prepared"

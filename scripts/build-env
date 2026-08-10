@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# build-env — Build the shared benchmark image.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/.."
+
+IMAGE_NAME="${BENCH_IMAGE_NAME:-orchestra-bench-env}"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [build|start|restart|recreate]
+
+Commands:
+  build      Build (or rebuild) the shared benchmark image.
+  start      Start or reuse the shared benchmark container.
+  restart    Restart the existing container when present.
+  recreate   Remove any existing container and start a fresh one.
+
+Environment:
+  BENCH_IMAGE_NAME    Image name (default: orchestra-bench-env)
+
+Examples:
+  scripts/build-env build
+  scripts/build-env start
+EOF
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+  build)
+    echo "[bench] building image $IMAGE_NAME ..."
+    docker build -t "$IMAGE_NAME" "$ROOT/docker/"
+    echo "[bench] image built: $IMAGE_NAME"
+    ;;
+
+  start|restart|recreate)
+    exec "$ROOT/scripts/start-env" "$cmd"
+    ;;
+
+  ""|-h|--help)
+    usage
+    ;;
+
+  *)
+    echo "unknown command: $cmd" >&2
+    usage
+    exit 1
+    ;;
+esac

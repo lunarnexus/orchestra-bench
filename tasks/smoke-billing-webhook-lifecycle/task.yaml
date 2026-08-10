@@ -1,0 +1,8 @@
+task_id: smoke-billing-webhook-lifecycle
+description: "Process usage events into an invoice and signed webhook"
+family: orchestrator
+batch: smoke
+scoring_type: pass_fail
+timeout_minutes: 15
+evaluator: evaluate/run.sh
+expected_workflow: planner,researcher,builder,verifier,reviewer,appsec

@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+# 05-results — Read-only historical benchmark reporting.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/.."
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [view] [options]
+
+Views:
+  dashboard        Default: overview, recent runs, task breakdown, token summary
+  runs             List historical graded runs
+  run <id|dir>     Show one run in detail
+  tasks            Task pass/fail breakdown
+  timeline         Results over time
+  tokens           Token usage across runs/tasks
+  timing           Elapsed time across tasks/roles
+
+Options:
+  --task <id>      Filter to one task
+  --limit <n>      Limit rows for runs/timeline (default: 20)
+
+Examples:
+  scripts/05-results
+  scripts/05-results runs --limit 50
+  scripts/05-results run 20260810T004753-smoke-dependent-setup-chain
+  scripts/05-results run 20260810T004753
+  scripts/05-results tasks
+  scripts/05-results timeline --task smoke-dependent-setup-chain
+  scripts/05-results tokens
+  scripts/05-results timing
+EOF
+}
+
+view="dashboard"
+if [ $# -gt 0 ]; then
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    dashboard|runs|run|tasks|timeline|tokens|timing) view="$1"; shift ;;
+  esac
+fi
+
+run_query=""
+task_filter=""
+limit="20"
+
+if [ "$view" = "run" ]; then
+  run_query="${1:-}"
+  [ -n "$run_query" ] || { usage; exit 1; }
+  shift || true
+fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --task) task_filter="$2"; shift 2 ;;
+    --limit) limit="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "[bench] unknown argument: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$limit" <<'PY'
+from __future__ import annotations
+
+import json
+import statistics
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+view = sys.argv[2]
+run_query = sys.argv[3]
+task_filter = sys.argv[4]
+try:
+    limit = int(sys.argv[5])
+except Exception:
+    limit = 20
+
+results_dir = root / "results"
+tasks_dir = root / "tasks"
+
+current_tasks = set()
+for y in tasks_dir.glob("*/task.yaml"):
+    task_id = y.parent.name
+    for line in y.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("task_id:"):
+            task_id = s.split(":", 1)[1].strip().strip('"')
+            break
+    current_tasks.add(task_id)
+
+
+def prepared_only_runs():
+    out = []
+    if not results_dir.is_dir():
+        return out
+    for p in sorted(results_dir.glob("*/.bench_run.json")):
+        if not (p.parent / "result.json").exists():
+            try:
+                d = json.loads(p.read_text())
+            except Exception:
+                continue
+            task_id = d.get("task_id", "")
+            if current_tasks and task_id not in current_tasks:
+                continue
+            if task_filter and task_id != task_filter:
+                continue
+            d["_dir"] = str(p.parent.relative_to(root))
+            out.append(d)
+    return out
+
+
+def load_results():
+    rows = []
+    if not results_dir.is_dir():
+        return rows
+    for p in sorted(results_dir.glob("*/result.json")):
+        try:
+            d = json.loads(p.read_text())
+        except Exception:
+            continue
+        task_id = d.get("task_id", "")
+        if current_tasks and task_id not in current_tasks:
+            continue
+        if task_filter and task_id != task_filter:
+            continue
+        d["_dir"] = str(p.parent.relative_to(root))
+        d["_path"] = str(p.relative_to(root))
+        d["_mtime"] = p.stat().st_mtime
+        rows.append(d)
+    rows.sort(key=lambda r: (str(r.get("run_id", "")), str(r.get("task_id", ""))))
+    return rows
+
+
+def token_total(r):
+    t = r.get("tokens") or {}
+    for k in ("total", "total_tokens"):
+        v = t.get(k)
+        if isinstance(v, (int, float)):
+            return int(v)
+    return 0
+
+
+def token_parts(r):
+    t = r.get("tokens") or {}
+    return {
+        "input": int(t.get("input_tokens", t.get("prompt_tokens", 0)) or 0),
+        "output": int(t.get("output_tokens", t.get("completion_tokens", 0)) or 0),
+        "reasoning": int(t.get("reasoning_tokens", 0) or 0),
+        "total": token_total(r),
+    }
+
+
+def elapsed(r):
+    v = r.get("elapsed_seconds")
+    return float(v) if isinstance(v, (int, float)) else 0.0
+
+
+def fmt_seconds(value):
+    if not value:
+        return "-"
+    if value < 60:
+        return f"{value:.0f}s"
+    return f"{value/60:.1f}m"
+
+
+def status(r):
+    return "PASS" if r.get("score") == "pass" else "FAIL"
+
+
+def find_run(rows, q):
+    for r in rows:
+        if q in {str(r.get("run_id", "")), f"{r.get('run_id')}-{r.get('task_id')}", r.get("_dir", "").split("/", 1)[-1]}:
+            return r
+    matches = [r for r in rows if q and (q in str(r.get("run_id", "")) or q in str(r.get("task_id", "")) or q in r.get("_dir", ""))]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def print_overview(rows):
+    pending = prepared_only_runs()
+    passed = sum(1 for r in rows if r.get("score") == "pass")
+    failed = len(rows) - passed
+    toks = [token_total(r) for r in rows if token_total(r)]
+    print("=== orchestra-bench results dashboard ===")
+    print(f"graded runs : {len(rows)}")
+    print(f"passed      : {passed}")
+    print(f"failed      : {failed}")
+    print(f"pass rate   : {passed}/{len(rows)}" if rows else "pass rate   : n/a")
+    if toks:
+        print(f"tokens      : total={sum(toks):,} avg={int(statistics.mean(toks)):,} median={int(statistics.median(toks)):,}")
+    else:
+        print("tokens      : none captured yet")
+    times = [elapsed(r) for r in rows if elapsed(r)]
+    if times:
+        print(f"elapsed     : total={fmt_seconds(sum(times))} avg={fmt_seconds(statistics.mean(times))} median={fmt_seconds(statistics.median(times))}")
+    else:
+        print("elapsed     : none captured yet")
+    if pending:
+        print(f"ungraded    : {len(pending)} prepared run(s); grade with scripts/03-collect-results <task-id>")
+        for r in pending[-5:][::-1]:
+            print(f"              {r.get('run_id',''):<18} {r.get('task_id','')}")
+
+
+def print_runs(rows, n=20):
+    print("\n=== recent runs ===")
+    for r in rows[-n:][::-1]:
+        parts = token_parts(r)
+        sid = ",".join((r.get("run_meta") or {}).get("pi_session_ids", [])[:1])
+        print(f"{status(r):4s}  {r.get('run_id',''):<18} {r.get('task_id',''):<36} time={fmt_seconds(elapsed(r)):<6} tokens={parts['total']:<8} session={sid}")
+
+
+def print_tasks(rows):
+    print("\n=== task breakdown ===")
+    by = defaultdict(list)
+    for r in rows:
+        by[r.get("task_id", "")].append(r)
+    for task_id in sorted(by):
+        rs = by[task_id]
+        passed = sum(1 for r in rs if r.get("score") == "pass")
+        toks = [token_total(r) for r in rs if token_total(r)]
+        times = [elapsed(r) for r in rs if elapsed(r)]
+        avg = int(statistics.mean(toks)) if toks else 0
+        avg_time = fmt_seconds(statistics.mean(times)) if times else "-"
+        print(f"{task_id:<38} {passed:>3}/{len(rs):<3} avg_time={avg_time:<6} avg_tokens={avg:,}")
+
+
+def print_tokens(rows):
+    print("\n=== token usage ===")
+    totals = [token_total(r) for r in rows if token_total(r)]
+    if not totals:
+        print("no token data captured")
+        return
+    print(f"runs_with_tokens: {len(totals)}/{len(rows)}")
+    print(f"total_tokens    : {sum(totals):,}")
+    print(f"avg_tokens      : {int(statistics.mean(totals)):,}")
+    print(f"median_tokens   : {int(statistics.median(totals)):,}")
+    print("\nby task:")
+    by = defaultdict(list)
+    for r in rows:
+        if token_total(r):
+            by[r.get("task_id", "")].append(token_total(r))
+    for task_id in sorted(by):
+        vals = by[task_id]
+        print(f"{task_id:<38} runs={len(vals):<3} total={sum(vals):<10,} avg={int(statistics.mean(vals)):,}")
+
+
+def print_timing(rows):
+    print("\n=== elapsed time ===")
+    vals = [elapsed(r) for r in rows if elapsed(r)]
+    if not vals:
+        print("no elapsed timing captured")
+        return
+    print(f"runs_with_time: {len(vals)}/{len(rows)}")
+    print(f"total_elapsed : {fmt_seconds(sum(vals))}")
+    print(f"avg_elapsed   : {fmt_seconds(statistics.mean(vals))}")
+    print(f"median_elapsed: {fmt_seconds(statistics.median(vals))}")
+    print("\nby role:")
+    by_role = defaultdict(list)
+    for r in rows:
+        role = ((r.get("task_meta") or {}).get("family") or (r.get("run_meta") or {}).get("role") or "unknown")
+        if elapsed(r):
+            by_role[str(role)].append(elapsed(r))
+    for role in sorted(by_role):
+        vals = by_role[role]
+        print(f"{role:<14} runs={len(vals):<3} total={fmt_seconds(sum(vals)):<8} avg={fmt_seconds(statistics.mean(vals))}")
+
+
+def print_timeline(rows, n=20):
+    print("\n=== timeline ===")
+    for r in rows[-n:]:
+        parts = token_parts(r)
+        print(f"{r.get('run_id',''):<18} {status(r):4s} {r.get('task_id',''):<36} time={fmt_seconds(elapsed(r)):<6} total={parts['total']:<8} in={parts['input']:<8} out={parts['output']:<6} reason={parts['reasoning']}")
+
+
+def print_run_detail(rows, q):
+    r = find_run(rows, q)
+    if not r:
+        print(f"[bench] run not found or ambiguous: {q}", file=sys.stderr)
+        raise SystemExit(1)
+    print("=== run detail ===")
+    print(f"run_id   : {r.get('run_id','')}")
+    print(f"task_id  : {r.get('task_id','')}")
+    print(f"score    : {r.get('score','')}")
+    print(f"result   : {r.get('_path','')}")
+    print(f"artifacts: {r.get('_dir','')}/artifacts/")
+    meta = r.get("run_meta") or {}
+    print(f"model    : {meta.get('model','')}")
+    print(f"role     : {meta.get('role','')}")
+    if meta.get("target_role"):
+        print(f"target   : {meta.get('target_role','')}")
+    sessions = meta.get("pi_session_ids") or []
+    print(f"sessions : {', '.join(sessions) if sessions else 'none captured'}")
+    parts = token_parts(r)
+    print(f"elapsed  : {fmt_seconds(elapsed(r))}")
+    print(f"tokens   : total={parts['total']:,} input={parts['input']:,} output={parts['output']:,} reasoning={parts['reasoning']:,}")
+    print("\nchecks:")
+    checks = r.get("checks") or {}
+    if checks:
+        for k, v in checks.items():
+            print(f"  {k}: {v}")
+    else:
+        print("  none")
+    orch = meta.get("orchestra_artifacts") or {}
+    if orch:
+        print("\norchestra artifacts:")
+        for k, v in orch.items():
+            print(f"  {k}: {v}")
+
+rows = load_results()
+if view == "dashboard":
+    print_overview(rows); print_runs(rows, min(limit, 10)); print_tasks(rows); print_tokens(rows); print_timing(rows)
+elif view == "runs":
+    print_runs(rows, limit)
+elif view == "run":
+    print_run_detail(rows, run_query)
+elif view == "tasks":
+    print_tasks(rows)
+elif view == "timeline":
+    print_timeline(rows, limit)
+elif view == "tokens":
+    print_tokens(rows)
+elif view == "timing":
+    print_timing(rows)
+else:
+    print(f"unknown view: {view}", file=sys.stderr)
+    raise SystemExit(1)
+PY

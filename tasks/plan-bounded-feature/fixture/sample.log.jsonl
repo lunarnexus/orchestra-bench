@@ -1,0 +1,6 @@
+{"timestamp":"2025-01-15T10:00:01Z","level":"info","user":{"name":"Alice","role":"admin"},"message":"Server started on port 8080"}
+{"timestamp":"2025-01-15T10:00:02Z","level":"debug","user":{"name":"Bob","role":"admin"},"message":"Loading config from /etc/app/config.yml"}
+{"timestamp":"2025-01-15T10:01:15Z","level":"info","user":{"name":"Alice","role":"viewer"},"message":"Request received GET /api/users"}
+{"timestamp":"2025-01-15T10:01:16Z","level":"debug","user":{"name":"Alice","role":"admin"},"message":"Querying users table, limit=50"}
+{"timestamp":"2025-01-15T10:02:30Z","level":"warn","user":{"name":"Carol","role":"ops"},"message":"Slow query detected: 340ms"}
+{"timestamp":"2025-01-15T10:03:00Z","level":"error","user":{"name":"Dana","role":"ops"},"message":"Connection timeout to redis://cache:6379"}
