@@ -1048,6 +1048,16 @@ def extract_orchestration_checks(
     checks["worker_running_without_exit"] = worker_started_count > worker_exit_count
     has_orchestra_log_evidence = bool(orch_events)
 
+    task_meta = result.task_meta if isinstance(result.task_meta, dict) else {}
+    family = str(task_meta.get("family", "") or "").lower()
+    batch = str(task_meta.get("batch", "") or "").lower()
+    capability_task = (
+        family == "capability"
+        or batch.startswith("capability-")
+        or result.task_id.startswith("cap-")
+    )
+    checks["no_orchestration"] = capability_task and len(dispatches) == 0 and not roles_from_logs
+
     # ── 3. Target role dispatched check ─────────────────────
     target_role = str(result.run_meta.get("target_role", "") or "").lower().strip()
     all_dispatch_roles = set(r.lower() for r in roles_dispatched)
@@ -1832,6 +1842,8 @@ def apply_process_penalties(result: TaskResult) -> TaskResult:
         penalties.append(("fallback_answer_after_dispatch", 0.08, "fallback answer after dispatch"))
     if orchestration_checks.get("worker_running_without_exit") is True:
         penalties.append(("worker_running_without_exit", 0.08, "worker still running / no exit"))
+    if orchestration_checks.get("no_orchestration") is True:
+        penalties.append(("no_orchestration", 0.10, "no orchestration"))
 
     for key, weight, label in (
         ("timeouts", 0.04, "timeout"),
@@ -1901,6 +1913,8 @@ def orchestration_warnings(orchestration_checks: dict[str, object] | None) -> li
         warnings.append("fallback answer after dispatch")
     if orchestration_checks.get("worker_running_without_exit") is True:
         warnings.append("worker still running / no exit")
+    if orchestration_checks.get("no_orchestration") is True:
+        warnings.append("no orchestration")
 
     for key, singular, plural in (
         ("timeouts", "timeout", "timeouts"),

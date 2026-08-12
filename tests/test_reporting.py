@@ -634,6 +634,37 @@ class TestRunDetailReporting:
         assert enriched.orchestration_checks["fallback_answer_after_dispatch"] is False
         assert enriched.orchestration_checks["process_penalty_total"] == 0.0
 
+    def test_process_penalty_for_capability_run_with_zero_dispatches(self, tmp_path):
+        from eval_harness import ingest_artifacts
+
+        base = tmp_path / "results"
+        run_dir = base / "run-zero-cap-normal-django-reports"
+        artifacts = run_dir / "artifacts"
+        (artifacts / "pi-sessions").mkdir(parents=True)
+        (artifacts / "manifest.json").write_text(json.dumps({"orchestra": {}}))
+        (artifacts / "pi-sessions" / "sess.jsonl").write_text(
+            json.dumps({"type": "session", "id": "sess-zero"}) + "\n"
+        )
+
+        result_obj = TaskResult(
+            task_id="cap-normal-django-reports",
+            run_id="run-zero",
+            score="fail",
+            score_numeric=0.04,
+            rubric={"content": {"score": 0.04, "max": 1.0}},
+            checks={},
+            task_meta={"family": "capability", "batch": "capability-normal"},
+        )
+
+        enriched = ingest_artifacts(result_obj, base_dir=base)
+
+        assert enriched.orchestration_checks["dispatch_count"] == 0
+        assert enriched.orchestration_checks["no_orchestration"] is True
+        assert enriched.orchestration_checks["process_penalty_total"] > 0
+        assert "no orchestration" in enriched.orchestration_checks["process_penalty_reasons"]
+        assert enriched.score_numeric == 0.0
+        assert enriched.score == "fail"
+
     def test_process_penalty_lowers_numeric_score_without_flipping_pass(self, tmp_path):
         from eval_harness import ingest_artifacts
 
