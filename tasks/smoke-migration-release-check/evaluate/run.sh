@@ -28,7 +28,7 @@ assert 'internal only' not in text
 '''
 res=subprocess.run([sys.executable,'-c',code],text=True,capture_output=True)
 required = {
- 'RESEARCH.md':['release_policy','preserve'],
+ 'RESEARCH.md':['release_policy'],
  'PLAN.md':['plan'],
  'VERIFY.md':['verify'],
  'REVIEW.md':['review'],
@@ -37,7 +37,10 @@ required = {
 checks={'migration_passes':res.returncode==0,'source_exists':Path('migration.py').exists(),'release_notes_exists':Path('release_notes.md').exists()}
 for name, words in required.items():
     text=Path(name).read_text(errors='replace').lower() if Path(name).exists() else ''
-    checks[f'{name}_evidence']=bool(text) and all(w.lower() in text for w in words)
+    ok = bool(text) and all(w.lower() in text for w in words)
+    if name == 'RESEARCH.md' and text:
+        ok = ok and any(word in text for word in ('preserve', 'preserved', 'preservation'))
+    checks[f'{name}_evidence']=ok
 score='pass' if all(checks.values()) else 'fail'
 details=res.stderr or res.stdout
 print(json.dumps({'score':score,'checks':checks,'details':details}, indent=2))

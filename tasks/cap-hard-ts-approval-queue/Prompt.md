@@ -1,5 +1,6 @@
 # Run Prompt
 Read `PRD.md`, inspect the fixture and KB files, and finish the TypeScript approval queue.
+Dispatch and proceed until finished.
 
 Requirements:
 - make the provided Node tests pass

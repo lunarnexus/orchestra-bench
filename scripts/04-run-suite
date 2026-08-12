@@ -6,7 +6,7 @@ ROOT="$SCRIPT_DIR/.."
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <suite> [--auto] [--no-orch-on]
+Usage: $(basename "$0") <suite> [--auto] [--no-orchestra]
        $(basename "$0") --list
 
 Run every task in a suite with scripts/02-open-pi <task-id> --auto, grade each
@@ -14,7 +14,7 @@ run, then print the summary. This is the default dogfood suite flow.
 
 Options:
   --auto          Run each task with 02-open-pi --auto before grading (default)
-  --no-orch-on    Pass --no-orch-on to 02-open-pi for baseline/no-Orchestra runs
+  --no-orchestra  Pass --no-orchestra to 02-open-pi for baseline/no-Orchestra runs
 
 Suites:
   smoke
@@ -26,7 +26,7 @@ Examples:
   scripts/04-run-suite --list
   scripts/04-run-suite smoke
   scripts/04-run-suite role-focused --auto
-  scripts/04-run-suite role-focused --auto --no-orch-on
+  scripts/04-run-suite role-focused --auto --no-orchestra
 EOF
 }
 
@@ -80,11 +80,11 @@ if [ -z "$suite" ]; then usage; exit 1; fi
 shift || true
 
 run_auto=true
-no_orch_on=false
+no_orchestra=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto) run_auto=true; shift ;;
-    --no-orch-on) no_orch_on=true; shift ;;
+    --no-orchestra) no_orchestra=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[bench] unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -111,8 +111,8 @@ for task_id in "${task_ids[@]}"; do
   echo "=== $suite / $task_id ==="
   if $run_auto; then
     open_pi_args=("$task_id" --auto)
-    if $no_orch_on; then
-      open_pi_args+=(--no-orch-on)
+    if $no_orchestra; then
+      open_pi_args+=(--no-orchestra)
     fi
     if ! "$ROOT/scripts/02-open-pi" "${open_pi_args[@]}"; then
       echo "[bench] auto run failed: $task_id" >&2

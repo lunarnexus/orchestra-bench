@@ -8,7 +8,7 @@ CONTAINER_NAME="orchestra-bench-runner"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <task-id> [--auto] [--no-orch-on]
+Usage: $(basename "$0") <task-id> [--auto] [--no-orchestra]
        $(basename "$0") --list
        $(basename "$0") config
 
@@ -22,7 +22,7 @@ target Orchestra role.
 
 Commands:
   --auto       Run Pi with Prompt.md in non-interactive print mode and exit
-  --no-orch-on Skip the automatic /orch on preflight for baseline/debug runs
+  --no-orchestra Skip the automatic /orch on preflight for baseline/debug runs
   --list   List tasks grouped by suite/role
   config   Open Pi's package/resource config TUI inside the benchmark container
 
@@ -121,7 +121,7 @@ shift || true
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto) auto=true; shift ;;
-    --no-orch-on) auto_orch_on=false; shift ;;
+    --no-orchestra) auto_orch_on=false; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[bench] unexpected argument: $1" >&2; usage; exit 1 ;;
   esac
@@ -186,9 +186,13 @@ echo "[bench] grade:  scripts/03-collect-results $task_id"
 role_instruction=""
 if [ -n "$target_role" ]; then
   role_instruction="This is a role-focused benchmark for the $target_role role. If Orchestra is enabled, keep this Pi session as the parent/coordinator and dispatch to the $target_role role to do the task. If Orchestra is unavailable or disabled, complete the task directly."
-elif [ "$family" = "capability" ] && [ -n "$expected_workflow" ]; then
+elif [ -n "$expected_workflow" ]; then
   expected_workflow_words="$(printf '%s' "$expected_workflow" | sed 's/,/, /g')"
-  role_instruction="This is a capability benchmark for Orchestra workflow behavior. First use /orch on. Then keep this Pi session as the parent/coordinator and dispatch to $expected_workflow_words for scoped planning, research, implementation, verification, review, and appsec work as appropriate. Integrate worker results before finalizing. If Orchestra is unavailable or disabled, complete the task directly and say so."
+  if [ "$family" = "capability" ]; then
+    role_instruction="This is a capability benchmark for Orchestra workflow behavior. First use /orch on. Then keep this Pi session as the parent/coordinator and dispatch to $expected_workflow_words for scoped planning, research, implementation, verification, review, and appsec work as appropriate. Integrate worker results before finalizing. If Orchestra is unavailable or disabled, complete the task directly and say so."
+  else
+    role_instruction="This task expects Orchestra workflow behavior. First use /orch on. Then keep this Pi session as the parent/coordinator and dispatch to $expected_workflow_words for scoped planning, research, implementation, verification, review, and appsec work as appropriate. Integrate worker results before finalizing. If Orchestra is unavailable or disabled, complete the task directly and say so."
+  fi
 fi
 
 if $auto; then

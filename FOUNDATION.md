@@ -91,7 +91,7 @@ Keep support for:
 - model and catalog provenance
 - Orchestra on/off comparisons
 - comparison across catalog / prompt / skill changes
-- baseline/no-Orchestra suite runs with `04-run-suite --no-orch-on`
+- baseline/no-Orchestra suite runs with `04-run-suite --no-orchestra`
 
 ### 10. Task material should borrow from SaaSBench
 Task structure and benchmark wisdom should be borrowed from SaaSBench where useful:

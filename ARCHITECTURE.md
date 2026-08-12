@@ -103,7 +103,7 @@ Keep the operator surface simple, but with clear semantics:
 - `scripts/02-open-pi <task-id> --auto` uses the same prep path, runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` non-interactively and exits
 - role-focused tasks keep the Pi session as the parent/coordinator and ask it to dispatch the target role through Orchestra when Orchestra is enabled; the harness records `target_role` separately instead of running Pi as the worker role
 - `scripts/03-collect-results` grades all prepared/ungraded runs idempotently
-- `scripts/04-run-suite <suite>` runs each suite task through `02-open-pi --auto`, then grades it; `--no-orch-on` passes through for baseline/no-Orchestra suite runs
+- `scripts/04-run-suite <suite>` runs each suite task through `02-open-pi --auto`, then grades it; `--no-orchestra` passes through for baseline/no-Orchestra suite runs
 
 ## Operator flow
 
@@ -224,7 +224,7 @@ scripts/03-collect-results
 scripts/05-results run <run-id>
 ```
 
-`--auto` must use the same preparation path as interactive runs. By default it first runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` inside the per-run workdir. This proves the operator flow, orchestrator-skill loading, Pi session capture, grading, token capture, timing, and result display against the actual benchmark path. Use `--no-orch-on` only for intentional baseline/debug runs.
+`--auto` must use the same preparation path as interactive runs. By default it first runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` inside the per-run workdir. This proves the operator flow, orchestrator-skill loading, Pi session capture, grading, token capture, timing, and result display against the actual benchmark path. Use `--no-orchestra` only for intentional baseline/debug runs.
 
 ### Verification expectations
 When dogfooding a run, verify:

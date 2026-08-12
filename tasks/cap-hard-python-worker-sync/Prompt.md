@@ -1,5 +1,6 @@
 # Run Prompt
 Read `PRD.md`, inspect the fixture and KB files, and finish the Python sync workspace.
+Dispatch and proceed until finished.
 
 Requirements:
 - make the provided Python tests pass

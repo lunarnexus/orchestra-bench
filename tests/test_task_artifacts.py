@@ -51,6 +51,14 @@ class TestTaskArtifactPresence:
         prompt = (task_dir / "Prompt.md").read_text().strip()
         assert len(prompt) > 30, f"{task_dir.name}/Prompt.md is too short — should contain agent instructions"
 
+    @pytest.mark.parametrize("task_dir", _task_dirs(), ids=lambda d: d.name)
+    def test_prompt_mentions_dispatch_early(self, task_dir):
+        prompt_lines = (task_dir / "Prompt.md").read_text().splitlines()
+        early_text = "\n".join(prompt_lines[:6]).lower()
+        assert "dispatch" in early_text, (
+            f"{task_dir.name}/Prompt.md should mention dispatch near the top of the initial prompt"
+        )
+
 
 # ── 2. Scripts reference Prompt.md not task.md ────────────────────
 

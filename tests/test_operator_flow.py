@@ -259,7 +259,7 @@ class TestOpenPiScript:
         )
         assert result.returncode in (0, 1, 2)
         assert "--auto" in result.stdout
-        assert "--no-orch-on" in result.stdout
+        assert "--no-orchestra" in result.stdout
         assert "--list" in result.stdout
         assert "config" in result.stdout
 
@@ -483,7 +483,7 @@ class TestOpenPiInteractiveSession:
         before = {p for p in results_dir.glob("*-smoke-public-admin-handoff")}
         try:
             result = sp.run(
-                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke-public-admin-handoff", "--auto", "--no-orch-on"],
+                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke-public-admin-handoff", "--auto", "--no-orchestra"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -611,6 +611,60 @@ class TestOpenPiInteractiveSession:
         assert "dispatch to planner, researcher, builder, verifier, reviewer, appsec" in log
         assert "BENCH_ROLE_INSTRUCTION" in log
 
+    def test_smoke_auto_prompts_expected_workflow_when_declared(self, tmp_path):
+        import os
+        import shutil
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        docker_log = tmp_path / "docker.log"
+
+        docker = bin_dir / "docker"
+        docker.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\n"
+            "case \"$1\" in\n"
+            "  inspect) printf 'true\\n'; exit 0 ;;\n"
+            "  exec) exit 0 ;;\n"
+            "  *) exit 0 ;;\n"
+            "esac\n"
+        )
+        docker.chmod(0o755)
+
+        env = os.environ.copy()
+        env.update({
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "DOCKER_LOG": str(docker_log),
+        })
+
+        task_id = "smoke-migration-release-check"
+        results_dir = _REPO_ROOT / "results"
+        before = {p for p in results_dir.glob(f"*-{task_id}")}
+        try:
+            result = sp.run(
+                [_REPO_ROOT / "scripts" / "02-open-pi", task_id, "--auto"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            created = [p for p in results_dir.glob(f"*-{task_id}") if p not in before]
+            assert created, "expected 02-open-pi to create a run metadata dir"
+            cfg = json.loads((created[0] / ".bench_run.json").read_text())
+        finally:
+            for p in results_dir.glob(f"*-{task_id}"):
+                if p not in before:
+                    shutil.rmtree(p, ignore_errors=True)
+
+        assert result.returncode == 0
+        assert cfg["orchestra"] is True
+        log = docker_log.read_text()
+        assert '-p "/orch on"' in log
+        assert "dispatch to planner, researcher, builder, verifier, reviewer, appsec" in log
+        assert "This task expects Orchestra workflow behavior" in log
+        assert "BENCH_ROLE_INSTRUCTION" in log
+
 
 class TestCollectResultsUsage:
     """03-collect-results docs should match grading-all behavior."""
@@ -656,7 +710,7 @@ class TestRunSuiteScript:
         assert result.returncode in (0, 1, 2)
         assert "--auto" in result.stdout
         assert "--collect-only" not in result.stdout
-        assert "--no-orch-on" in result.stdout
+        assert "--no-orchestra" in result.stdout
         assert "default dogfood suite flow" in result.stdout.lower()
 
     def test_script_runs_open_pi_auto_before_collecting(self):
@@ -671,12 +725,12 @@ class TestRunSuiteScript:
         assert "--collect-only" not in script
         assert "run_auto=false" not in script
 
-    def test_script_supports_no_orch_on_passthrough(self):
+    def test_script_supports_no_orchestra_passthrough(self):
         script = (_REPO_ROOT / "scripts" / "04-run-suite").read_text()
-        assert "--no-orch-on" in script
-        assert "no_orch_on=false" in script
-        assert "no_orch_on=true" in script
-        assert "open_pi_args+=(--no-orch-on)" in script
+        assert "--no-orchestra" in script
+        assert "no_orchestra=false" in script
+        assert "no_orchestra=true" in script
+        assert "open_pi_args+=(--no-orchestra)" in script
 
     def test_script_lists_current_public_suites(self):
         script = (_REPO_ROOT / "scripts" / "04-run-suite").read_text()

@@ -1,5 +1,6 @@
 # Run Prompt
 Read `PRD.md`, inspect the fixture, and finish the Node inventory API.
+Dispatch and proceed until finished.
 
 Requirements:
 - make the provided tests pass
