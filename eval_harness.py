@@ -5,6 +5,7 @@ from __future__ import annotations
 import json as _json
 import shlex
 import shutil
+import statistics as _stats
 import subprocess as sp
 import sys
 import time
@@ -56,6 +57,25 @@ def _strip_quotes(s: str) -> str:
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
         return s[1:-1]
     return s
+
+
+def _parse_json_object_from_stdout(stdout: str) -> dict[str, object]:
+    """Best-effort parse of a JSON object embedded in stdout."""
+    text = (stdout or "").strip()
+    if not text:
+        return {}
+
+    decoder = _json.JSONDecoder()
+    for start_idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text[start_idx:])
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
 
 
 def load_agent_catalog(catalog_path: Path | str) -> dict:
@@ -431,32 +451,53 @@ def grade(
     task_meta = task_meta or load_task(task_id)
     evaluator_script = task_meta.evaluator  # e.g. "evaluate/run.sh"
 
+    eval_tmp = f"/tmp/bench-eval-{run_id}-{task_id}"
+    eval_dir = f"{eval_tmp}/evaluate"
     bench_env: dict[str, str] = {
         "BENCH_RUN_ID": run_id,
         "BENCH_TASK_ID": task_id,
+        "BENCH_REPO_ROOT": eval_dir,
+        "BENCH_TASKS": str(_REPO_ROOT / TASKS_DIR),
     }
 
     evaluator_host = _REPO_ROOT / TASKS_DIR / task_id / evaluator_script
     if not evaluator_host.is_file():
         raise FileNotFoundError(f"evaluator not found: {evaluator_host}")
 
-    eval_tmp = f"/tmp/bench-eval-{run_id}-{task_id}"
     _docker_exec("rm", "-rf", eval_tmp, env=bench_env)
-    _docker_exec("mkdir", "-p", f"{eval_tmp}/evaluate", env=bench_env)
-    cp_proc = sp.run(
-        ["docker", "cp", str(evaluator_host), f"{CONTAINER_NAME}:{eval_tmp}/evaluate/run.sh"],
-        capture_output=True,
-        text=True,
-    )
-    if cp_proc.returncode != 0:
-        raise RuntimeError(cp_proc.stderr.strip() or cp_proc.stdout.strip() or "docker cp evaluator failed")
+    _docker_exec("mkdir", "-p", eval_dir, env=bench_env)
+
+    support_files = {
+        evaluator_host: f"{eval_dir}/run.sh",
+        _REPO_ROOT / "capability_helpers.py": f"{eval_dir}/capability_helpers.py",
+        _REPO_ROOT / "rubric_helpers.py": f"{eval_dir}/rubric_helpers.py",
+    }
+    for host_path, container_path in support_files.items():
+        if not host_path.is_file():
+            raise FileNotFoundError(f"evaluator support file not found: {host_path}")
+        cp_proc = sp.run(
+            ["docker", "cp", str(host_path), f"{CONTAINER_NAME}:{container_path}"],
+            capture_output=True,
+            text=True,
+        )
+        if cp_proc.returncode != 0:
+            raise RuntimeError(
+                cp_proc.stderr.strip()
+                or cp_proc.stdout.strip()
+                or f"docker cp failed: {host_path.name}"
+            )
 
     # Remove stale result.json before evaluator runs. If the evaluator prints
     # JSON instead of writing a file, fallback parsing must use this run's
     # stdout rather than a previous result file.
     pre_result_dir = Path(RESULTS_DIR).resolve() / f"{run_id}-{task_id}"
     pre_result_path = pre_result_dir / "result.json"
+    previous_result: TaskResult | None = None
     if pre_result_path.exists():
+        try:
+            previous_result = TaskResult.from_json(pre_result_path)
+        except Exception:
+            previous_result = None
         pre_result_path.unlink()
 
     eval_cmd = (
@@ -482,22 +523,24 @@ def grade(
         # Fallback — construct from evaluator output. Evaluators commonly print
         # JSON to stdout instead of writing result.json directly.
         stdout = result_proc.stdout.strip()
-        parsed: dict[str, object] = {}
-        try:
-            maybe = _json.loads(stdout) if stdout else {}
-            if isinstance(maybe, dict):
-                parsed = maybe
-        except Exception:
-            parsed = {}
+        parsed = _parse_json_object_from_stdout(stdout)
 
         score = str(parsed.get("score") or ("pass" if result_proc.returncode == 0 else "fail"))
         checks = parsed.get("checks") if isinstance(parsed.get("checks"), dict) else {}
+        score_numeric = parsed.get("score_numeric")
+        rubric = parsed.get("rubric") if isinstance(parsed.get("rubric"), dict) else {}
+        orchestration_checks = parsed.get("orchestration_checks") if isinstance(parsed.get("orchestration_checks"), dict) else {}
+        efficiency = parsed.get("efficiency") if isinstance(parsed.get("efficiency"), dict) else {}
         details = parsed.get("details") if isinstance(parsed.get("details"), str) else stdout[-500:]
         task_result = TaskResult(
             task_id=task_id,
             run_id=run_id,
             score=score,
             checks=checks,
+            score_numeric=float(score_numeric) if isinstance(score_numeric, (int, float)) else None,
+            rubric=rubric,
+            orchestration_checks=orchestration_checks,
+            efficiency=efficiency,
             details=details,
         )
 
@@ -515,15 +558,29 @@ def grade(
     # Enrich with operator run metadata (.bench_run.json) if present
     _enrich_result_with_bench_run(task_result)
 
+    run_meta = task_result.run_meta if isinstance(task_result.run_meta, dict) else {}
+    started_epoch = run_meta.get("started_epoch")
+    completed_epoch = run_meta.get("completed_epoch")
+    previous_elapsed = (
+        previous_result.elapsed_seconds
+        if previous_result is not None and previous_result.elapsed_seconds is not None
+        else None
+    )
+
     if task_result.elapsed_seconds is None:
-        started_epoch = task_result.run_meta.get("started_epoch") if isinstance(task_result.run_meta, dict) else None
-        if isinstance(started_epoch, (int, float)) and started_epoch > 0:
-            task_result.elapsed_seconds = max(0.0, time.time() - float(started_epoch))
+        if isinstance(started_epoch, (int, float)) and isinstance(completed_epoch, (int, float)):
+            task_result.elapsed_seconds = max(0.0, float(completed_epoch) - float(started_epoch))
+        elif previous_elapsed is not None:
+            task_result.elapsed_seconds = previous_elapsed
 
     # Best-effort artifact capture: Pi sessions, token totals, Orchestra traces.
     # Missing artifacts are expected when Orchestra was not used.
     collect_run_artifacts(task_id, run_id)
     ingest_artifacts(task_result)
+
+    if task_result.elapsed_seconds is None:
+        if isinstance(started_epoch, (int, float)) and started_epoch > 0:
+            task_result.elapsed_seconds = max(0.0, time.time() - float(started_epoch))
 
     return task_result
 
@@ -631,7 +688,9 @@ def ingest_artifacts(
             print(f"[bench] warning: failed to parse artifact manifest from {manifest_file}: {exc}",
                   file=sys.stderr)
 
-    # Timing artifact (elapsed_seconds) — ingested if present and not already set
+    # Timing artifact (elapsed_seconds) — ingested if present and not already set.
+    # If no timing artifact exists, fall back to the operator run start time before
+    # efficiency is computed so real Pi runs still get elapsed comparisons.
     if result.elapsed_seconds is None:
         timing_file = artifacts_dir / "timing.json"
         if timing_file.is_file():
@@ -645,6 +704,29 @@ def ingest_artifacts(
                 print(f"[bench] warning: failed to parse timing from {timing_file}: {exc}",
                       file=sys.stderr)
 
+    if result.elapsed_seconds is None:
+        run_meta = result.run_meta if isinstance(result.run_meta, dict) else {}
+        started_epoch = run_meta.get("started_epoch")
+        if isinstance(started_epoch, (int, float)) and started_epoch > 0:
+            result.elapsed_seconds = max(0.0, time.time() - float(started_epoch))
+
+    # Orchestra process diagnostics — best-effort, non-fatal.
+    try:
+        orch_checks = extract_orchestration_checks(result, base_dir=base)
+        if orch_checks:
+            result.orchestration_checks.update(orch_checks)
+    except Exception as exc:
+        print(f"[bench] warning: failed to extract orchestration checks: {exc}",
+              file=sys.stderr)
+
+    try:
+        if not result.efficiency:
+            result.efficiency = compare_efficiency(result, base)
+    except Exception as exc:
+        print(f"[bench] warning: failed to compare efficiency: {exc}",
+              file=sys.stderr)
+
+    apply_process_penalties(result)
     return result
 
 
@@ -691,6 +773,310 @@ def _enrich_result_with_bench_run(
 # ── Collect / summarize results ──────────────────────────────────────
 
 
+# ── Orchestra process artifact extraction (Slice 3) ───────────────
+
+
+def _parse_pi_session_dispatches(pi_sessions_dir: Path) -> list[dict[str, object]]:
+    """Extract orch_dispatch tool calls from Pi session JSONL files.
+
+    Returns a list of dicts with keys: role, goal, task_label.
+    Missing or malformed sessions are silently skipped.
+    """
+    dispatches: list[dict[str, object]] = []
+    if not pi_sessions_dir.is_dir():
+        return dispatches
+
+    for jsonl_file in sorted(pi_sessions_dir.glob("*.jsonl")):
+        try:
+            text = jsonl_file.read_text(errors="replace")
+        except Exception:
+            continue
+
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = _json.loads(line)
+            except (ValueError, TypeError):
+                continue
+
+            msg = event.get("message")
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                tc_type = item.get("type") == "toolCall"
+                tool_name = item.get("name", "")
+                arguments = item.get("arguments")
+                if (tc_type and tool_name == "orch_dispatch" and isinstance(arguments, dict)):
+                    dispatches.append({
+                        "role": str(arguments.get("role", "unknown")),
+                        "goal": str(arguments.get("goal", "")),
+                        "task_label": str(arguments.get("taskLabel", arguments.get("task_label", ""))),
+                    })
+
+    return dispatches
+
+
+def _parse_orchestra_logs(orchestra_debug_dir: Path) -> list[dict[str, object]]:
+    """Extract structured events from Orchestra debug log JSONL files.
+
+    Returns a flat list of event dicts. Missing or malformed logs are skipped.
+    """
+    events: list[dict[str, object]] = []
+    if not orchestra_debug_dir.is_dir():
+        return events
+
+    logs_dir = orchestra_debug_dir / "logs"
+    if not logs_dir.is_dir():
+        # Try direct .jsonl files in the debug dir itself
+        for jsonl_file in sorted(orchestra_debug_dir.glob("*.jsonl")):
+            _read_jsonl_events(jsonl_file, events)
+        return events
+
+    for jsonl_file in sorted(logs_dir.glob("*.jsonl")):
+        _read_jsonl_events(jsonl_file, events)
+    return events
+
+
+def _session_id_variants(session_id: object) -> set[str]:
+    """Return comparable forms for Pi parent/worker session ids."""
+    raw = str(session_id or "").strip()
+    if not raw:
+        return set()
+    variants = {raw}
+    if raw.startswith("pi:"):
+        variants.add(raw[3:])
+    else:
+        variants.add(f"pi:{raw}")
+    return variants
+
+
+
+def _load_orchestration_session_ids(
+    result: TaskResult,
+    artifacts_dir: Path,
+) -> set[str]:
+    """Load parent/worker Pi session ids for the current run."""
+    session_ids: set[str] = set()
+
+    run_meta = result.run_meta if isinstance(result.run_meta, dict) else {}
+    raw_ids = run_meta.get("pi_session_ids")
+    if isinstance(raw_ids, list):
+        for session_id in raw_ids:
+            session_ids.update(_session_id_variants(session_id))
+
+    if session_ids:
+        return session_ids
+
+    sessions_file = artifacts_dir / "pi-sessions.json"
+    if sessions_file.is_file():
+        try:
+            data = _json.loads(sessions_file.read_text())
+            raw_ids = data.get("session_ids") if isinstance(data, dict) else None
+            if isinstance(raw_ids, list):
+                for session_id in raw_ids:
+                    session_ids.update(_session_id_variants(session_id))
+        except Exception:
+            pass
+
+    if session_ids:
+        return session_ids
+
+    manifest_file = artifacts_dir / "manifest.json"
+    if manifest_file.is_file():
+        try:
+            data = _json.loads(manifest_file.read_text())
+            sessions = data.get("pi_sessions") if isinstance(data, dict) else None
+            if isinstance(sessions, list):
+                for session in sessions:
+                    if isinstance(session, dict):
+                        session_ids.update(_session_id_variants(session.get("session_id")))
+        except Exception:
+            pass
+
+    return session_ids
+
+
+
+def _filter_orchestra_events_for_run(
+    events: list[dict[str, object]],
+    session_ids: set[str],
+) -> list[dict[str, object]]:
+    """Prefer events linked to the current parent/worker Pi sessions."""
+    if not events or not session_ids:
+        return events
+
+    relevant_run_ids: set[str] = set()
+    for event in events:
+        orchestrator_session_id = str(event.get("orchestrator_session_id", "")).strip()
+        worker_session_id = str(event.get("worker_session_id", "")).strip()
+        if orchestrator_session_id in session_ids or worker_session_id in session_ids:
+            run_id = str(event.get("run_id", "")).strip()
+            if run_id:
+                relevant_run_ids.add(run_id)
+
+    if not relevant_run_ids:
+        return events
+
+    filtered = []
+    for event in events:
+        run_id = str(event.get("run_id", "")).strip()
+        if run_id in relevant_run_ids:
+            filtered.append(event)
+    return filtered
+
+
+
+def _read_jsonl_events(jsonl_path: Path, out: list[dict[str, object]]) -> None:
+    """Read one JSONL file and append valid event dicts to *out*."""
+    try:
+        text = jsonl_path.read_text(errors="replace")
+    except Exception:
+        return
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = _json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(event, dict) and "event" in event:
+            out.append(event)
+
+
+def extract_orchestration_checks(
+    result: TaskResult,
+    base_dir: Path | str | None = None,
+) -> dict[str, object]:
+    """Extract orchestration process diagnostics from artifacts.
+
+    Best-effort extraction — missing or malformed artifact files never cause
+    an error. Returns a dict suitable for ``result.orchestration_checks`` with
+    keys:
+
+      - target_role_dispatched (bool): whether the expected role was dispatched
+      - worker_completed (bool): at least one worker exited successfully
+      - dispatch_count (int): total number of orch_dispatch calls found
+      - roles_dispatched (list[str]): unique roles that were dispatched
+      - timeouts (int): count of timeout events in Orchestra logs
+      - retries (int): count of retry events in Orchestra logs
+      - scope_blockers (int): count of scope.blocked events
+      - same_slice_redispatches (int): dispatches with duplicate goals
+      - premature_completion (bool): dispatched but result suggests no integration
+      - missing_expected_role (bool): target role expected but not found anywhere
+    """
+    base = Path(base_dir or RESULTS_DIR).resolve()
+    run_dir = base / f"{result.run_id}-{result.task_id}"
+    if not run_dir.is_dir():
+        return {}
+
+    artifacts_dir = run_dir / "artifacts"
+    if not artifacts_dir.is_dir():
+        return {}
+
+    checks: dict[str, object] = {}
+
+    # ── 1. Parse Pi session dispatches ───────────────────────
+    pi_sessions_dir = artifacts_dir / "pi-sessions"
+    dispatches = _parse_pi_session_dispatches(pi_sessions_dir)
+
+    roles_dispatched: list[str] = []
+    goals_seen: dict[str, int] = {}
+    for d in dispatches:
+        role = str(d.get("role", "unknown"))
+        if role not in roles_dispatched:
+            roles_dispatched.append(role)
+        goal = str(d.get("goal", "")).strip()
+        goals_seen[goal] = goals_seen.get(goal, 0) + 1
+
+    checks["dispatch_count"] = len(dispatches)
+    checks["roles_dispatched"] = roles_dispatched
+
+    # Same-slice redispatches: goals dispatched more than once
+    same_slice_redispatches = sum(v - 1 for v in goals_seen.values() if v > 1)
+    checks["same_slice_redispatches"] = max(0, same_slice_redispatches)
+
+    # ── 2. Parse Orchestra log events ───────────────────────
+    orchestra_debug_dir = artifacts_dir / "orchestra-debug"
+    orch_events = _parse_orchestra_logs(orchestra_debug_dir)
+    orchestration_session_ids = _load_orchestration_session_ids(result, artifacts_dir)
+    orch_events = _filter_orchestra_events_for_run(orch_events, orchestration_session_ids)
+
+    timeouts: int = 0
+    retries: int = 0
+    scope_blockers: int = 0
+    worker_exits_ok: bool = False
+    worker_started_count: int = 0
+    worker_exit_count: int = 0
+    roles_from_logs: list[str] = []
+
+    for event in orch_events:
+        evt_type = str(event.get("event", ""))
+        if evt_type == "worker.timeout":
+            timeouts += 1
+        elif evt_type == "retry.requested":
+            retries += 1
+        elif evt_type == "scope.blocked":
+            scope_blockers += 1
+        elif evt_type == "worker.started":
+            worker_started_count += 1
+            role = str(event.get("role", ""))
+            if role and role not in roles_from_logs:
+                roles_from_logs.append(role)
+        elif evt_type == "worker.exited":
+            worker_exit_count += 1
+            exit_code = event.get("exit_code")
+            if isinstance(exit_code, (int, float)) and exit_code == 0:
+                worker_exits_ok = True
+        elif evt_type == "run.created":
+            role = str(event.get("role", ""))
+            if role and role not in roles_from_logs:
+                roles_from_logs.append(role)
+
+    checks["timeouts"] = timeouts
+    checks["retries"] = retries
+    checks["scope_blockers"] = scope_blockers
+    checks["worker_completed"] = worker_exits_ok
+    checks["worker_running_without_exit"] = worker_started_count > worker_exit_count
+    has_orchestra_log_evidence = bool(orch_events)
+
+    # ── 3. Target role dispatched check ─────────────────────
+    target_role = str(result.run_meta.get("target_role", "") or "").lower().strip()
+    all_dispatch_roles = set(r.lower() for r in roles_dispatched)
+    all_log_roles = set(r.lower() for r in roles_from_logs)
+
+    if target_role:
+        checks["target_role_dispatched"] = (
+            target_role in all_dispatch_roles or target_role in all_log_roles
+        )
+        # Missing expected role: no evidence of the target at all
+        checks["missing_expected_role"] = not checks["target_role_dispatched"]
+    else:
+        checks["target_role_dispatched"] = len(dispatches) > 0 or len(roles_from_logs) > 0
+        checks["missing_expected_role"] = False
+
+    # ── 4. Premature completion / fallback detection ───────
+    has_answer = result.checks.get("answer_exists") is True
+    checks["fallback_answer_after_dispatch"] = (
+        bool(dispatches)
+        and has_answer
+        and not worker_exits_ok
+        and has_orchestra_log_evidence
+    )
+    checks["premature_completion"] = bool(dispatches) and not has_answer
+
+    return checks
+
+
+# ── Collect / summarize results ───────────────────────────────────────
 def collect_results(
     results_dir: Path | str | None = None,
 ) -> list[TaskResult]:
@@ -1235,6 +1621,323 @@ def print_comparison(
             print()
 
     return comparison
+
+
+# ── Historical efficiency helpers ─────────────────────────────────
+def _get_total_tokens(tokens: dict[str, object] | None) -> int | None:
+    """Extract total token count from a tokens dict.
+
+    Prefers 'total', falls back to 'total_tokens'. Returns None if absent.
+    """
+    if not tokens or not isinstance(tokens, dict):
+        return None
+    for key in ("total", "total_tokens"):
+        val = tokens.get(key)
+        if isinstance(val, (int, float)) and val > 0:
+            return int(val)
+    return None
+
+
+def _classify_position(current: float, mn: float, median: float, mx: float) -> str:
+    """Classify where *current* sits relative to min/median/max history.
+
+    Returns one of: new-low, low, normal, high, new-high.
+    When all values are equal → 'normal'.
+    """
+    if mn == mx:
+        return "normal"
+
+    if current < mn:
+        return "new-low"
+    if current > mx:
+        return "new-high"
+
+    # Within [min, max]: classify by which side of median and how far
+    lower_mid = (mn + median) / 2
+    upper_mid = (median + mx) / 2
+
+    if current <= lower_mid:
+        return "low"
+    if current >= upper_mid:
+        return "high"
+    return "normal"
+
+
+def compare_efficiency(
+    result: TaskResult,
+    results_dir: Path | str | None = None,
+) -> dict[str, object]:
+    """Compare a run against prior comparable results for the same task.
+
+    Returns an efficiency comparison dict with token and elapsed stats:
+
+    .. code-block:: python
+
+        {
+            "tokens": { "min": 800, "median": 1200, "max": 2000,
+                        "current": 950, "position": "low", "count": 3 },
+            "elapsed": { "min": 25.0, "median": 40.0, "max": 80.0,
+                         "current": 35.0, "position": "normal", "count": 3 },
+            # Optional — present only when ≥ 2 pass-only prior runs exist
+            "pass_only": { ...same shape... },
+        }
+
+    When fewer than 2 prior comparable runs exist for a metric, that metric
+    returns ``position: "insufficient-history"`` with empty stats.
+
+    The current run is excluded from history statistics (min/median/max).
+    Missing token or elapsed data in either the current run or historical runs
+    are handled gracefully — only runs with valid values contribute to each stat.
+    """
+    base = Path(results_dir or RESULTS_DIR).resolve()
+    task_id = result.task_id
+    run_id = result.run_id
+
+    # Gather all results for this task (including current)
+    all_results: list[TaskResult] = []
+    if base.is_dir():
+        for entry in sorted(base.iterdir()):
+            result_path = entry / "result.json"
+            if not result_path.is_file():
+                continue
+            try:
+                r = TaskResult.from_json(result_path)
+                if r.task_id == task_id:
+                    all_results.append(r)
+            except Exception:
+                pass
+
+    # Prior runs = everything except the current run
+    prior: list[TaskResult] = [
+        r for r in all_results if not (r.run_id == run_id and r.task_id == task_id)
+    ]
+
+    # Token values from history — only runs with real token totals (like pass-only)
+    hist_tokens: list[int] = []
+    for r in prior:
+        val = _get_total_tokens(r.tokens) if isinstance(r.tokens, dict) else None
+        if val is not None:
+            hist_tokens.append(val)
+
+    # Elapsed values from history (None kept as-is → excluded from stats but counted)
+    hist_elapsed: list[float] = [
+        r.elapsed_seconds for r in prior
+        if getattr(r, "elapsed_seconds", None) is not None
+    ]
+
+    # Current values
+    cur_token = _get_total_tokens(result.tokens) if isinstance(result.tokens, dict) else 0
+    cur_elapsed: float | None = (
+        result.elapsed_seconds if getattr(result, "elapsed_seconds", None) is not None else None
+    )
+
+    def _token_block(values: list[int], current: int | None) -> dict[str, object]:
+        if len(values) < 2:
+            return {
+                "min": None,
+                "median": None,
+                "max": None,
+                "current": current,
+                "position": "insufficient-history",
+                "count": len(values),
+            }
+        mn = min(values)
+        mx = max(values)
+        med = _stats.median(values)
+        pos = _classify_position(float(current or 0), float(mn), float(med), float(mx)) if current is not None else "insufficient-history"
+        return {
+            "min": mn,
+            "median": int(med) if isinstance(med, (int, float)) else med,
+            "max": mx,
+            "current": current,
+            "position": pos,
+            "count": len(values),
+        }
+
+    def _elapsed_block(values: list[float], current: float | None) -> dict[str, object]:
+        if len(values) < 2:
+            return {
+                "min": None,
+                "median": None,
+                "max": None,
+                "current": round(current, 2) if current is not None else None,
+                "position": "insufficient-history",
+                "count": len(values),
+            }
+        mn = min(values)
+        mx = max(values)
+        med = _stats.median(values)
+        pos = _classify_position(current or 0.0, float(mn), float(med), float(mx)) if current is not None else "insufficient-history"
+        return {
+            "min": round(mn, 2),
+            "median": round(med, 2),
+            "max": round(mx, 2),
+            "current": round(current, 2) if current is not None else None,
+            "position": pos,
+            "count": len(values),
+        }
+
+    out: dict[str, object] = {
+        "tokens": _token_block(hist_tokens, cur_token),
+        "elapsed": _elapsed_block(hist_elapsed, cur_elapsed),
+    }
+
+    # Pass-only history (when ≥ 2 prior pass runs exist)
+    pass_prior = [r for r in prior if r.is_pass()]
+    pass_tokens: list[int] = []
+    for r in pass_prior:
+        val = _get_total_tokens(r.tokens) if isinstance(r.tokens, dict) else None
+        if val is not None:
+            pass_tokens.append(val)
+    pass_elapsed: list[float] = [
+        r.elapsed_seconds for r in pass_prior
+        if getattr(r, "elapsed_seconds", None) is not None
+    ]
+
+    if len(pass_tokens) >= 2 or len(pass_elapsed) >= 2:
+        out["pass_only"] = {
+            "tokens": _token_block(pass_tokens, cur_token),
+            "elapsed": _elapsed_block(pass_elapsed, cur_elapsed),
+        }
+
+    return out
+
+
+def _efficiency_block_for_penalties(efficiency: dict[str, object] | None, metric: str) -> dict[str, object] | None:
+    """Pick the strongest available history block for process penalties."""
+    if not isinstance(efficiency, dict):
+        return None
+    pass_only = efficiency.get("pass_only")
+    if isinstance(pass_only, dict) and isinstance(pass_only.get(metric), dict):
+        return pass_only.get(metric)
+    block = efficiency.get(metric)
+    return block if isinstance(block, dict) else None
+
+
+def apply_process_penalties(result: TaskResult) -> TaskResult:
+    """Apply soft process penalties to score_numeric/rubric without changing pass/fail."""
+    if result.score_numeric is None:
+        return result
+    if (result.orchestration_checks or {}).get("process_penalty_applied") is True:
+        return result
+
+    penalties: list[tuple[str, float, str]] = []
+    orchestration_checks = result.orchestration_checks or {}
+
+    if orchestration_checks.get("missing_expected_role") is True:
+        penalties.append(("missing_expected_role", 0.10, "missing expected role"))
+    if orchestration_checks.get("premature_completion") is True:
+        penalties.append(("premature_completion", 0.10, "premature completion"))
+    if orchestration_checks.get("fallback_answer_after_dispatch") is True:
+        penalties.append(("fallback_answer_after_dispatch", 0.08, "fallback answer after dispatch"))
+    if orchestration_checks.get("worker_running_without_exit") is True:
+        penalties.append(("worker_running_without_exit", 0.08, "worker still running / no exit"))
+
+    for key, weight, label in (
+        ("timeouts", 0.04, "timeout"),
+        ("retries", 0.03, "retry"),
+    ):
+        value = orchestration_checks.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            count = int(value)
+            penalties.append((key, min(weight * count, weight * 3), f"{count} {label}{'' if count == 1 else 's'}"))
+
+    for metric in ("tokens", "elapsed"):
+        block = _efficiency_block_for_penalties(result.efficiency, metric)
+        if not isinstance(block, dict):
+            continue
+        position = str(block.get("position") or "")
+        if position == "high":
+            penalties.append((f"{metric}_high", 0.03, f"high {metric}"))
+        elif position == "new-high":
+            penalties.append((f"{metric}_new_high", 0.05, f"very high {metric}"))
+
+    total_penalty = round(min(sum(weight for _, weight, _ in penalties), 0.25), 4)
+    result.orchestration_checks["process_penalty_applied"] = True
+    result.orchestration_checks["process_penalty_total"] = total_penalty
+    result.orchestration_checks["process_penalty_reasons"] = [label for _, _, label in penalties]
+
+    if total_penalty <= 0:
+        return result
+
+    result.score_numeric = round(max(0.0, min(1.0, result.score_numeric - total_penalty)), 4)
+    result.rubric = dict(result.rubric or {})
+    result.rubric["process_penalties"] = {
+        "score": -total_penalty,
+        "max": 0.0,
+        "checks": {name: False for name, _, _ in penalties},
+        "details": [label for _, _, label in penalties],
+    }
+    return result
+
+
+def format_rubric_summary(rubric: dict[str, object] | None) -> str:
+    """Return a concise one-line rubric summary for reporting."""
+    if not isinstance(rubric, dict) or not rubric:
+        return "no rubric score"
+
+    parts: list[str] = []
+    for name, value in rubric.items():
+        if not isinstance(value, dict):
+            continue
+        score = value.get("score")
+        max_score = value.get("max")
+        if isinstance(score, (int, float)) and isinstance(max_score, (int, float)):
+            parts.append(f"{name}={score:.2f}/{max_score:.2f}")
+    return "; ".join(parts) if parts else "no rubric score"
+
+
+def orchestration_warnings(orchestration_checks: dict[str, object] | None) -> list[str]:
+    """Return human-readable orchestration warnings for notable issues."""
+    if not isinstance(orchestration_checks, dict) or not orchestration_checks:
+        return []
+
+    warnings: list[str] = []
+    if orchestration_checks.get("missing_expected_role") is True:
+        warnings.append("missing expected role")
+    if orchestration_checks.get("premature_completion") is True:
+        warnings.append("premature completion")
+    if orchestration_checks.get("fallback_answer_after_dispatch") is True:
+        warnings.append("fallback answer after dispatch")
+    if orchestration_checks.get("worker_running_without_exit") is True:
+        warnings.append("worker still running / no exit")
+
+    for key, singular, plural in (
+        ("timeouts", "timeout", "timeouts"),
+        ("retries", "retry", "retries"),
+        ("scope_blockers", "scope blocker", "scope blockers"),
+        ("same_slice_redispatches", "same-slice redispatch", "same-slice redispatches"),
+    ):
+        value = orchestration_checks.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            count = int(value)
+            label = singular if count == 1 else plural
+            warnings.append(f"{count} {label}")
+
+    return warnings
+
+
+def format_efficiency_summary(
+    result: TaskResult,
+    results_dir: Path | str | None = None,
+) -> list[str]:
+    """Return concise token/elapsed efficiency summary lines."""
+    efficiency = result.efficiency if isinstance(result.efficiency, dict) and result.efficiency else compare_efficiency(result, results_dir)
+    if not isinstance(efficiency, dict):
+        return []
+
+    lines: list[str] = []
+    for metric in ("tokens", "elapsed"):
+        block = efficiency.get(metric)
+        if not isinstance(block, dict):
+            continue
+        if block.get("position") == "insufficient-history":
+            continue
+        lines.append(
+            f"{metric} {block.get('position')} "
+            f"(current={block.get('current')}, min={block.get('min')}, median={block.get('median')}, max={block.get('max')}, n={block.get('count')})"
+        )
+    return lines
 
 
 # ── CLI entry (when run directly) ────────────────────────────────────

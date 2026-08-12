@@ -109,7 +109,7 @@ class TestBenchRunConfig:
             config_path = Path(td) / ".bench_run.json"
             expected = {
                 "run_id": "test-run-1",
-                "task_id": "smoke",
+                "task_id": "smoke-public-admin-handoff",
                 "model": "google/gemini-2.5-flash",
                 "orchestra": True,
                 "extra_skills": [],
@@ -126,7 +126,7 @@ class TestBenchRunConfig:
             config_path = Path(td) / ".bench_run.json"
             minimal = {
                 "run_id": "r1",
-                "task_id": "smoke",
+                "task_id": "smoke-public-admin-handoff",
                 "model": "",
                 "orchestra": None,
                 "extra_skills": [],
@@ -147,19 +147,19 @@ class TestRunMetadataEnrichment:
         from eval_harness import _enrich_result_with_bench_run
 
         # Simulate: the task-open flow wrote this into results/<run_id>-<task_id>/
-        result_dir = tmp_path / "results" / "r1-smoke"
+        result_dir = tmp_path / "results" / "r1-smoke-public-admin-handoff"
         result_dir.mkdir(parents=True)
         config_file = result_dir / ".bench_run.json"
         config_file.write_text(json.dumps({
             "run_id": "r1",
-            "task_id": "smoke",
+            "task_id": "smoke-public-admin-handoff",
             "model": "google/gemini-2.5-flash",
             "orchestra": True,
             "extra_skills": ["builder"],
             "notes": "first trial",
         }))
 
-        result = _make_result(run_id="r1", task_id="smoke")
+        result = _make_result(run_id="r1", task_id="smoke-public-admin-handoff")
         enriched = _enrich_result_with_bench_run(result, base_dir=tmp_path / "results")
 
         assert enriched.run_meta.get("model") == "google/gemini-2.5-flash"
@@ -172,10 +172,10 @@ class TestRunMetadataEnrichment:
         from eval_harness import _enrich_result_with_bench_run
 
         # Create empty results dir (no config file)
-        result_dir = tmp_path / "results" / "r2-smoke"
+        result_dir = tmp_path / "results" / "r2-smoke-public-admin-handoff"
         result_dir.mkdir(parents=True)
 
-        result = _make_result(run_id="r2", task_id="smoke")
+        result = _make_result(run_id="r2", task_id="smoke-public-admin-handoff")
         enriched = _enrich_result_with_bench_run(result, base_dir=tmp_path / "results")
 
         assert len(enriched.run_meta) == 0
@@ -262,6 +262,23 @@ class TestOpenPiScript:
         assert "--no-orch-on" in result.stdout
         assert "--list" in result.stdout
         assert "config" in result.stdout
+
+    def test_task_list_order_uses_current_public_suites(self):
+        script = (_REPO_ROOT / "scripts" / "02-open-pi").read_text()
+        assert "order = ['smoke', 'role-focused', 'capability-normal', 'capability-hard']" in script
+        assert "order = ['smoke', 'role-focused', 'capability']" not in script
+
+    def test_task_list_shows_current_capability_tasks(self):
+        result = sp.run(
+            [_REPO_ROOT / "scripts" / "02-open-pi", "--list"],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0
+        assert "[capability-normal]" in result.stdout
+        assert "[capability-hard]" in result.stdout
+        assert "cap-normal-fastapi-helpdesk" in result.stdout
+        assert "cap-hard-python-worker-sync" in result.stdout
+        assert "(no tasks yet)" not in result.stdout
 
 
 class TestBuildStartScript:
@@ -358,10 +375,10 @@ class TestOpenPiInteractiveSession:
         })
 
         results_dir = _REPO_ROOT / "results"
-        before = {p for p in results_dir.glob("*-smoke")}
+        before = {p for p in results_dir.glob("*-smoke-public-admin-handoff")}
         try:
             result = sp.run(
-                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke"],
+                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke-public-admin-handoff"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -369,7 +386,7 @@ class TestOpenPiInteractiveSession:
             )
         finally:
             import shutil
-            for p in results_dir.glob("*-smoke"):
+            for p in results_dir.glob("*-smoke-public-admin-handoff"):
                 if p not in before:
                     shutil.rmtree(p, ignore_errors=True)
 
@@ -411,10 +428,10 @@ class TestOpenPiInteractiveSession:
         })
 
         results_dir = _REPO_ROOT / "results"
-        before = {p for p in results_dir.glob("*-smoke")}
+        before = {p for p in results_dir.glob("*-smoke-public-admin-handoff")}
         try:
             result = sp.run(
-                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke", "--auto"],
+                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke-public-admin-handoff", "--auto"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -422,7 +439,7 @@ class TestOpenPiInteractiveSession:
             )
         finally:
             import shutil
-            for p in results_dir.glob("*-smoke"):
+            for p in results_dir.glob("*-smoke-public-admin-handoff"):
                 if p not in before:
                     shutil.rmtree(p, ignore_errors=True)
 
@@ -463,17 +480,17 @@ class TestOpenPiInteractiveSession:
         })
 
         results_dir = _REPO_ROOT / "results"
-        before = {p for p in results_dir.glob("*-smoke")}
+        before = {p for p in results_dir.glob("*-smoke-public-admin-handoff")}
         try:
             result = sp.run(
-                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke", "--auto", "--no-orch-on"],
+                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke-public-admin-handoff", "--auto", "--no-orch-on"],
                 env=env,
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
         finally:
-            for p in results_dir.glob("*-smoke"):
+            for p in results_dir.glob("*-smoke-public-admin-handoff"):
                 if p not in before:
                     shutil.rmtree(p, ignore_errors=True)
 
@@ -583,19 +600,51 @@ class TestRunSuiteScript:
         )
         assert result.returncode in (0, 1, 2)
         assert "--auto" in result.stdout
-        assert "--collect-only" in result.stdout
+        assert "--collect-only" not in result.stdout
+        assert "--no-orch-on" in result.stdout
         assert "default dogfood suite flow" in result.stdout.lower()
 
     def test_script_runs_open_pi_auto_before_collecting(self):
         script = (_REPO_ROOT / "scripts" / "04-run-suite").read_text()
-        assert '"$ROOT/scripts/02-open-pi" "$task_id" --auto' in script
+        assert 'open_pi_args=("$task_id" --auto)' in script
+        assert '"$ROOT/scripts/02-open-pi" "${open_pi_args[@]}"' in script
         assert '"$ROOT/scripts/03-collect-results" "$task_id"' in script
-        assert script.index('"$ROOT/scripts/02-open-pi" "$task_id" --auto') < script.index('"$ROOT/scripts/03-collect-results" "$task_id"')
+        assert script.index('"$ROOT/scripts/02-open-pi" "${open_pi_args[@]}"') < script.index('"$ROOT/scripts/03-collect-results" "$task_id"')
 
-    def test_script_supports_collect_only_for_existing_runs(self):
+    def test_script_does_not_keep_collect_only_mode(self):
         script = (_REPO_ROOT / "scripts" / "04-run-suite").read_text()
-        assert "--collect-only" in script
-        assert "run_auto=false" in script
+        assert "--collect-only" not in script
+        assert "run_auto=false" not in script
+
+    def test_script_supports_no_orch_on_passthrough(self):
+        script = (_REPO_ROOT / "scripts" / "04-run-suite").read_text()
+        assert "--no-orch-on" in script
+        assert "no_orch_on=false" in script
+        assert "no_orch_on=true" in script
+        assert "open_pi_args+=(--no-orch-on)" in script
+
+    def test_script_lists_current_public_suites(self):
+        script = (_REPO_ROOT / "scripts" / "04-run-suite").read_text()
+        assert "capability-normal" in script
+        assert "capability-hard" in script
+        assert "capability\n" not in script
+
+    def test_capability_normal_suite_is_no_longer_placeholder(self):
+        result = sp.run(
+            [_REPO_ROOT / "scripts" / "04-run-suite", "--list"],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0
+        assert "capability-normal  3 tasks" in result.stdout
+        assert "capability-hard    3 tasks" in result.stdout
+
+    def test_unknown_suite_still_fails(self):
+        result = sp.run(
+            [_REPO_ROOT / "scripts" / "04-run-suite", "capability"],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode != 0
+        assert "unknown suite: capability" in result.stderr
 
 
 class TestResultsScript:
@@ -627,7 +676,7 @@ class TestFullOperatorFlow:
 
         config = {
             "run_id": "test-run",
-            "task_id": "smoke",
+            "task_id": "smoke-public-admin-handoff",
             "model": "google/gemini-2.5-flash",
             "orchestra": True,
             "extra_skills": [],
@@ -644,11 +693,11 @@ class TestFullOperatorFlow:
         from eval_harness import _enrich_result_with_bench_run
 
         # 1. task prep writes config
-        result_dir = tmp_path / "results" / "full-test-smoke"
+        result_dir = tmp_path / "results" / "full-test-smoke-public-admin-handoff"
         result_dir.mkdir(parents=True)
         (result_dir / ".bench_run.json").write_text(json.dumps({
             "run_id": "full-test",
-            "task_id": "smoke",
+            "task_id": "smoke-public-admin-handoff",
             "model": "gpt-4o",
             "orchestra": False,
             "extra_skills": ["builder"],
@@ -656,7 +705,7 @@ class TestFullOperatorFlow:
         }))
 
         # 2. Eval creates result
-        result = TaskResult(task_id="smoke", run_id="full-test", score="pass")
+        result = TaskResult(task_id="smoke-public-admin-handoff", run_id="full-test", score="pass")
 
         # 3. Enrich from config file
         enriched = _enrich_result_with_bench_run(result, base_dir=tmp_path / "results")
@@ -678,37 +727,176 @@ class TestEvalFlowUsesExistingWorkdir:
         import eval_harness
 
         base_results = tmp_path / "results"
-        run_dir = base_results / "run-1-smoke"
+        run_dir = base_results / "run-1-smoke-public-admin-handoff"
         run_dir.mkdir(parents=True)
 
         monkeypatch.setattr(eval_harness, "RESULTS_DIR", str(base_results))
 
         calls: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
+        cp_calls: list[tuple[str, ...]] = []
 
         def fake_docker_exec(*args: str, env: dict[str, str] | None = None):
             calls.append((args, env))
             return sp.CompletedProcess(args=["docker"], returncode=0, stdout="", stderr="")
 
+        def fake_run(*args, **kwargs):
+            argv = tuple(args[0])
+            if argv[:2] == ("docker", "cp"):
+                cp_calls.append(argv)
+            return sp.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
         monkeypatch.setattr(eval_harness, "_docker_exec", fake_docker_exec)
         monkeypatch.setattr(eval_harness, "_docker_ok", lambda: True)
-        monkeypatch.setattr(eval_harness.sp, "run", lambda *a, **k: sp.CompletedProcess(args=a[0], returncode=0, stdout="", stderr=""))
+        monkeypatch.setattr(eval_harness.sp, "run", fake_run)
 
         result = eval_harness.grade(
-            "smoke",
+            "smoke-public-admin-handoff",
             "run-1",
-            task_meta=TaskMeta(task_id="smoke", description="smoke", family="smoke"),
+            task_meta=TaskMeta(task_id="smoke-public-admin-handoff", description="smoke", family="smoke"),
         )
 
         assert result.score == "pass"
         assert calls, "expected docker exec to be called"
-        eval_calls = [(argv, env) for argv, env in calls if argv[:3] == ("bench-entrypoint", "eval", "smoke")]
+        eval_calls = [(argv, env) for argv, env in calls if argv[:3] == ("bench-entrypoint", "eval", "smoke-public-admin-handoff")]
         assert eval_calls, calls
         argv, env = eval_calls[0]
         assert "run" not in argv[:3]
-        assert "/tmp/bench-eval-run-1-smoke/evaluate/run.sh" in argv
+        assert "/tmp/bench-eval-run-1-smoke-public-admin-handoff/evaluate/run.sh" in argv
         assert env and env["BENCH_RUN_ID"] == "run-1"
-        assert env["BENCH_TASK_ID"] == "smoke"
+        assert env["BENCH_TASK_ID"] == "smoke-public-admin-handoff"
+        assert env["BENCH_TASKS"] == str(eval_harness._REPO_ROOT / eval_harness.TASKS_DIR)
+        assert env["BENCH_REPO_ROOT"] == "/tmp/bench-eval-run-1-smoke-public-admin-handoff/evaluate"
 
+        copied = {argv[2]: argv[3] for argv in cp_calls}
+        eval_tmp = "/tmp/bench-eval-run-1-smoke-public-admin-handoff/evaluate"
+        assert str(eval_harness._REPO_ROOT / "tasks" / "smoke-public-admin-handoff" / "evaluate" / "run.sh") in copied
+        assert copied[str(eval_harness._REPO_ROOT / "tasks" / "smoke-public-admin-handoff" / "evaluate" / "run.sh")] == f"{eval_harness.CONTAINER_NAME}:{eval_tmp}/run.sh"
+        assert copied[str(eval_harness._REPO_ROOT / "capability_helpers.py")] == f"{eval_harness.CONTAINER_NAME}:{eval_tmp}/capability_helpers.py"
+        assert copied[str(eval_harness._REPO_ROOT / "rubric_helpers.py")] == f"{eval_harness.CONTAINER_NAME}:{eval_tmp}/rubric_helpers.py"
+
+    def test_grade_preserves_rubric_fields_from_noisy_stdout(self, tmp_path, monkeypatch):
+        import eval_harness
+
+        base_results = tmp_path / "results"
+        run_dir = base_results / "run-1-smoke-public-admin-handoff"
+        run_dir.mkdir(parents=True)
+
+        monkeypatch.setattr(eval_harness, "RESULTS_DIR", str(base_results))
+        monkeypatch.setattr(eval_harness, "_docker_ok", lambda: True)
+        monkeypatch.setattr(eval_harness.sp, "run", lambda *a, **k: sp.CompletedProcess(args=a[0], returncode=0, stdout="", stderr=""))
+
+        stdout_payload = """[bench-entrypoint] evaluator starting
+{
+  \"score\": \"pass\",
+  \"score_numeric\": 0.86,
+  \"rubric\": {
+    \"role_result_quality\": {\"score\": 0.35, \"max\": 0.40}
+  },
+  \"checks\": {\"answer_exists\": true}
+}
+"""
+
+        def fake_docker_exec(*args: str, env: dict[str, str] | None = None):
+            if args[:3] == ("bench-entrypoint", "eval", "smoke-public-admin-handoff"):
+                return sp.CompletedProcess(args=["docker"], returncode=0, stdout=stdout_payload, stderr="")
+            return sp.CompletedProcess(args=["docker"], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(eval_harness, "_docker_exec", fake_docker_exec)
+
+        result = eval_harness.grade(
+            "smoke-public-admin-handoff",
+            "run-1",
+            task_meta=TaskMeta(task_id="smoke-public-admin-handoff", description="smoke", family="smoke"),
+        )
+
+        assert result.score == "pass"
+        assert result.score_numeric == pytest.approx(0.86)
+        assert result.rubric == {
+            "role_result_quality": {"score": 0.35, "max": 0.40}
+        }
+        assert result.checks == {"answer_exists": True}
+
+    def test_grade_force_regrade_preserves_existing_elapsed_without_completion_time(self, tmp_path, monkeypatch):
+        import eval_harness
+
+        base_results = tmp_path / "results"
+        run_dir = base_results / "run-1-smoke-public-admin-handoff"
+        run_dir.mkdir(parents=True)
+        (run_dir / ".bench_run.json").write_text(json.dumps({
+            "run_id": "run-1",
+            "task_id": "smoke-public-admin-handoff",
+            "started_epoch": 1000,
+        }))
+        TaskResult(
+            task_id="smoke-public-admin-handoff",
+            run_id="run-1",
+            score="pass",
+            elapsed_seconds=55.0,
+        ).write_json(run_dir)
+
+        monkeypatch.setattr(eval_harness, "RESULTS_DIR", str(base_results))
+        monkeypatch.setattr(eval_harness, "_docker_ok", lambda: True)
+        monkeypatch.setattr(eval_harness, "time", type("T", (), {"time": staticmethod(lambda: 1100)})())
+        monkeypatch.setattr(eval_harness.sp, "run", lambda *a, **k: sp.CompletedProcess(args=a[0], returncode=0, stdout="", stderr=""))
+
+        def fake_docker_exec(*args: str, env: dict[str, str] | None = None):
+            if args[:3] == ("bench-entrypoint", "eval", "smoke-public-admin-handoff"):
+                return sp.CompletedProcess(
+                    args=["docker"],
+                    returncode=0,
+                    stdout='{"score": "pass", "checks": {"answer_exists": true}}',
+                    stderr="",
+                )
+            return sp.CompletedProcess(args=["docker"], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(eval_harness, "_docker_exec", fake_docker_exec)
+
+        result = eval_harness.grade(
+            "smoke-public-admin-handoff",
+            "run-1",
+            task_meta=TaskMeta(task_id="smoke-public-admin-handoff", description="smoke", family="smoke"),
+        )
+
+        assert result.elapsed_seconds == 55.0
+        assert result.efficiency["elapsed"]["current"] == 55.0
+
+    def test_grade_elapsed_fallback_is_available_to_efficiency(self, tmp_path, monkeypatch):
+        import eval_harness
+
+        base_results = tmp_path / "results"
+        run_dir = base_results / "run-1-smoke-public-admin-handoff"
+        run_dir.mkdir(parents=True)
+        (run_dir / ".bench_run.json").write_text(json.dumps({
+            "run_id": "run-1",
+            "task_id": "smoke-public-admin-handoff",
+            "started_epoch": 1000,
+        }))
+
+        monkeypatch.setattr(eval_harness, "RESULTS_DIR", str(base_results))
+        monkeypatch.setattr(eval_harness, "_docker_ok", lambda: True)
+        monkeypatch.setattr(eval_harness, "time", type("T", (), {"time": staticmethod(lambda: 1123.45)})())
+        monkeypatch.setattr(eval_harness.sp, "run", lambda *a, **k: sp.CompletedProcess(args=a[0], returncode=0, stdout="", stderr=""))
+
+        def fake_docker_exec(*args: str, env: dict[str, str] | None = None):
+            if args[:3] == ("bench-entrypoint", "eval", "smoke-public-admin-handoff"):
+                return sp.CompletedProcess(
+                    args=["docker"],
+                    returncode=0,
+                    stdout='{"score": "pass", "checks": {"answer_exists": true}}',
+                    stderr="",
+                )
+            return sp.CompletedProcess(args=["docker"], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(eval_harness, "_docker_exec", fake_docker_exec)
+
+        result = eval_harness.grade(
+            "smoke-public-admin-handoff",
+            "run-1",
+            task_meta=TaskMeta(task_id="smoke-public-admin-handoff", description="smoke", family="smoke"),
+        )
+
+        assert result.elapsed_seconds == pytest.approx(123.45)
+        assert result.efficiency["elapsed"]["current"] == pytest.approx(123.45)
 
 
 class TestOperatorDocs:

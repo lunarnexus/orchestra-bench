@@ -1,0 +1,9 @@
+task_id: cap-hard-ts-approval-queue
+description: "Build a TypeScript moderation queue with durable persistence, approval workflow, attachment path safety, public visibility rules, XSS-safe rendering, audit history, and workflow evidence"
+family: capability
+batch: capability-hard
+scoring_type: numeric
+timeout_minutes: 35
+evaluator: evaluate/run.sh
+split: dev
+expected_workflow: planner,researcher,builder,verifier,reviewer,appsec

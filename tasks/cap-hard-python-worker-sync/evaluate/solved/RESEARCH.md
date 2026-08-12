@@ -1,0 +1,5 @@
+research source: kb/api_contract.md and kb/worker_notes.md in the task workspace define the GET / Doc Sync homepage, POST /sync-jobs flow, admin pagination fields, idempotency_key behavior, and the local fake upstream retry contract.
+source: fixture tests/test_sync_app.py shows the required Python interfaces in app.py, worker.py, and sync_core.py, while FastAPI and sqlite3 support a small real API without adding extra services.
+decision: use FastAPI for app.py, sqlite3 for durable jobs/history, and a shared sync_core.py module with claim_next_job and process_next_job so worker.py can claim jobs and the API can poll the same state.
+decision: send upstream requests with urllib from worker.py, retry transient 503-style failures on the same job row, and avoid extra ORM layers for this small SQLite workload.
+tradeoff: a single-file SQLite store is simpler than Redis or Celery here, but it requires explicit stale-claim logic and parameterized SQL to keep retries, conflicts, and audit history correct.

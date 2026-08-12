@@ -103,7 +103,7 @@ Keep the operator surface simple, but with clear semantics:
 - `scripts/02-open-pi <task-id> --auto` uses the same prep path, runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` non-interactively and exits
 - role-focused tasks keep the Pi session as the parent/coordinator and ask it to dispatch the target role through Orchestra when Orchestra is enabled; the harness records `target_role` separately instead of running Pi as the worker role
 - `scripts/03-collect-results` grades all prepared/ungraded runs idempotently
-- `scripts/04-run-suite <suite>` runs each suite task through `02-open-pi --auto`, then grades it; `--collect-only` preserves the old grade-existing-runs behavior
+- `scripts/04-run-suite <suite>` runs each suite task through `02-open-pi --auto`, then grades it; `--no-orch-on` passes through for baseline/no-Orchestra suite runs
 
 ## Operator flow
 
@@ -148,10 +148,11 @@ The benchmark should group tasks by batch, not by abstract tooling mode.
 Target batch structure:
 - `smoke` — 6 real end-to-end tasks: 3 compact runtime smokes plus 3 workflow smokes that require role evidence
 - `role-focused` — exactly 3 tasks each for planner, researcher, verifier, reviewer, builder, and appsec
-- `contract`
-- `capability` (possibly split later)
+- `capability-normal` — integrated end-to-end tasks
+- `capability-hard` — integrated end-to-end tasks
 
 `capability-raw-material` was a temporary construction bucket and should not appear in the final task inventory.
+The old monolithic `capability` suite is retired; Slice 1 removes its flawed placeholder tasks before new normal/hard tasks are added.
 
 ### Smoke batch
 Small but legitimate end-to-end tasks.
@@ -167,17 +168,22 @@ Purpose:
 - keep 3 tasks per role
 - grade outcomes and role-specific deliverables without turning the whole benchmark into forced role activation
 
-### Contract batch
-Boundary and policy tests.
+### Capability-normal batch
+Straightforward SaaSBench-inspired real-app tasks.
 Purpose:
-- catch unsafe or fake-success behavior
-- verify blocking, scope, read-only, and evidence boundaries
+- test whether Orchestra improves outcomes on meaningful but passable work
+- cover varied languages, frameworks, storage choices, and app shapes
+- score workflow evidence without making it the only source of truth
 
-### Capability batch
-More realistic SaaSBench-inspired tasks.
+### Capability-hard batch
+Harder SaaSBench-inspired real-app tasks with seeded conflicts, edge cases, and hidden checks.
 Purpose:
-- test whether Orchestra improves outcomes on meaningful work
-- allow harder integrated tasks that may fail on weaker models
+- test planning, research, build, verification, review, and AppSec coordination under realistic friction
+- include state/idempotency/security/performance checks where appropriate
+- remain passable, but not easy
+
+### Internal container/harness checks
+Runtime/workdir contract checks are not a public benchmark suite. They belong in harness/container tests or startup health checks, not in `04-run-suite` task inventory.
 
 ## Result model
 
@@ -194,6 +200,7 @@ Each run should persist:
 - token summaries when available
 - evaluator outcome
 - optional process diagnostics: role usage, dispatch counts, parent/worker token breakdown
+- when present, soft process penalties that adjust `score_numeric`/rubric for orchestration or efficiency issues without changing the evaluator's top-level pass/fail field
 
 ## Validation and testing process
 

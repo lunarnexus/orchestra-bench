@@ -1,333 +1,92 @@
-# PLAN
+# Plan — Capability Normal/Hard Suite Redesign
 
 ## Goal
-Turn `orchestra-bench` into a valid, lightweight, SaaSBench-inspired benchmark for Orchestra that answers:
+Replace the flawed old capability tasks with two real end-to-end capability suites:
 
-> Can Orchestra build great things?
+- `capability-normal`: 3 straightforward, passable app-building tasks.
+- `capability-hard`: 3 passable but difficult SaaSBench-style tasks with conflicts/traps.
 
-The immediate priority is **runtime validity**. The benchmark is not acceptable until it runs the real Pi + Orchestra + LM Studio plugin stack inside the container using benchmark-local editable config.
+Authoritative decisions live in `FOUNDATION.md`.
 
-## Current status
-- shared harness/task/result skeleton exists
-- runtime is valid for the intended benchmark
-- reporting/comparison support exists
-- task artifacts now use `PRD.md` + `Prompt.md` consistently
-- current task inventory has 6 smoke tasks, 18 role-focused tasks, 1 contract task, and 3 capability tasks
-- smoke tasks include the original three compact E2E patterns plus three workflow smokes requiring research/planning/build/verify/review/security evidence
-- remaining benchmark-design work is to run the new smoke batch end-to-end and harden task quality based on observed failures
+## Design Corrections
+- Preinstall common task platform dependencies in the benchmark image/container where practical; do not make agents spend task time on boring package setup.
+- Use bundled local `kb/` docs instead of live web access; internet research is not the target capability here.
+- Use real app dependencies when they matter to the behavior under test. Redis/Postgres are acceptable if stable inside the existing benchmark container.
+- Do not create extra service containers; install/start any services inside the existing benchmark container.
+- Use lightweight substitutes only when they preserve the same app behavior and failure modes.
+- Workflow evidence is expected and scored, not an automatic pass/fail gate. Missing workflow artifacts should reduce score substantially, but a functionally excellent result may still pass depending on task rubric.
+- Capability-normal tasks must include a browser-routable `GET /` HTML entrypoint. API-only completion is no longer sufficient for a "working application" benchmark.
 
-## Stable constraints
-- Pi runs inside the benchmark container
-- install Orchestra from `http://git.lunarnexus.local:3000/james/orchestra`
-- install LM Studio plugin from `http://git.lunarnexus.local:3000/james/pi-lmstudio`
-- install Orchestra using its `README.md`
-- install LM Studio plugin using the official `pi` plugin install command
-- use benchmark-local editable config files copied into the container runtime:
-  - Orchestra config under `config/orchestra/`:
-    - `config.yaml`
-    - `prompts.yaml`
-    - `agent-catalog.yaml`
-  - Pi/plugin config under `config/pi/`:
-    - `lmstudio.json`
-- `agent-catalog.yaml` is the source of truth for model provenance
-- `PI_MODEL` is not the source of truth
-- keep a reusable container by default
-- keep the operator flow simple
-- preserve artifact capture and repeated comparison support
-- benchmark should be organized by **batches** and judged **outcome-first**
+## Target Tasks
 
-## Batch direction
-Target benchmark batches:
-1. `smoke` — 6 real end-to-end tasks that build/test something real and collectively exercise the core Orchestra workflow
-2. `role-focused` — 3 tasks each for planner, researcher, verifier, reviewer, builder, and appsec
-3. `contract` — runtime/workdir and anti-fake-success checks
-4. `capability` — integrated SaaSBench-inspired tasks, split later only if needed
+### capability-normal
+1. `cap-normal-fastapi-helpdesk`
+   - Python FastAPI API + SQLite/Postgres-style persistence.
+   - Public ticket intake, admin triage, audit log, pagination/status codes.
 
-Retired construction bucket:
-- `capability-raw-material` is no longer part of the task inventory.
+2. `cap-normal-express-inventory`
+   - Node/Express API + SQLite/Postgres-style persistence.
+   - Inventory reservation, release, commit workflow, seeded SKUs.
 
-## Public UX direction
-- no user-facing CLI
-- README exposes the operator flow as three numbered steps:
-  - `scripts/01-start start|stop`
-  - `scripts/02-open-pi <task-id>` (auto-prepares the run)
-  - `scripts/03-collect-results`
-- `scripts/_prepare-task-run` may remain as an internal compatibility helper, but operators should not need to run it
-- non-numbered helper scripts or internals may exist, but should not be the documented operator surface
+3. `cap-normal-django-reports`
+   - Django app + SQLite.
+   - Date filters, grouped aggregates, CSV export, permission checks, performance budget.
 
-Notes:
-- smoke tasks should be real enough to naturally invite orchestration where useful
-- role-focused tasks are intentionally narrower and help isolate value/behavior by role
-- contract tasks protect against unsafe or fake-success behavior
-- current role-focused fixtures can remain as raw material until the dedicated role-focused batch is assembled
+### capability-hard
+1. `cap-hard-ruby-billing-ledger`
+   - Ruby Sinatra/Rack app + durable SQLite ledger.
+   - Customers, invoices, payments, refunds/credits, idempotency traps, reconciliation, CSV export, and CLI/API parity.
 
-## Execution plan
+2. `cap-hard-ts-approval-queue`
+   - TypeScript/Node app, simple server/build, SQLite/file store.
+   - Submission moderation, public visibility, upload/path/XSS traps.
 
-### Slice 1 — runtime source install contract (`sequential`, complete)
-Scope:
-- `docker/Dockerfile`
-- `docker/entrypoint.sh`
-- `scripts/build-env`
-- `scripts/start-env`
-- `.env.example`
-- `README.md`
+3. `cap-hard-python-worker-sync`
+   - Python API + background worker + SQLite jobs; Redis if stable in the existing container.
+   - External sync, retries, polling, stale jobs, conflicting local docs.
 
-Build:
-- install Pi in the container
-- install Orchestra from the Gitea repo using its README instructions
-- install LM Studio Pi plugin from the Gitea repo using the official `pi` plugin install command
-- expose `pi` and `orchestra` on `PATH`
+## Shared Scoring Direction
+- Functional outcome: about 70%.
+- Workflow evidence: about 20%.
+- Verification/review/security artifacts: about 10%.
+- Workflow evidence should be scored for relevance and consistency with actual files/tests, not just file existence.
 
-Stop when:
-- a fresh container has working `pi` and `orchestra`
-- the LM Studio plugin is installed in Pi's runtime
-
-Verify:
-- `scripts/01-start start`
-- runtime troubleshooting checks in `ARCHITECTURE.md` confirm `pi` and `orchestra` are on PATH inside the container
-
-### Slice 2 — benchmark-local config snapshot (`sequential`, complete)
-Scope:
-- new `config/orchestra/`
-- `docker/entrypoint.sh`
-- `scripts/start-env`
-- `scripts/_prepare-task-run`
-- `README.md`
-
-Build:
-- add committed benchmark-local config files:
-  - `config/orchestra/config.yaml`
-  - `config/orchestra/prompts.yaml`
-  - `config/orchestra/agent-catalog.yaml`
-- mount them into the container read-only
-- copy them into Pi's live Orchestra runtime dir inside the container
-
-Stop when:
-- container runtime contains copied benchmark-local config under Pi's Orchestra config path
-
-Verify:
-- `docker exec orchestra-bench-runner test -f /root/.pi/agent/orchestra/agent-catalog.yaml`
-- `docker exec orchestra-bench-runner test -f /root/.pi/agent/orchestra/config.yaml`
-- `docker exec orchestra-bench-runner test -f /root/.pi/agent/orchestra/prompts.yaml`
-
-### Slice 3 — runtime initialization (`sequential`, complete)
-Scope:
-- `docker/entrypoint.sh`
-- `scripts/start-env`
-- maybe `scripts/init-runtime`
-
-Build:
-- run `orchestra init pi --copy --force` inside the container after config is present
-- copy benchmark-local LM Studio runtime config from the Pi config area (preferably `config/pi/lmstudio.json`) into `~/.pi/agent/lmstudio.json` after plugin install and before doctor checks
-- ensure the benchmark-local catalog does not require unavailable harness executables during runtime doctor checks, or install the required executables if they are intentionally part of the benchmark contract
-- make runtime initialization idempotent and rerunnable without rebuilding the image
-
-Stop when:
-- `orchestra doctor` works in container
-- `/orch doctor` works from Pi inside container
-- LM Studio runtime config is copied from a benchmark-local file into the container
-
-Verify:
-- `docker exec orchestra-bench-runner bench-entrypoint init-runtime`
-- `docker exec orchestra-bench-runner orchestra doctor`
-- `docker exec orchestra-bench-runner pi --no-approve -p "/orch doctor"`
-
-### Slice 4 — remove `PI_MODEL` truth path, derive model from catalog (`sequential`, complete)
-Scope:
-- `scripts/_prepare-task-run`
-- `scripts/02-open-pi`
-- `scripts/run-task`
-- `eval_harness.py`
-- `__init__.py`
-- `.env.example`
-- `README.md`
-- relevant tests
-
-Build:
-- resolve run model from `agent-catalog.yaml`
-- inspect `default_role` and role model, defaulting normally to `builder`
-- persist catalog-derived model/config provenance in run metadata
-- remove `PI_MODEL` as operator truth source
-
-Stop when:
-- runs work without needing `PI_MODEL`
-- `.bench_run.json` records catalog-derived model provenance
-
-Verify:
-- prepare one run without setting `PI_MODEL`
-- inspect `.bench_run.json`
-- grep docs/scripts/tests for authoritative `PI_MODEL` usage
-
-### Slice 5 — reusable container semantics (`sequential`, complete)
-Scope:
-- `scripts/build-env`
-- `scripts/start-env`
-- `README.md`
-- tests
-
-Build:
-- default `start` reuses an existing valid container
-- explicit recreate/restart path exists when needed
-- workspace reset remains available between runs
-- runtime reinit remains available after config changes
-
-Stop when:
-- repeated `start` does not recreate the container by default
-
-Verify:
-- compare container IDs across repeated starts
-
-### Slice 6 — operator flow repair (`sequential`, complete)
-Scope:
-- `scripts/_prepare-task-run`
-- `scripts/02-open-pi`
-- `scripts/03-collect-results`
-- `scripts/eval-task`
-- `scripts/run-task`
-- `README.md`
-- operator-flow tests
-
-Build:
-- keep a thin flow: build/start -> prepare -> open Pi -> eval+collect
-- ensure eval uses the existing workdir rather than recreating it
-- preserve metadata and artifact collection
-
-Stop when:
-- one smoke task can be prepared, opened in Pi, evaluated, and summarized using the valid runtime without rebuilding the image
-
-Verify:
-- one end-to-end smoke run through the operator flow
-
-### Slice 7 — reporting metadata cleanup (`parallel-safe`, complete)
-Scope:
-- `eval_harness.py`
-- `__init__.py`
-- tests
-- `README.md`
-
-Build:
-- keep existing reporting/aggregation
-- group comparisons by catalog-derived provenance rather than stale env settings
-- extend metadata as needed: role, model, catalog hash, config hash, image/container IDs
-
-Stop when:
-- result comparison clearly distinguishes config/catalog revisions
-
-Verify:
-- reporting tests
-- compare output on multiple runs with different config provenance
-
-### Slice 8 — batch restructuring and task triage (`sequential`, complete)
-Scope:
-- `tasks/`
-- batch metadata/layout
-- `README.md`
+Expected/scored workflow artifacts per task:
 - `PLAN.md`
-- possible new batch runner helpers
+- `RESEARCH.md`
+- implementation files
+- `VERIFY.md`
+- `REVIEW.md`
+- `APPSEC.md`
+- final summary/answer
 
-Build:
-- classify current tasks into `smoke`, `contract`, `capability`, and `capability-raw-material` buckets where practical
-- keep `smoke` as real small implementation work; keep `smoke` task as a contract/harness check
-- preserve useful raw material instead of deleting everything that is role-shaped
-- define a small set of batch-oriented benchmark runs
-- promote/rewrite the strongest raw material into a credible smoke batch and at least one stronger capability batch
+## Implementation Slices
+1. [done] Cleanup old capability tasks and update inventory/docs/tests.
+2. [done] Build shared capability workflow-evidence evaluator helper.
+3. [done] Build 3 `capability-normal` tasks with unsolved fixtures and reference-solution validation.
+4. [done] Build 3 `capability-hard` tasks with stateful correctness, security, validation, persistence, and edge-case checks.
+5. [done] Update docs fully.
+6. [done] Dogfood representative normal/hard tasks, then full suites.
 
-Stop when:
-- smoke batch is credible and no longer centered on the toy `smoke` benchmark
-- at least one advanced capability batch is defined with multiple stronger outcome-first tasks
-- task organization matches the benchmark philosophy
+## Current Status
+- Public task inventory is now 30 tasks: 6 smoke, 18 role-focused, 3 `capability-normal`, and 3 `capability-hard`.
+- Capability task directories, fixtures, evaluators, solved references, and focused tests are present.
+- Workflow evidence scoring is relevance-based and now includes spoof-resistance checks for keyword/token-salad and prose-shaped boilerplate where reviewer feedback found gaps.
+- Root test collection is constrained to harness tests with `pytest.ini`, so task fixture/evaluator tests are exercised through focused harness tests rather than accidentally collected from every task workspace.
+- Capability tasks now require and grade browser-routable `GET /` HTML entrypoints; API-only completion is no longer sufficient for capability tasks.
+- Current final verification: `pytest -q` passed with `648 passed, 5 skipped`.
+- `results/` contains graded dogfood/suite evidence with Pi session ids, token totals, elapsed timing, and Orchestra debug artifacts. Latest failed capability runs were reviewed as valid model signal, not evaluator defects.
 
-### Slice 9 — suite expansion requirements (`sequential`, complete)
-Scope:
-- `FOUNDATION.md`
-- `PLAN.md`
-- `README.md`
-- later task rewrite plan
-
-Build:
-- lock the new suite requirement that smoke is exactly 3 real E2E tasks
-- lock the new suite requirement that there are 3 role-focused tasks each for planner, researcher, verifier, reviewer, builder, and appsec
-- keep `contract` and `capability` as first-class benchmark suites, not deferred away
-- record that human-facing task materials should be markdown and should borrow SaaSBench artifact structure where useful
-- record the preferred task artifact mapping: `PRD.md`, `Prompt.md`, markdown KB, `fixture/`, `evaluate/`
-- state that grader/evaluator materials stay outside the agent-visible workspace
-- state that README should show numbered scripts only, with `open-pi.sh` exempt if retained
-- use SaaSBench examples to guide smoke E2E task choices:
-  - dependent setup chain -> one core action
-  - public entrypoint -> authenticated/admin confirmation
-  - interactive action -> immediate progression/feedback
-
-Stop when:
-- requirements/docs clearly reflect the new suite structure and SaaSBench-inspired task material expectations, including separate `PRD.md` and `Prompt.md` and keeping grader materials outside the agent-visible workspace
-
-### Slice 10 — task artifact migration (`sequential`, complete)
-Scope:
-- task folders
-- runtime copy logic
-- operator scripts/docs/tests as needed
-
-Build:
-- remove legacy `task.md` as the canonical task artifact
-- migrate tasks to consistent `PRD.md` + `Prompt.md` (+ `kb/` or `kb.md` where applicable)
-- ensure only agent-visible artifacts are copied into task work folders
-- keep evaluator materials outside the agent-visible workspace
-- update operator/runtime code and docs to use the new artifact names consistently
-
-Stop when:
-- current tasks no longer rely on `task.md`
-- runtime/operator flow uses `PRD.md` and `Prompt.md` consistently
-- docs and task layouts are aligned
-
-Verify:
-- `python3 -m pytest tests/test_task_artifacts.py -v`
-- batch inventory review confirms no task depends on legacy `task.md`
-- one batch run path documented and executable
-
-### Slice 11 — SaaSBench-pattern smoke + role-focused suite (`sequential`, complete)
-Scope:
-- `tasks/`
-- `task.yaml` metadata
-- docs/tests affected by task inventory
-
-Build:
-- keep the original 3 compact smoke tasks aligned with the three SaaSBench-inspired patterns:
-  1. dependent setup chain -> one core action
-  2. public entrypoint -> authenticated/admin confirmation
-  3. interactive action -> immediate progression/feedback
-- build the full `role-focused` suite: 3 tasks each for planner, researcher, verifier, reviewer, builder, and appsec
-- retire `capability-raw-material` by promoting useful fixtures into `role-focused` or `capability`, or deleting weak leftovers
-- keep task artifacts in the current `PRD.md` + `Prompt.md` + optional markdown KB shape
-- keep `evaluate/` grader materials outside agent-visible workdirs
-- preserve `contract` and `capability` as first-class suites
-
-Stop when:
-- README task tables show only final suites: `smoke`, `role-focused`, `contract`, and `capability`
-- there are 6 smoke tasks and exactly 18 role-focused tasks
-- no task is categorized as `capability-raw-material`
-- smoke tasks demonstrably map to the three SaaSBench-inspired E2E patterns
-
-Verify:
-- task inventory script/check asserts batch counts
-- at least one smoke task runs through `01-start start` -> `02-open-pi <task-id>` -> `03-collect-results`
-- role-focused fixtures have hidden or grader-only outcome checks
-
-## What can be kept
-- current harness/result framework as scaffolding
-- current result schema and comparison support
-- artifact capture direction
-- many existing task fixtures as raw material
-
-## Known invalid assumptions to remove
-- npm-latest-only runtime install is sufficient
-- `PI_MODEL` controls the benchmark model
-- normal start should always recreate the container
-- role-isolated toy tasks are enough to measure Orchestra well
-
-## Risks
-- some current tasks may still be too toy to keep unchanged
-- config provenance mistakes would invalidate comparison claims
-- overemphasis on process metrics could distort the benchmark away from end results
-- capability batches still need stronger rewritten tasks, not just regrouping
-
-## Recommended next action
-Run the new smoke batch through the simplified operator flow (`01-start start` -> `02-open-pi <task-id>` -> `03-collect-results`), inspect real Pi/Orchestra traces and grader results, then tighten individual tasks/evaluators based on observed failures.
+## Unfinished Issues
+1. [done] Fixed `cap-hard-python-worker-sync` workflow spoofing before dogfood. Verifier `7555e2cd56a1` reproduced prose-shaped boilerplate scoring `pass` / `0.86`; builder `b60be852aa30` added exact regression coverage and task-local evaluator tightening; verifier `d23aded3bbe6` confirmed spoof score `0.72` with all workflow relevance checks false, solved score `1.0`, and missing-workflow score `0.7`.
+2. [done] Fixed only `cap-normal-django-reports` representative dogfood grading trust issues before further dogfood: reviewer `d315721a6a9d` found evaluator workflow checks were too implementation-specific and final-summary scoring was impossible because no final answer is passed into `evaluate_workflow_evidence`. Builder `81e84cc6a61d` relaxed workflow evidence to accept semantic equivalents and made missing final answer neutral; verifier `a559277e87df` confirmed focused tests `19 passed`, solved score `1.0`, filler/spoof regressions still fail, and `final_summary.max == 0.0` when no final answer is provided. The dogfood app's date-range/history-shape failures are legitimate model misses and should remain detected/scored/reported, not fixed in the run or hidden by evaluator changes.
+3. [done] Converted capability-normal tasks from API-only slices to browser-routable working apps. Planner `44a77ca68b9f` found all three normal tasks lacked a graded `GET /` UI; FastAPI verifier `b9e0a2c80f24`, Express verifier `83a445627d4b`, and Django verifier `9c5ef9310287` confirmed solved references expose `200 text/html` browser entrypoints and focused checks pass.
+4. [done] Applied the same browser-routable working-app requirement to capability-hard tasks before final dogfood/full suites, because `FOUNDATION.md` applies this principle to all capability tasks. Python worker sync verifier `81b7504f1c6f`, Ruby billing verifier `d32628d8f032`, and TS approval verifier `201d262a93de` confirmed `GET /` browser entrypoints and focused checks.
+5. [done] Ran real Pi dogfood for one representative normal task and one representative hard task through `scripts/02-open-pi <task-id> --auto` and `scripts/03-collect-results`: `cap-normal-fastapi-helpdesk` run `20260812T001855` passed with `functional_browser_homepage=true`; `cap-hard-python-worker-sync` run `20260812T002218` passed with `functional_browser_homepage=true`.
+6. [done] Ran full `capability-normal` and `capability-hard` suites through `scripts/04-run-suite` after focused verification and representative dogfood. Latest suite evidence: normal suite ran all three tasks with `cap-normal-django-reports` failing and `cap-normal-express-inventory`/`cap-normal-fastapi-helpdesk` passing; hard suite ran all three tasks with `cap-hard-python-worker-sync` passing and `cap-hard-ruby-billing-ledger`/`cap-hard-ts-approval-queue` failing. These failures need triage as benchmark signal vs evaluator/task issue before final handoff.
+7. [done] Fixed evaluator-contract mismatches found by reviewer `31578af2350c` before final handoff: Django reports evaluator now accepts semantic row-count aliases while preserving invalid date-range failure; TS approval evaluator accepts equivalent safe upload/history wrapper shapes while preserving missing-admin-route failure. Builder `2584a8b7cb54` and verifier `0bdd8ce38129` confirmed focused tests `21 passed` and negative checks still fail.
+8. [done] Reran affected dogfood tasks after evaluator-contract fixes (`cap-normal-django-reports`, `cap-hard-ts-approval-queue`) because old failed workdirs were gone and could not be regraded. Latest failures were triaged by reviewer `6e3deb8b4b1b` as valid model signal, not evaluator defects.
+9. [done] Inspected `scripts/05-results` and representative failed/passed run views for score, timing, token, Pi session, and Orchestra debug artifacts. Latest dashboard has graded dogfood/suite results with expected pass/fail signal and captured Pi sessions/tokens/timing/debug artifacts.
+10. [done] Cleaned temporary/ad hoc root artifacts: removed `$tmp`, `tmp-verifier-evidence`, `undefined`, `__pycache__`, `tests/__pycache__`, and `.pytest_cache`.
+11. [done] Re-ran final verification after dogfood and elapsed-efficiency fix: `pytest -q` passed with `648 passed, 5 skipped`.
+12. [sequential] Prepare final non-security review and commit handoff. Security review was explicitly skipped by user request.

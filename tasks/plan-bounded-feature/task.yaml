@@ -1,7 +1,0 @@
-task_id: plan-bounded-feature
-description: "Plan, implement, and verify a bounded CLI filter feature in log-viewer"
-family: orchestrator
-batch: capability
-scoring_type: pass_fail
-timeout_minutes: 15
-evaluator: evaluate/run.sh

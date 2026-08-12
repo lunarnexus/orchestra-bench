@@ -52,6 +52,18 @@ class TaskResult:
     # Dev vs holdout split label for comparison reporting
     split: str = ""
 
+    # Numeric score (0.0–1.0) for rubric-based grading
+    score_numeric: float | None = None
+
+    # Structured rubric breakdown with category scores
+    rubric: dict[str, object] = field(default_factory=dict)
+
+    # Orchestra process diagnostics (dispatches, timeouts, etc.)
+    orchestration_checks: dict[str, object] = field(default_factory=dict)
+
+    # Efficiency diagnostics (token/time comparisons vs history)
+    efficiency: dict[str, object] = field(default_factory=dict)
+
     # Free-form notes from evaluator or harness
     details: str = ""
 
@@ -77,6 +89,7 @@ class TaskResult:
         data = _json.loads(Path(path).read_text())
         if "task_id" not in data:
             raise ValueError(f"result missing task_id: {path}")
+        # Old result JSON without optional fields uses field defaults
         return cls(**data)
 
 

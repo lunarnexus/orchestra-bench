@@ -1,8 +1,0 @@
-# tasks/orchestrate-plan-build-verify/task.yaml
-task_id: orchestrate-plan-build-verify
-description: "Plan, implement, and verify a small stats module end-to-end"
-family: orchestrator
-batch: capability
-scoring_type: pass_fail
-timeout_minutes: 15
-evaluator: evaluate/run.sh

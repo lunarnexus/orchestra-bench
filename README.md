@@ -48,21 +48,25 @@ Narrower tasks that isolate value/behavior by role: 3 tasks each for planner, re
 | builder | `builder-add-endpoint`, `builder-fix-seeded-bug`, `builder-implement-parser` |
 | appsec | `appsec-vulnerable-diff`, `appsec-review-upload-flow`, `appsec-secrets-config-audit` |
 
-### contract — runtime and anti-fake-success checks
+### capability-normal — integrated end-to-end tasks
 
-| Task | Description |
-|------|-------------|
-| `smoke` | Verify container workdir reset and BENCH_OK contract |
+Straightforward SaaSBench-inspired real-app tasks:
 
-### capability — integrated end-to-end tasks
+| Task | Stack | Description |
+|------|-------|-------------|
+| `cap-normal-django-reports` | Python / Django / SQLite | Build a reporting app with sales/refund ingest, grouped summary exports, report history, permissions, and workflow evidence scoring |
+| `cap-normal-express-inventory` | Node / Express-style / file-backed | Build an inventory API with product CRUD, stock adjustments, low-stock reporting, ledger history, and workflow evidence scoring |
+| `cap-normal-fastapi-helpdesk` | Python / FastAPI / SQLite | Build a helpdesk API with public ticket intake, admin triage, audit log, pagination, and workflow evidence scoring |
 
-Stronger SaaSBench-inspired tasks that may legitimately fail on weaker setups.
+### capability-hard — integrated end-to-end tasks
 
-| Task | Family | Description |
-|------|--------|-------------|
-| `plan-bounded-feature` | orchestrator | Plan, implement, and verify a bounded CLI filter feature in log-viewer |
-| `research-api-integration` | orchestrator | Research two candidate APIs, choose the push-webhook provider, and record the decision |
-| `orchestrate-plan-build-verify` | orchestrator | Plan, implement, and verify a small stats module end-to-end |
+Harder SaaSBench-inspired real-app tasks with more realistic conflicts and traps.
+
+| Task | Stack | Description |
+|------|-------|-------------|
+| `cap-hard-python-worker-sync` | Python / FastAPI / SQLite worker | Build a document sync API plus background worker with durable SQLite jobs, retries, stale-job recovery, conflict handling, audit history, pagination, and workflow evidence scoring |
+| `cap-hard-ruby-billing-ledger` | Ruby / Sinatra / SQLite | Build a billing ledger API + CLI with invoices, payments, refunds/credits, durable idempotency, reconciliation, CSV export, and workflow evidence scoring |
+| `cap-hard-ts-approval-queue` | TypeScript / Node / file-backed | Build a moderation queue with durable submissions, approval/rejection flow, attachment path safety, XSS-safe public rendering, audit history, pagination, and workflow evidence scoring |
 
 ## Task artifact model
 
@@ -149,7 +153,7 @@ For each graded run, the result folder contains:
 
 ### `04-run-suite <suite>`
 
-Runs every task in a suite through `scripts/02-open-pi <task-id> --auto`, grades each run, then prints the result summary. This is the dogfood batch path for suite-level checks. Use `--collect-only` to skip Pi and only grade latest prepared/ungraded runs. Use `scripts/04-run-suite --list` to see suites.
+Runs every task in a suite through `scripts/02-open-pi <task-id> --auto`, grades each run, then prints the result summary. This is the dogfood batch path for suite-level checks. Use `--no-orch-on` for baseline/no-Orchestra suite runs. Use `scripts/04-run-suite --list` to see suites. To grade already prepared runs without opening Pi, use `scripts/03-collect-results`.
 
 ### `05-results [view]`
 

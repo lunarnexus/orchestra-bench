@@ -12,11 +12,18 @@ ENV ORCHESTRA_HOME=/opt/orchestra
 
 # Runtime deps
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git curl ca-certificates python3 python3-venv && \
+    apt-get install -y --no-install-recommends git curl ca-certificates python3 python3-pip python3-venv ruby ruby-dev build-essential libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Pi coding agent
-RUN npm install -g @earendil-works/pi-coding-agent@latest
+# Preinstall common Python app/task deps for capability workloads.
+RUN python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn pytest httpx django
+
+# Install Pi coding agent and practical Node task deps.
+RUN npm install -g @earendil-works/pi-coding-agent@latest express
+ENV NODE_PATH=/usr/local/lib/node_modules:/usr/lib/node_modules
+
+# Preinstall common Ruby app/task deps for capability workloads.
+RUN gem install --no-document sinatra sqlite3 rack-test minitest
 
 # Apply benchmark-local Pi settings before plugin install, without clobbering
 # unrelated Pi defaults/settings.

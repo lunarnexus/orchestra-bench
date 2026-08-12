@@ -84,17 +84,46 @@ class TestFinalSuiteInventory:
         batches = Counter(str(m.get("batch")) for m in _task_meta())
         assert "capability-raw-material" not in batches
 
-    def test_final_public_batches_are_present(self):
+    def test_capability_normal_includes_real_tasks(self):
+        capability_normal = [m for m in _task_meta() if m.get("batch") == "capability-normal"]
+        assert [m["task_id"] for m in capability_normal] == [
+            "cap-normal-django-reports",
+            "cap-normal-express-inventory",
+            "cap-normal-fastapi-helpdesk",
+        ]
+
+    def test_capability_hard_includes_current_real_tasks(self):
+        capability_hard = [m for m in _task_meta() if m.get("batch") == "capability-hard"]
+        assert [m["task_id"] for m in capability_hard] == [
+            "cap-hard-python-worker-sync",
+            "cap-hard-ruby-billing-ledger",
+            "cap-hard-ts-approval-queue",
+        ]
+
+    def test_capability_cleanup_removes_old_public_batches_from_task_inventory(self):
         batches = Counter(str(m.get("batch")) for m in _task_meta())
         assert batches["smoke"] == 6
         assert batches["role-focused"] == 18
-        assert batches["contract"] >= 1
-        assert batches["capability"] >= 1
+        assert batches["capability-normal"] == 3
+        assert batches["capability-hard"] == 3
+        assert "contract" not in batches
+        assert "capability" not in batches
 
-    def test_readme_documents_final_suites_without_transitional_bucket(self):
+    def test_readme_documents_current_public_suites(self):
         readme = (_REPO_ROOT / "README.md").read_text()
         assert "### smoke — 6 real end-to-end tasks" in readme
         assert "### role-focused — 18 per-role tasks" in readme
-        assert "### contract — runtime and anti-fake-success checks" in readme
-        assert "### capability — integrated end-to-end tasks" in readme
+        assert "### capability-normal — integrated end-to-end tasks" in readme
+        assert "cap-normal-fastapi-helpdesk" in readme
+        assert "cap-normal-express-inventory" in readme
+        assert "cap-normal-django-reports" in readme
+        assert "### capability-hard — integrated end-to-end tasks" in readme
+        assert "cap-hard-python-worker-sync" in readme
+        assert "cap-hard-ruby-billing-ledger" in readme
+        assert "cap-hard-ts-approval-queue" in readme
+        assert "### contract" not in readme
+        assert "### capability — integrated end-to-end tasks" not in readme
         assert "capability-raw-material" not in readme
+        assert "orchestrate-plan-build-verify" not in readme
+        assert "plan-bounded-feature" not in readme
+        assert "research-api-integration" not in readme

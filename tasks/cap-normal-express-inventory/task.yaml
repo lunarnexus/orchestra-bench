@@ -1,0 +1,9 @@
+task_id: cap-normal-express-inventory
+description: "Build a Node inventory API with file-backed persistence, stock adjustments, low-stock reporting, ledger history, and workflow evidence"
+family: capability
+batch: capability-normal
+scoring_type: numeric
+timeout_minutes: 25
+evaluator: evaluate/run.sh
+split: dev
+expected_workflow: planner,researcher,builder,verifier,reviewer,appsec

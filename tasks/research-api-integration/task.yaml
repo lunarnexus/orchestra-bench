@@ -1,8 +1,0 @@
-# tasks/research-api-integration/task.yaml — capability task metadata
-task_id: research-api-integration
-description: "Research two candidate APIs, choose the push-webhook provider, and record the decision in service metadata"
-family: orchestrator
-batch: capability
-scoring_type: pass_fail
-timeout_minutes: 12
-evaluator: evaluate/run.sh

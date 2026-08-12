@@ -472,3 +472,260 @@ class TestPrintFunctions:
         # Should not raise
         print_split_summary(base)
 
+
+# ── 10. scripts/05-results run detail reporting ───────────────────
+
+
+def _install_results_script(tmp_path: Path) -> Path:
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir(parents=True)
+    script = scripts_dir / "05-results"
+    script.write_text((_REPO_ROOT / "scripts" / "05-results").read_text())
+    script.chmod(0o755)
+    (tmp_path / "eval_harness.py").write_text((_REPO_ROOT / "eval_harness.py").read_text())
+    (tmp_path / "__init__.py").write_text((_REPO_ROOT / "__init__.py").read_text())
+    return script
+
+
+def _write_task_yaml(tmp_path: Path, task_id: str) -> None:
+    task_dir = tmp_path / "tasks" / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "task.yaml").write_text(f"task_id: {task_id}\n")
+
+
+def _write_result_json(tmp_path: Path, result: TaskResult) -> None:
+    run_dir = tmp_path / "results" / f"{result.run_id}-{result.task_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2) + "\n")
+
+
+class TestRunDetailReporting:
+    def test_run_detail_shows_rubric_warnings_and_efficiency_history(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a")
+
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="hist-1",
+                score="pass",
+                tokens={"total": 800},
+                elapsed_seconds=25.0,
+            ),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="hist-2",
+                score="pass",
+                tokens={"total": 1200},
+                elapsed_seconds=40.0,
+            ),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-1",
+                score="pass",
+                score_numeric=0.86,
+                rubric={
+                    "role_result_quality": {"score": 0.35, "max": 0.40},
+                    "orchestration_process": {"score": 0.16, "max": 0.20},
+                },
+                orchestration_checks={
+                    "missing_expected_role": True,
+                    "timeouts": 1,
+                    "retries": 0,
+                    "premature_completion": False,
+                },
+                tokens={"total": 950},
+                elapsed_seconds=32.0,
+            ),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "run", "run-1"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "score_numeric" in result.stdout
+        assert "0.86" in result.stdout
+        assert "rubric" in result.stdout
+        assert "role_result_quality=0.35/0.40" in result.stdout
+        assert "orchestration warnings" in result.stdout
+        assert "missing expected role" in result.stdout
+        assert "1 timeout" in result.stdout
+        assert "efficiency" in result.stdout
+        assert "tokens " in result.stdout
+        assert "current=950" in result.stdout
+        assert "elapsed " in result.stdout
+        assert "current=32.0" in result.stdout
+
+    def test_dispatch_without_orchestra_logs_preserves_numeric_score(self, tmp_path):
+        from eval_harness import ingest_artifacts
+
+        base = tmp_path / "results"
+
+        hist1 = base / "hist-1-task-pen"
+        hist1.mkdir(parents=True)
+        TaskResult(
+            task_id="task-pen",
+            run_id="hist-1",
+            score="pass",
+            score_numeric=1.0,
+            tokens={"total": 800},
+            elapsed_seconds=30.0,
+        ).write_json(hist1)
+
+        hist2 = base / "hist-2-task-pen"
+        hist2.mkdir(parents=True)
+        TaskResult(
+            task_id="task-pen",
+            run_id="hist-2",
+            score="pass",
+            score_numeric=1.0,
+            tokens={"total": 1000},
+            elapsed_seconds=35.0,
+        ).write_json(hist2)
+
+        run_dir = base / "run-0-task-pen"
+        artifacts = run_dir / "artifacts"
+        (artifacts / "pi-sessions").mkdir(parents=True)
+        (artifacts / "tokens.json").write_text(json.dumps({"total_tokens": 900}))
+        (artifacts / "timing.json").write_text(json.dumps({"elapsed_seconds": 32.0}))
+        (artifacts / "pi-sessions" / "sess.jsonl").write_text(
+            json.dumps({"type": "session", "id": "sess-0"}) + "\n" +
+            json.dumps({
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "toolCall",
+                        "name": "orch_dispatch",
+                        "arguments": {"goal": "review code", "role": "reviewer"},
+                    }],
+                },
+            }) + "\n"
+        )
+        (artifacts / "manifest.json").write_text(json.dumps({"orchestra": {}}))
+
+        result_obj = TaskResult(
+            task_id="task-pen",
+            run_id="run-0",
+            score="pass",
+            score_numeric=1.0,
+            rubric={"content": {"score": 1.0, "max": 1.0}},
+            checks={"answer_exists": True},
+            run_meta={"target_role": "reviewer"},
+        )
+
+        enriched = ingest_artifacts(result_obj, base_dir=base)
+
+        assert enriched.score == "pass"
+        assert enriched.score_numeric == 1.0
+        assert "process_penalties" not in enriched.rubric
+        assert enriched.orchestration_checks["fallback_answer_after_dispatch"] is False
+        assert enriched.orchestration_checks["process_penalty_total"] == 0.0
+
+    def test_process_penalty_lowers_numeric_score_without_flipping_pass(self, tmp_path):
+        from eval_harness import ingest_artifacts
+
+        base = tmp_path / "results"
+
+        hist1 = base / "hist-1-task-pen"
+        hist1.mkdir(parents=True)
+        TaskResult(
+            task_id="task-pen",
+            run_id="hist-1",
+            score="pass",
+            score_numeric=1.0,
+            tokens={"total": 800},
+            elapsed_seconds=30.0,
+        ).write_json(hist1)
+
+        hist2 = base / "hist-2-task-pen"
+        hist2.mkdir(parents=True)
+        TaskResult(
+            task_id="task-pen",
+            run_id="hist-2",
+            score="pass",
+            score_numeric=1.0,
+            tokens={"total": 1000},
+            elapsed_seconds=35.0,
+        ).write_json(hist2)
+
+        run_dir = base / "run-1-task-pen"
+        artifacts = run_dir / "artifacts"
+        (artifacts / "pi-sessions").mkdir(parents=True)
+        (artifacts / "orchestra-debug" / "logs").mkdir(parents=True)
+        (artifacts / "tokens.json").write_text(json.dumps({"total_tokens": 3000}))
+        (artifacts / "timing.json").write_text(json.dumps({"elapsed_seconds": 120.0}))
+        (artifacts / "pi-sessions" / "sess.jsonl").write_text(
+            json.dumps({"type": "session", "id": "sess-1"}) + "\n" +
+            json.dumps({
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "toolCall",
+                        "name": "orch_dispatch",
+                        "arguments": {"goal": "review code", "role": "reviewer"},
+                    }],
+                },
+            }) + "\n"
+        )
+        (artifacts / "orchestra-debug" / "logs" / "run.jsonl").write_text(
+            json.dumps({"event": "run.created", "role": "reviewer", "run_id": "w1"}) + "\n" +
+            json.dumps({"event": "worker.started", "role": "reviewer", "run_id": "w1"}) + "\n" +
+            json.dumps({"event": "retry.requested", "run_id": "w1"}) + "\n"
+        )
+        (artifacts / "manifest.json").write_text(json.dumps({"orchestra": {}}))
+
+        result_obj = TaskResult(
+            task_id="task-pen",
+            run_id="run-1",
+            score="pass",
+            score_numeric=1.0,
+            rubric={"content": {"score": 1.0, "max": 1.0}},
+            checks={"answer_exists": True},
+            run_meta={"target_role": "reviewer"},
+        )
+
+        enriched = ingest_artifacts(result_obj, base_dir=base)
+
+        assert enriched.score == "pass"
+        assert enriched.score_numeric is not None
+        assert enriched.score_numeric < 1.0
+        assert enriched.rubric["process_penalties"]["score"] < 0
+        assert enriched.orchestration_checks["fallback_answer_after_dispatch"] is True
+        assert enriched.orchestration_checks["worker_running_without_exit"] is True
+        assert enriched.orchestration_checks["process_penalty_total"] > 0
+
+    def test_run_detail_shows_no_rubric_score_for_legacy_results(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-old")
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-old", run_id="legacy-1", score="fail"),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "run", "legacy-1"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "score" in result.stdout
+        assert "fail" in result.stdout
+        assert "no rubric score" in result.stdout
+

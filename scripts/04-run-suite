@@ -6,7 +6,7 @@ ROOT="$SCRIPT_DIR/.."
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <suite> [--auto|--collect-only]
+Usage: $(basename "$0") <suite> [--auto] [--no-orch-on]
        $(basename "$0") --list
 
 Run every task in a suite with scripts/02-open-pi <task-id> --auto, grade each
@@ -14,19 +14,19 @@ run, then print the summary. This is the default dogfood suite flow.
 
 Options:
   --auto          Run each task with 02-open-pi --auto before grading (default)
-  --collect-only  Do not run Pi; only grade latest prepared/ungraded runs
+  --no-orch-on    Pass --no-orch-on to 02-open-pi for baseline/no-Orchestra runs
 
 Suites:
   smoke
   role-focused
-  contract
-  capability
+  capability-normal
+  capability-hard
 
 Examples:
   scripts/04-run-suite --list
   scripts/04-run-suite smoke
   scripts/04-run-suite role-focused --auto
-  scripts/04-run-suite smoke --collect-only
+  scripts/04-run-suite role-focused --auto --no-orch-on
 EOF
 }
 
@@ -41,9 +41,16 @@ for y in base.glob('*/task.yaml'):
         s=line.strip()
         if s.startswith('batch:'):
             c[s.split(':',1)[1].strip().strip('"')]+=1
-for name in ['smoke','role-focused','contract','capability']:
-    if c[name]: print(f"  {name:<14} {c[name]} tasks")
+for name in ['smoke','role-focused','capability-normal','capability-hard']:
+    print(f"  {name:<18} {c[name]} tasks")
 PY
+}
+
+is_known_suite() {
+  case "$1" in
+    smoke|role-focused|capability-normal|capability-hard) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 tasks_for_suite() {
@@ -73,21 +80,29 @@ if [ -z "$suite" ]; then usage; exit 1; fi
 shift || true
 
 run_auto=true
+no_orch_on=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto) run_auto=true; shift ;;
-    --collect-only) run_auto=false; shift ;;
+    --no-orch-on) no_orch_on=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[bench] unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-mapfile -t task_ids < <(tasks_for_suite "$suite")
-if [ ${#task_ids[@]} -eq 0 ]; then
-  echo "[bench] unknown or empty suite: $suite" >&2
+if ! is_known_suite "$suite"; then
+  echo "[bench] unknown suite: $suite" >&2
   echo "[bench] available suites:" >&2
   list_suites >&2
   exit 1
+fi
+
+mapfile -t task_ids < <(tasks_for_suite "$suite")
+if [ ${#task_ids[@]} -eq 0 ]; then
+  echo "[bench] suite has no tasks yet: $suite"
+  echo "[bench] available suites:"
+  list_suites
+  exit 0
 fi
 
 failures=0
@@ -95,7 +110,11 @@ for task_id in "${task_ids[@]}"; do
   echo ""
   echo "=== $suite / $task_id ==="
   if $run_auto; then
-    if ! "$ROOT/scripts/02-open-pi" "$task_id" --auto; then
+    open_pi_args=("$task_id" --auto)
+    if $no_orch_on; then
+      open_pi_args+=(--no-orch-on)
+    fi
+    if ! "$ROOT/scripts/02-open-pi" "${open_pi_args[@]}"; then
       echo "[bench] auto run failed: $task_id" >&2
       failures=$((failures + 1))
       continue

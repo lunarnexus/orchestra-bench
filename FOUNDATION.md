@@ -70,10 +70,10 @@ The benchmark should be organized into a few batches, not many modes.
 Current intended batch philosophy:
 - `smoke` — 6 real end-to-end tasks: 3 compact runtime smokes plus 3 workflow smokes that require research/planning/build/verify/review/security evidence
 - `role-focused` — 3 tasks each for planner, researcher, verifier, reviewer, builder, and appsec
-- `contract` — runtime/workdir and anti-fake-success checks
-- `capability` — more realistic SaaSBench-inspired end-to-end tasks that may legitimately fail on weaker setups
+- `capability-normal` — 3 straightforward, passable, real-app E2E tasks across varied stacks
+- `capability-hard` — 3 passable but difficult SaaSBench-style E2E tasks with seeded conflicts/traps
 
-Advanced capability work may later split into multiple capability batches.
+Old standalone `contract` tasks are not public benchmark suites; container/workdir invariants belong in harness/container checks. Capability tasks are the exception to the normal outcome-first/no-forced-roles principle: they intentionally score full Orchestra workflow evidence across planner, researcher, builder, verifier, reviewer, and appsec. That workflow evidence is required as task material but scored, not an automatic pass/fail gate.
 
 Smoke E2E tests should be inspired by SaaSBench-style product patterns:
 - dependent setup chain -> one core action
@@ -91,6 +91,7 @@ Keep support for:
 - model and catalog provenance
 - Orchestra on/off comparisons
 - comparison across catalog / prompt / skill changes
+- baseline/no-Orchestra suite runs with `04-run-suite --no-orch-on`
 
 ### 10. Task material should borrow from SaaSBench
 Task structure and benchmark wisdom should be borrowed from SaaSBench where useful:
@@ -117,6 +118,19 @@ Use these user-specified runtime sources:
 Install rules:
 - install Orchestra using its `README.md`
 - install the LM Studio plugin using the official `pi` plugin install command
+
+## Capability-suite decisions
+- Delete old flawed capability task IDs rather than keep them in public inventory.
+- Use `capability-normal` and `capability-hard` as separate suites.
+- Include 3 tasks per capability suite.
+- Use varied languages, frameworks, dependencies, app types, and DB/storage types.
+- Preinstall task platform dependencies in the benchmark image/container where practical so agents are not tested on boring package setup.
+- Use bundled local `kb/` docs instead of live web access for capability research; web surfing availability is not what these tasks test.
+- Prefer real app dependencies when they are part of the behavior being evaluated, including Redis/Postgres when stable inside the existing benchmark container.
+- Do not create extra service containers for capability dependencies; install/start services inside the existing benchmark container when needed.
+- Use lightweight substitutes only when they preserve the same app behavior and failure modes being evaluated.
+- Each capability task should produce a real working app and test functionality, security, performance, and workflow artifacts where relevant.
+- Capability tasks must be browser-routable working applications, not API-only slices. A valid capability app needs at least one usable `GET /` or equivalent HTML/browser entrypoint that lets a human inspect and exercise the core workflow on a routable host/port. API endpoints can still be primary grading targets, but the first browser experience must not be a bare 404 or docs-only page.
 
 ## Non-goals
 - reproducing full SaaSBench complexity

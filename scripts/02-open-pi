@@ -66,16 +66,17 @@ for y in sorted(base.glob('*/task.yaml')):
         data[k.strip()] = v.strip().strip('"')
     rows.append(data)
 
-order = ['smoke', 'role-focused', 'contract', 'capability']
+order = ['smoke', 'role-focused', 'capability-normal', 'capability-hard']
 by_batch = collections.defaultdict(list)
 for r in rows:
     by_batch[r.get('batch','')].append(r)
 
 for batch in order:
     items = by_batch.get(batch, [])
-    if not items:
-        continue
     print(f"\n[{batch}]")
+    if not items:
+        print("  (no tasks yet)")
+        continue
     if batch == 'role-focused':
         by_role = collections.defaultdict(list)
         for r in items:

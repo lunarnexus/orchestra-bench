@@ -268,10 +268,13 @@ Smoke tasks should be:
 - but complex enough that Orchestra might naturally choose to plan, research, review, verify, or security-check if helpful
 
 ### Better organization is by batch, not by a huge set of modes
-Current agreed direction:
+Current agreed direction after capability cleanup:
 - `smoke`
-- `contract`
-- one or more advanced `capability` batches
+- `role-focused`
+- `capability-normal`
+- `capability-hard`
+
+Old standalone `contract` tasks are retired from the public benchmark inventory. Runtime/workdir contract checks belong in harness/container tests or startup health checks.
 
 ### Desired task character
 Even the smaller tasks should create natural pressure for some mix of:
@@ -287,19 +290,20 @@ But grading should remain focused on the delivered outcome.
 
 ## 8. Current task set and status
 
-Current implemented tasks in the repo:
-- `smoke`
+Current implemented public task inventory:
+- `smoke`: 6 real smoke/workflow tasks.
+- `role-focused`: 18 per-role tasks, 3 each for planner, researcher, verifier, reviewer, builder, and appsec.
+- `capability-normal`: 3 integrated app-building tasks.
+- `capability-hard`: 3 harder integrated app-building tasks.
+
+Retired task IDs:
+- `smoke` legacy contract task
 - `plan-bounded-feature`
 - `research-api-integration`
-- `builder-add-endpoint`
-- `builder-fix-seeded-bug`
-- `reviewer-catch-defects`
-- `verifier-decide-pass-fail`
-- `appsec-vulnerable-diff`
 - `orchestrate-plan-build-verify`
 
 Research conclusion:
-These are useful scaffolding and raw material, but the organization is not yet good enough. Some tasks may be too toy or too role-isolated and should be regrouped, rewritten, or replaced under the new batch-first benchmark philosophy.
+The old capability tasks were useful scaffolding but are not good enough for final capability benchmarking: two were pre-solved, one had an invalid verification contract, and none required/scored full Orchestra workflow evidence. They should be replaced with real app-building capability suites.
 
 ---
 
@@ -314,10 +318,10 @@ Likely default:
 - still use the same catalog-derived model for fair Orchestra on/off comparisons
 
 ### Batching work next
-Likely next benchmark-level design step after runtime repair:
-- classify current tasks into smoke / contract / capability
-- delete or rewrite weak toy tasks
-- define a small number of benchmark batches rather than a scattered task list
+Current benchmark-level design step:
+- build `capability-normal` and `capability-hard` tasks
+- score, rather than hard-fail, full workflow evidence across planner/researcher/builder/verifier/reviewer/appsec
+- keep old contract checks out of public suite inventory
 
 ---
 

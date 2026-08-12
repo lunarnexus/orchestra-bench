@@ -66,10 +66,14 @@ from __future__ import annotations
 import json
 import statistics
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+from __init__ import TaskResult
+from eval_harness import format_efficiency_summary, format_rubric_summary, orchestration_warnings
+
 view = sys.argv[2]
 run_query = sys.argv[3]
 task_filter = sys.argv[4]
@@ -282,28 +286,47 @@ def print_run_detail(rows, q):
         print(f"[bench] run not found or ambiguous: {q}", file=sys.stderr)
         raise SystemExit(1)
     print("=== run detail ===")
-    print(f"run_id   : {r.get('run_id','')}")
-    print(f"task_id  : {r.get('task_id','')}")
-    print(f"score    : {r.get('score','')}")
-    print(f"result   : {r.get('_path','')}")
-    print(f"artifacts: {r.get('_dir','')}/artifacts/")
+    print(f"run_id       : {r.get('run_id','')}")
+    print(f"task_id      : {r.get('task_id','')}")
+    print(f"score        : {r.get('score','')}")
+    score_numeric = r.get("score_numeric")
+    if isinstance(score_numeric, (int, float)):
+        print(f"score_numeric: {score_numeric:.2f}")
+    print(f"rubric       : {format_rubric_summary(r.get('rubric'))}")
+    print(f"result       : {r.get('_path','')}")
+    print(f"artifacts    : {r.get('_dir','')}/artifacts/")
     meta = r.get("run_meta") or {}
-    print(f"model    : {meta.get('model','')}")
-    print(f"role     : {meta.get('role','')}")
+    print(f"model        : {meta.get('model','')}")
+    print(f"role         : {meta.get('role','')}")
     if meta.get("target_role"):
-        print(f"target   : {meta.get('target_role','')}")
+        print(f"target       : {meta.get('target_role','')}")
     sessions = meta.get("pi_session_ids") or []
-    print(f"sessions : {', '.join(sessions) if sessions else 'none captured'}")
+    print(f"sessions     : {', '.join(sessions) if sessions else 'none captured'}")
     parts = token_parts(r)
-    print(f"elapsed  : {fmt_seconds(elapsed(r))}")
-    print(f"tokens   : total={parts['total']:,} input={parts['input']:,} output={parts['output']:,} reasoning={parts['reasoning']:,}")
-    print("\nchecks:")
+    print(f"elapsed      : {fmt_seconds(elapsed(r))}")
+    print(f"tokens       : total={parts['total']:,} input={parts['input']:,} output={parts['output']:,} reasoning={parts['reasoning']:,}")
+
+    efficiency_lines = format_efficiency_summary(TaskResult.from_json(root / r.get('_path', '')), results_dir)
+    if efficiency_lines:
+        print("\nefficiency:")
+        for line in efficiency_lines:
+            print(f"  {line}")
+
     checks = r.get("checks") or {}
+    print("\nchecks:")
     if checks:
         for k, v in checks.items():
             print(f"  {k}: {v}")
     else:
         print("  none")
+
+    orch_checks = r.get("orchestration_checks") or {}
+    warnings = orchestration_warnings(orch_checks)
+    if warnings:
+        print("\norchestration warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+
     orch = meta.get("orchestra_artifacts") or {}
     if orch:
         print("\norchestra artifacts:")

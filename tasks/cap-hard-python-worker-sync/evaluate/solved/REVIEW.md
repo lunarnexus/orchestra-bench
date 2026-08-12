@@ -1,0 +1,4 @@
+finding: the GET / homepage now exposes the Doc Sync routes a browser user needs, while response schemas stay stable across app.py, worker.py, and sync_core.py because GET /sync-jobs/{job_id} and GET /admin/sync-jobs both return persisted SQLite fields instead of reconstructing ad hoc payloads.
+risk: without explicit 400, 401, 404, and 422 handling for invalid pagination, auth, and missing rows, callers would get inconsistent behavior; the final routes now reject bad page/page_size values and unknown filters.
+finding: retries, stale reclaim, conflict transitions, and audit history are recorded in job history so operators can review queued, started, retry_scheduled, reclaimed, succeeded, and conflict events newest first.
+risk: one follow-up issue is future schema drift, so tests/test_sync_app.py should keep protecting status codes, response schemas, pagination, and history ordering.
