@@ -550,10 +550,65 @@ class TestOpenPiInteractiveSession:
         assert "target: planner" in result.stdout
         assert cfg["role"] == "builder"
         assert cfg["target_role"] == "planner"
+        assert cfg["orchestra"] is True
         log = docker_log.read_text()
         assert "parent/coordinator" in log
+        assert "dispatch to the planner role" in log
         assert "dispatch the $target_role role" not in log
         assert "dispatch the $BENCH_TARGET_ROLE role" not in log
+        assert "BENCH_ROLE_INSTRUCTION" in log
+
+    def test_capability_auto_marks_orchestra_and_prompts_expected_workflow(self, tmp_path):
+        import os
+        import shutil
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        docker_log = tmp_path / "docker.log"
+
+        docker = bin_dir / "docker"
+        docker.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\n"
+            "case \"$1\" in\n"
+            "  inspect) printf 'true\\n'; exit 0 ;;\n"
+            "  exec) exit 0 ;;\n"
+            "  *) exit 0 ;;\n"
+            "esac\n"
+        )
+        docker.chmod(0o755)
+
+        env = os.environ.copy()
+        env.update({
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "DOCKER_LOG": str(docker_log),
+        })
+
+        task_id = "cap-normal-fastapi-helpdesk"
+        results_dir = _REPO_ROOT / "results"
+        before = {p for p in results_dir.glob(f"*-{task_id}")}
+        try:
+            result = sp.run(
+                [_REPO_ROOT / "scripts" / "02-open-pi", task_id, "--auto"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            created = [p for p in results_dir.glob(f"*-{task_id}") if p not in before]
+            assert created, "expected 02-open-pi to create a run metadata dir"
+            cfg = json.loads((created[0] / ".bench_run.json").read_text())
+        finally:
+            for p in results_dir.glob(f"*-{task_id}"):
+                if p not in before:
+                    shutil.rmtree(p, ignore_errors=True)
+
+        assert result.returncode == 0
+        assert cfg["orchestra"] is True
+        log = docker_log.read_text()
+        assert '-p "/orch on"' in log
+        assert "dispatch to planner, researcher, builder, verifier, reviewer, appsec" in log
         assert "BENCH_ROLE_INSTRUCTION" in log
 
 

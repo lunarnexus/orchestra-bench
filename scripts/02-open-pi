@@ -146,14 +146,24 @@ export BENCH_RUN_ID BENCH_TASK_ID="$task_id"
 
 family="$(_yaml_value "$TASK_YAML" family || true)"
 batch="$(_yaml_value "$TASK_YAML" batch || true)"
+expected_workflow="$(_yaml_value "$TASK_YAML" expected_workflow || true)"
 parent_role="builder"
 target_role=""
 case "$family" in
   planner|researcher|verifier|reviewer|builder|appsec) target_role="$family" ;;
 esac
 
+prepare_orchestra_arg=""
+if $auto; then
+  if $auto_orch_on; then
+    prepare_orchestra_arg="--orchestra"
+  else
+    prepare_orchestra_arg="--no-orchestra"
+  fi
+fi
+
 echo "[bench] preparing task run..."
-BENCH_TARGET_ROLE="$target_role" "$ROOT/scripts/_prepare-task-run" "$task_id" --run-id "$BENCH_RUN_ID" --role "$parent_role"
+BENCH_TARGET_ROLE="$target_role" "$ROOT/scripts/_prepare-task-run" "$task_id" --run-id "$BENCH_RUN_ID" --role "$parent_role" $prepare_orchestra_arg
 
 config_path="$ROOT/results/$BENCH_RUN_ID-$task_id/.bench_run.json"
 model_to_use=""
@@ -175,7 +185,10 @@ echo "[bench] grade:  scripts/03-collect-results $task_id"
 
 role_instruction=""
 if [ -n "$target_role" ]; then
-  role_instruction="This is a role-focused benchmark for the $target_role role. If Orchestra is enabled, keep this Pi session as the parent/coordinator and dispatch the $target_role role to do the task. If Orchestra is unavailable or disabled, complete the task directly."
+  role_instruction="This is a role-focused benchmark for the $target_role role. If Orchestra is enabled, keep this Pi session as the parent/coordinator and dispatch to the $target_role role to do the task. If Orchestra is unavailable or disabled, complete the task directly."
+elif [ "$family" = "capability" ] && [ -n "$expected_workflow" ]; then
+  expected_workflow_words="$(printf '%s' "$expected_workflow" | sed 's/,/, /g')"
+  role_instruction="This is a capability benchmark for Orchestra workflow behavior. First use /orch on. Then keep this Pi session as the parent/coordinator and dispatch to $expected_workflow_words for scoped planning, research, implementation, verification, review, and appsec work as appropriate. Integrate worker results before finalizing. If Orchestra is unavailable or disabled, complete the task directly and say so."
 fi
 
 if $auto; then
