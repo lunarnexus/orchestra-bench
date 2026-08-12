@@ -12,7 +12,7 @@ ENV ORCHESTRA_HOME=/opt/orchestra
 
 # Runtime deps
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git curl ca-certificates python3 python3-pip python3-venv ruby ruby-dev build-essential libsqlite3-dev && \
+    apt-get install -y --no-install-recommends git curl ca-certificates python3 python3-pip python3-venv ruby ruby-dev build-essential libsqlite3-dev pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
 # Preinstall common Python app/task deps for capability workloads.

@@ -27,6 +27,12 @@ class TestSlice1RuntimeContract:
         assert "/root/.pi/agent/skills" in dockerfile
         assert "cp -a /tmp/bench-skills/." in dockerfile
 
+    def test_dockerfile_includes_pkg_config_for_sqlite3_gem_build(self):
+        dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+        assert "gem install --no-document sinatra sqlite3 rack-test minitest" in dockerfile
+        assert "pkg-config" in dockerfile
+
     def test_readme_mentions_numbered_runtime_entrypoint(self):
         readme = (REPO_ROOT / "README.md").read_text()
 
