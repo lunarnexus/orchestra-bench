@@ -37,6 +37,7 @@ require_lmstudio_config_source() {
 
 sync_orchestra_config() {
   require_orchestra_config_source
+  rm -rf "$PI_ORCHESTRA_RUNTIME_DIR"
   mkdir -p "$PI_ORCHESTRA_RUNTIME_DIR"
   cp -a "$BENCH_ORCHESTRA_CONFIG_SRC"/. "$PI_ORCHESTRA_RUNTIME_DIR"/
 }
