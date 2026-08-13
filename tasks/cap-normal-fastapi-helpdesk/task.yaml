@@ -1,7 +1,7 @@
 task_id: cap-normal-fastapi-helpdesk
 description: "Build a FastAPI helpdesk API with SQLite persistence, admin triage, audit log, and workflow evidence"
 family: capability
-batch: capability-normal
+batch: capability-easy
 scoring_type: numeric
 timeout_minutes: 25
 evaluator: evaluate/run.sh

@@ -70,8 +70,8 @@ The benchmark should be organized into a few batches, not many modes.
 Current intended batch philosophy:
 - `smoke` — 6 real end-to-end tasks: 3 compact runtime smokes plus 3 workflow smokes that require research/planning/build/verify/review/security evidence
 - `role-focused` — 3 tasks each for planner, researcher, verifier, reviewer, builder, and appsec
-- `capability-normal` — 3 straightforward, passable, real-app E2E tasks across varied stacks
-- `capability-hard` — 3 passable but difficult SaaSBench-style E2E tasks with seeded conflicts/traps
+- `capability-easy` — 3 straightforward, passable, real-app E2E tasks across varied stacks
+- `capability-normal` — 3 passable but difficult SaaSBench-style E2E tasks with seeded conflicts/traps
 
 Old standalone `contract` tasks are not public benchmark suites; container/workdir invariants belong in harness/container checks. Capability tasks are the exception to the normal outcome-first/no-forced-roles principle: they intentionally score full Orchestra workflow evidence across planner, researcher, builder, verifier, reviewer, and appsec. That workflow evidence is required as task material but scored, not an automatic pass/fail gate.
 
@@ -121,7 +121,7 @@ Install rules:
 
 ## Capability-suite decisions
 - Delete old flawed capability task IDs rather than keep them in public inventory.
-- Use `capability-normal` and `capability-hard` as separate suites.
+- Use `capability-easy` and `capability-normal` as separate suites.
 - Include 3 tasks per capability suite.
 - Use varied languages, frameworks, dependencies, app types, and DB/storage types.
 - Preinstall task platform dependencies in the benchmark image/container where practical so agents are not tested on boring package setup.

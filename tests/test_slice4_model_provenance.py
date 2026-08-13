@@ -9,7 +9,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from __init__ import TaskResult  # noqa: E402
-from eval_harness import build_run_metadata, resolve_catalog_model, _enrich_result_with_bench_run  # noqa: E402
+from eval_harness import (  # noqa: E402
+    _enrich_result_with_bench_run,
+    build_run_metadata,
+    collect_aux_skills_snapshot,
+    collect_catalog_runtime_snapshot,
+    collect_runtime_snapshot,
+    resolve_catalog_model,
+)
 
 
 class TestCatalogModelProvenance:
@@ -70,6 +77,7 @@ class TestRunMetadataProvenance:
             orchestra=True,
             extra_skills=["builder"],
             notes="first trial",
+            runtime_snapshot={"pi_package_names": ["pi-codegraph"], "aux_skills_summary": "none"},
         )
 
         assert meta["task_id"] == "smoke"
@@ -81,6 +89,77 @@ class TestRunMetadataProvenance:
         assert meta["extra_skills"] == ["builder"]
         assert meta["catalog_path"] == "config/orchestra/agent-catalog.yaml"
         assert meta["catalog_sha256"]
+        assert meta["pi_package_names"] == ["pi-codegraph"]
+        assert meta["aux_skills_summary"] == "none"
+
+    def test_collect_catalog_runtime_snapshot_tracks_all_role_models(self, tmp_path):
+        catalog = tmp_path / "agent-catalog.yaml"
+        catalog.write_text(
+            "default_role: builder\n"
+            "roles:\n"
+            "  builder:\n"
+            "    model: qwen/big\n"
+            "  reviewer:\n"
+            "    model: qwen/big\n"
+            "  intern:\n"
+            "    model: qwen/small\n"
+            "    enabled: false\n"
+        )
+
+        snapshot = collect_catalog_runtime_snapshot(catalog)
+
+        assert snapshot["role_models"]["builder"] == "qwen/big"
+        assert snapshot["role_models"]["reviewer"] == "qwen/big"
+        assert snapshot["role_models"]["intern"] == "qwen/small"
+        assert snapshot["role_models_summary"] == "builder=qwen/big, intern=qwen/small, reviewer=qwen/big"
+        assert snapshot["enabled_roles"] == ["builder", "reviewer"]
+
+    def test_collect_aux_skills_snapshot_reports_none_when_only_gitkeep(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / ".gitkeep").write_text("")
+
+        snapshot = collect_aux_skills_snapshot(skills_dir)
+
+        assert snapshot["aux_skill_names"] == []
+        assert snapshot["aux_skills_enabled"] is False
+        assert snapshot["aux_skills_summary"] == "none"
+
+    def test_collect_runtime_snapshot_includes_container_plugins_and_extensions(self, tmp_path, monkeypatch):
+        catalog = tmp_path / "config" / "orchestra" / "agent-catalog.yaml"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(
+            "default_role: builder\n"
+            "roles:\n"
+            "  builder:\n"
+            "    model: qwen/big\n"
+        )
+        skills_dir = tmp_path / "config" / "skills"
+        (skills_dir / "extra-skill").mkdir(parents=True)
+        (skills_dir / "extra-skill" / "SKILL.md").write_text("name: extra-skill\n")
+
+        monkeypatch.setattr("eval_harness._docker_ok", lambda: True)
+
+        class _Proc:
+            def __init__(self, stdout: str):
+                self.stdout = stdout
+
+        def _fake_docker_exec(*args, **kwargs):
+            cmd = " ".join(args)
+            if "pi list" in cmd:
+                return _Proc("User packages:\n  http://example.test/pi-lmstudio (filtered)\n  http://example.test/pi-codegraph (filtered)\n")
+            if "/root/.pi/agent/extensions" in cmd:
+                return _Proc("orchestra\n")
+            raise AssertionError(cmd)
+
+        monkeypatch.setattr("eval_harness._docker_exec", _fake_docker_exec)
+
+        snapshot = collect_runtime_snapshot(catalog, orchestra_config_dir=catalog.parent, skills_dir=skills_dir)
+
+        assert snapshot["pi_package_names"] == ["pi-codegraph", "pi-lmstudio"]
+        assert snapshot["pi_extensions"] == ["orchestra"]
+        assert snapshot["aux_skill_names"] == ["extra-skill"]
+        assert snapshot["role_models_summary"] == "all=qwen/big"
 
     def test_enrich_result_merges_all_bench_run_fields(self, tmp_path):
         result_dir = tmp_path / "results" / "r1-smoke"

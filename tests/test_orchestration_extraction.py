@@ -169,6 +169,27 @@ class TestDetectDispatchesFromSession:
 
         assert isinstance(checks, dict)
 
+    def test_counts_compactions_across_pi_sessions(self, tmp_path):
+        run_dir = _build_artifacts_dir(tmp_path, "run-3b", "task-c2")
+
+        _write_session_jsonl(run_dir, [
+            _session_line("session", id="sess-003b"),
+            _session_line("compaction", id="cmp-1", summary="first"),
+            _session_line("message", message={"role": "assistant", "content": []}),
+            _session_line("compaction", id="cmp-2", summary="second"),
+        ])
+        _write_session_jsonl(run_dir, [
+            _session_line("session", id="sess-003c"),
+            _session_line("compaction", id="cmp-3", summary="third"),
+        ])
+
+        from eval_harness import extract_orchestration_checks
+
+        result = _make_result(run_id="run-3b", task_id="task-c2")
+        checks = extract_orchestration_checks(result, base_dir=tmp_path / "results")
+
+        assert checks["compaction_count"] == 3
+
 
 # ── 2. Worker completion from Orchestra logs ────────────────
 

@@ -85,7 +85,7 @@ class TestFinalSuiteInventory:
         assert "capability-raw-material" not in batches
 
     def test_capability_normal_includes_real_tasks(self):
-        capability_normal = [m for m in _task_meta() if m.get("batch") == "capability-normal"]
+        capability_normal = [m for m in _task_meta() if m.get("batch") == "capability-easy"]
         assert [m["task_id"] for m in capability_normal] == [
             "cap-normal-django-reports",
             "cap-normal-express-inventory",
@@ -93,7 +93,7 @@ class TestFinalSuiteInventory:
         ]
 
     def test_capability_hard_includes_current_real_tasks(self):
-        capability_hard = [m for m in _task_meta() if m.get("batch") == "capability-hard"]
+        capability_hard = [m for m in _task_meta() if m.get("batch") == "capability-normal"]
         assert [m["task_id"] for m in capability_hard] == [
             "cap-hard-python-worker-sync",
             "cap-hard-ruby-billing-ledger",
@@ -104,8 +104,8 @@ class TestFinalSuiteInventory:
         batches = Counter(str(m.get("batch")) for m in _task_meta())
         assert batches["smoke"] == 6
         assert batches["role-focused"] == 18
+        assert batches["capability-easy"] == 3
         assert batches["capability-normal"] == 3
-        assert batches["capability-hard"] == 3
         assert "contract" not in batches
         assert "capability" not in batches
 
@@ -113,11 +113,11 @@ class TestFinalSuiteInventory:
         readme = (_REPO_ROOT / "README.md").read_text()
         assert "### smoke — 6 real end-to-end tasks" in readme
         assert "### role-focused — 18 per-role tasks" in readme
-        assert "### capability-normal — integrated end-to-end tasks" in readme
+        assert "### capability-easy — integrated end-to-end tasks" in readme
         assert "cap-normal-fastapi-helpdesk" in readme
         assert "cap-normal-express-inventory" in readme
         assert "cap-normal-django-reports" in readme
-        assert "### capability-hard — integrated end-to-end tasks" in readme
+        assert "### capability-normal — integrated end-to-end tasks" in readme
         assert "cap-hard-python-worker-sync" in readme
         assert "cap-hard-ruby-billing-ledger" in readme
         assert "cap-hard-ts-approval-queue" in readme

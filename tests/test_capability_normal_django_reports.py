@@ -1,4 +1,4 @@
-"""Focused tests for the third capability-normal Django reporting task."""
+"""Focused tests for the third capability-easy Django reporting task."""
 
 from __future__ import annotations
 
@@ -206,7 +206,7 @@ class TestCapabilityNormalDjangoReportsTask:
     def test_task_metadata_marks_capability_workflow(self):
         text = (_TASK_DIR / "task.yaml").read_text()
         assert "task_id: cap-normal-django-reports" in text
-        assert "batch: capability-normal" in text
+        assert "batch: capability-easy" in text
         assert "scoring_type: numeric" in text
         assert "expected_workflow: planner,researcher,builder,verifier,reviewer,appsec" in text
 

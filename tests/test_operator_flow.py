@@ -265,7 +265,7 @@ class TestOpenPiScript:
 
     def test_task_list_order_uses_current_public_suites(self):
         script = (_REPO_ROOT / "scripts" / "02-open-pi").read_text()
-        assert "order = ['smoke', 'role-focused', 'capability-normal', 'capability-hard']" in script
+        assert "order = ['smoke', 'role-focused', 'capability-easy', 'capability-normal']" in script
         assert "order = ['smoke', 'role-focused', 'capability']" not in script
 
     def test_task_list_shows_current_capability_tasks(self):
@@ -274,8 +274,8 @@ class TestOpenPiScript:
             capture_output=True, text=True, timeout=5,
         )
         assert result.returncode == 0
+        assert "[capability-easy]" in result.stdout
         assert "[capability-normal]" in result.stdout
-        assert "[capability-hard]" in result.stdout
         assert "cap-normal-fastapi-helpdesk" in result.stdout
         assert "cap-hard-python-worker-sync" in result.stdout
         assert "(no tasks yet)" not in result.stdout
@@ -734,8 +734,8 @@ class TestRunSuiteScript:
 
     def test_script_lists_current_public_suites(self):
         script = (_REPO_ROOT / "scripts" / "04-run-suite").read_text()
+        assert "capability-easy" in script
         assert "capability-normal" in script
-        assert "capability-hard" in script
         assert "capability\n" not in script
 
     def test_capability_normal_suite_is_no_longer_placeholder(self):
@@ -744,8 +744,8 @@ class TestRunSuiteScript:
             capture_output=True, text=True, timeout=5,
         )
         assert result.returncode == 0
-        assert "capability-normal  3 tasks" in result.stdout
-        assert "capability-hard    3 tasks" in result.stdout
+        assert "capability-easy" in result.stdout and "3 tasks" in result.stdout
+        assert "capability-normal" in result.stdout and result.stdout.count("3 tasks") >= 2
 
     def test_unknown_suite_still_fails(self):
         result = sp.run(

@@ -1,4 +1,4 @@
-"""Focused tests for the second capability-hard TypeScript approval queue task."""
+"""Focused tests for the second capability-normal TypeScript approval queue task."""
 
 from __future__ import annotations
 
@@ -280,7 +280,7 @@ class TestCapabilityHardTsApprovalQueueTask:
     def test_task_metadata_marks_capability_workflow(self):
         text = (_TASK_DIR / "task.yaml").read_text()
         assert "task_id: cap-hard-ts-approval-queue" in text
-        assert "batch: capability-hard" in text
+        assert "batch: capability-normal" in text
         assert "scoring_type: numeric" in text
         assert "expected_workflow: planner,researcher,builder,verifier,reviewer,appsec" in text
 

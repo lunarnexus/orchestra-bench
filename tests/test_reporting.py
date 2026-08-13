@@ -487,16 +487,344 @@ def _install_results_script(tmp_path: Path) -> Path:
     return script
 
 
-def _write_task_yaml(tmp_path: Path, task_id: str) -> None:
+def _write_task_yaml(tmp_path: Path, task_id: str, *, batch: str | None = None, family: str | None = None) -> None:
     task_dir = tmp_path / "tasks" / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
-    (task_dir / "task.yaml").write_text(f"task_id: {task_id}\n")
+    lines = [f"task_id: {task_id}"]
+    if batch:
+        lines.append(f"batch: {batch}")
+    if family:
+        lines.append(f"family: {family}")
+    (task_dir / "task.yaml").write_text("\n".join(lines) + "\n")
 
 
 def _write_result_json(tmp_path: Path, result: TaskResult) -> None:
     run_dir = tmp_path / "results" / f"{result.run_id}-{result.task_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2) + "\n")
+
+
+class TestDashboardReporting:
+    def test_dashboard_shows_suite_and_test_breakdowns(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "smoke-a", batch="smoke")
+        _write_task_yaml(tmp_path, "smoke-b", batch="smoke")
+        _write_task_yaml(tmp_path, "cap-a", batch="capability-easy")
+
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="smoke-a",
+                run_id="run-1",
+                score="pass",
+                score_numeric=0.90,
+                rubric={"quality": {"score": 0.45, "max": 0.50}},
+                checks={"answer_exists": True, "tests_pass": True},
+                orchestration_checks={"compaction_count": 1, "dispatch_count": 2},
+                tokens={"total": 1000},
+                elapsed_seconds=30.0,
+                task_meta={"batch": "smoke"},
+                run_meta={"notes": "BatchA"},
+            ),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="smoke-b",
+                run_id="run-2",
+                score="fail",
+                score_numeric=0.40,
+                rubric={"quality": {"score": 0.20, "max": 0.50}},
+                checks={"answer_exists": True, "tests_pass": False},
+                orchestration_checks={"compaction_count": 0, "dispatch_count": 1},
+                tokens={"total": 500},
+                elapsed_seconds=45.0,
+                task_meta={"batch": "smoke"},
+                run_meta={"notes": "BatchA"},
+            ),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="cap-a",
+                run_id="run-3",
+                score="pass",
+                score_numeric=0.75,
+                rubric={"quality": {"score": 0.30, "max": 0.40}},
+                checks={"answer_exists": True},
+                orchestration_checks={"compaction_count": 3, "dispatch_count": 4},
+                tokens={"total": 2000},
+                elapsed_seconds=90.0,
+                task_meta={"batch": "capability-easy"},
+                run_meta={"notes": "BatchB"},
+            ),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script)],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "=== per-suite breakdown ===" in result.stdout
+        assert "[smoke]" in result.stdout
+        assert "[capability-easy]" in result.stdout
+        assert "score_numeric: avg=0.65" in result.stdout
+        assert "- quality:" in result.stdout
+        assert "- compaction_count: total=1 avg=0.50" in result.stdout
+        assert "- target_role_dispatched:" not in result.stdout
+        assert "=== per-test breakdown ===" in result.stdout
+        assert "- smoke-a" in result.stdout
+        assert "- smoke-b" in result.stdout
+
+    def test_notes_filter_limits_dashboard_rows(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_task_yaml(tmp_path, "task-b", batch="smoke")
+
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-a",
+                score="pass",
+                tokens={"total": 100},
+                elapsed_seconds=10.0,
+                task_meta={"batch": "smoke"},
+                run_meta={"notes": "Batch1 alpha"},
+            ),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-b",
+                run_id="run-b",
+                score="pass",
+                tokens={"total": 200},
+                elapsed_seconds=20.0,
+                task_meta={"batch": "smoke"},
+                run_meta={"notes": "Batch2 beta"},
+            ),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "dashboard", "--notes", "Batch1"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "notes filter: batch1" in result.stdout
+        assert "graded runs : 1" in result.stdout
+        assert "- task-a" in result.stdout
+        assert "- task-b" not in result.stdout
+
+    def test_notes_view_lists_distinct_notes(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_task_yaml(tmp_path, "task-b", batch="smoke")
+        _write_task_yaml(tmp_path, "task-c", batch="smoke")
+
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-a", run_id="run-a", score="pass", run_meta={"notes": "Batch1 alpha"}),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-b", run_id="run-b", score="fail", run_meta={"notes": "Batch1 alpha"}),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-c", run_id="run-c", score="pass", run_meta={"notes": "Batch2 beta"}),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "notes"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "=== notes ===" in result.stdout
+        assert "runs=2" in result.stdout and "notes=Batch1 alpha" in result.stdout
+        assert "pass=1/2" in result.stdout
+        assert "runs=1" in result.stdout and "notes=Batch2 beta" in result.stdout
+
+    def test_rubric_filter_shows_only_rubric_section(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-a",
+                score="pass",
+                score_numeric=0.90,
+                rubric={
+                    "quality": {"score": 0.45, "max": 0.50},
+                    "process": {"score": 0.20, "max": 0.25},
+                },
+                checks={"answer_exists": True},
+                orchestration_checks={"compaction_count": 2},
+                task_meta={"batch": "smoke"},
+            ),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "dashboard", "--rubric"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "rubric view : all" in result.stdout
+        assert "rubric:" in result.stdout
+        assert "- quality:" in result.stdout
+        assert "- process:" in result.stdout
+        assert "checks:" not in result.stdout
+        assert "behaviors:" not in result.stdout
+        assert "score_numeric:" not in result.stdout
+
+    def test_specific_filters_accept_comma_separated_names(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-a",
+                score="pass",
+                rubric={
+                    "quality": {"score": 0.45, "max": 0.50},
+                    "process": {"score": 0.20, "max": 0.25},
+                },
+                checks={"answer_exists": True, "tests_pass": False},
+                orchestration_checks={"compaction_count": 2, "dispatch_count": 4},
+                task_meta={"batch": "smoke"},
+            ),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "dashboard", "--rubric", "quality", "--checks", "tests_pass", "--behaviors", "compaction_count,dispatch_count"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "- quality:" in result.stdout
+        assert "- process:" not in result.stdout
+        assert "- tests_pass:" in result.stdout
+        assert "- answer_exists:" not in result.stdout
+        assert "- compaction_count:" in result.stdout
+        assert "- dispatch_count:" in result.stdout
+
+    def test_detail_1_shows_only_base_metrics(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-a",
+                score="pass",
+                score_numeric=0.90,
+                rubric={"quality": {"score": 0.45, "max": 0.50}},
+                checks={"answer_exists": True},
+                orchestration_checks={"compaction_count": 2},
+                tokens={"total": 100},
+                elapsed_seconds=10.0,
+                task_meta={"batch": "smoke"},
+            ),
+        )
+        result = __import__("subprocess").run(
+            ["bash", str(script), "dashboard", "--detail", "1"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "detail level: 1" in result.stdout
+        assert "runs        :" in result.stdout
+        assert "pass rate   :" in result.stdout
+        assert "tokens" in result.stdout
+        assert "elapsed" in result.stdout
+        assert "score_numeric:" not in result.stdout
+        assert "rubric:" not in result.stdout
+        assert "checks:" not in result.stdout
+        assert "behaviors:" not in result.stdout
+
+    def test_suite_filter_limits_dashboard_rows(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_task_yaml(tmp_path, "task-b", batch="capability-easy")
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-a", run_id="run-a", score="pass", task_meta={"batch": "smoke"}),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-b", run_id="run-b", score="pass", task_meta={"batch": "capability-easy"}),
+        )
+        result = __import__("subprocess").run(
+            ["bash", str(script), "dashboard", "--suite", "smoke"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "suite filter: smoke" in result.stdout
+        assert "[smoke]" in result.stdout
+        assert "[capability-easy]" not in result.stdout
+        assert "- task-a" in result.stdout
+        assert "- task-b" not in result.stdout
+
+    def test_detail_2_shows_summary_breakdowns(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-a",
+                score="pass",
+                score_numeric=0.90,
+                rubric={"quality": {"score": 0.45, "max": 0.50}},
+                checks={"answer_exists": True, "tests_pass": False},
+                orchestration_checks={"compaction_count": 2, "dispatch_count": 1, "worker_completed": True},
+                tokens={"total": 100},
+                elapsed_seconds=10.0,
+                task_meta={"batch": "smoke"},
+            ),
+        )
+        result = __import__("subprocess").run(
+            ["bash", str(script), "dashboard", "--detail", "2"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "detail level: 2" in result.stdout
+        assert "score_numeric:" in result.stdout
+        assert "rubric       : avg=" in result.stdout
+        assert "checks       : avg_pass_rate=" in result.stdout
+        assert "behaviors    :" in result.stdout
+        assert "worker_completed=1/1" in result.stdout
+        assert "  - quality:" not in result.stdout
+        assert "  - answer_exists:" not in result.stdout
 
 
 class TestRunDetailReporting:
@@ -540,6 +868,7 @@ class TestRunDetailReporting:
                     "timeouts": 1,
                     "retries": 0,
                     "premature_completion": False,
+                    "compaction_count": 2,
                 },
                 tokens={"total": 950},
                 elapsed_seconds=32.0,
@@ -559,9 +888,13 @@ class TestRunDetailReporting:
         assert "0.86" in result.stdout
         assert "rubric" in result.stdout
         assert "role_result_quality=0.35/0.40" in result.stdout
+        assert "orchestration:" in result.stdout
+        assert "compaction_count: 2" in result.stdout
+        assert "timeouts: 1" in result.stdout
         assert "orchestration warnings" in result.stdout
         assert "missing expected role" in result.stdout
         assert "1 timeout" in result.stdout
+        assert "2 compactions" in result.stdout
         assert "efficiency" in result.stdout
         assert "tokens " in result.stdout
         assert "current=950" in result.stdout
@@ -653,7 +986,7 @@ class TestRunDetailReporting:
             score_numeric=0.04,
             rubric={"content": {"score": 0.04, "max": 1.0}},
             checks={},
-            task_meta={"family": "capability", "batch": "capability-normal"},
+            task_meta={"family": "capability", "batch": "capability-easy"},
         )
 
         enriched = ingest_artifacts(result_obj, base_dir=base)

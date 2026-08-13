@@ -139,17 +139,25 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(root))
 
-from eval_harness import build_run_metadata  # noqa: E402
+from eval_harness import build_run_metadata, collect_runtime_snapshot  # noqa: E402
+
+catalog_path = root / "config" / "orchestra" / "agent-catalog.yaml"
+runtime_snapshot = collect_runtime_snapshot(
+    catalog_path=catalog_path,
+    orchestra_config_dir=root / "config" / "orchestra",
+    skills_dir=root / "config" / "skills",
+)
 
 meta = build_run_metadata(
     task_id=os.environ["BENCH_TASK_ID"],
     run_id=os.environ["BENCH_RUN_ID"],
-    catalog_path=root / "config" / "orchestra" / "agent-catalog.yaml",
+    catalog_path=catalog_path,
     catalog_label="config/orchestra/agent-catalog.yaml",
     role=os.environ.get("BENCH_ROLE") or None,
     orchestra=json.loads(os.environ["BENCH_ORCHESTRA_JSON"]),
     extra_skills=json.loads(os.environ["BENCH_EXTRA_SKILLS_JSON"]),
     notes=os.environ.get("BENCH_NOTES", ""),
+    runtime_snapshot=runtime_snapshot,
 )
 target_role = os.environ.get("BENCH_TARGET_ROLE", "").strip()
 if target_role:

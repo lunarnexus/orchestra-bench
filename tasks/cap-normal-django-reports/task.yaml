@@ -1,7 +1,7 @@
 task_id: cap-normal-django-reports
 description: "Build a Django reporting app with SQLite persistence, grouped summaries, exports, report history, and workflow evidence"
 family: capability
-batch: capability-normal
+batch: capability-easy
 scoring_type: numeric
 timeout_minutes: 25
 evaluator: evaluate/run.sh

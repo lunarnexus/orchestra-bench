@@ -48,7 +48,7 @@ Narrower tasks that isolate value/behavior by role: 3 tasks each for planner, re
 | builder | `builder-add-endpoint`, `builder-fix-seeded-bug`, `builder-implement-parser` |
 | appsec | `appsec-vulnerable-diff`, `appsec-review-upload-flow`, `appsec-secrets-config-audit` |
 
-### capability-normal — integrated end-to-end tasks
+### capability-easy — integrated end-to-end tasks
 
 Straightforward SaaSBench-inspired real-app tasks:
 
@@ -58,7 +58,7 @@ Straightforward SaaSBench-inspired real-app tasks:
 | `cap-normal-express-inventory` | Node / Express-style / file-backed | Build an inventory API with product CRUD, stock adjustments, low-stock reporting, ledger history, and workflow evidence scoring |
 | `cap-normal-fastapi-helpdesk` | Python / FastAPI / SQLite | Build a helpdesk API with public ticket intake, admin triage, audit log, pagination, and workflow evidence scoring |
 
-### capability-hard — integrated end-to-end tasks
+### capability-normal — integrated end-to-end tasks
 
 Harder SaaSBench-inspired real-app tasks with more realistic conflicts and traps.
 

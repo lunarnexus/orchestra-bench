@@ -117,6 +117,173 @@ def resolve_catalog_model(
     }
 
 
+def _stable_object_sha256(value: object) -> str:
+    """Return a stable SHA256 for JSON-serializable provenance data."""
+    payload = _json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _list_relative_files(base_dir: Path | str) -> list[str]:
+    """Return sorted relative file paths under *base_dir*."""
+    base = Path(base_dir)
+    if not base.exists():
+        return []
+
+    files: list[str] = []
+    for path in sorted(base.rglob("*")):
+        if path.is_file():
+            files.append(path.relative_to(base).as_posix())
+    return files
+
+
+def _digest_file_set(base_dir: Path | str, files: Sequence[str]) -> str:
+    """Return a stable digest for the selected files beneath *base_dir*."""
+    base = Path(base_dir)
+    h = sha256()
+    for rel_path in sorted(str(p) for p in files):
+        h.update(rel_path.encode("utf-8"))
+        h.update(b"\0")
+        h.update((base / rel_path).read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _summarize_role_models(role_models: dict[str, str]) -> str:
+    """Render a compact summary of role→model assignments."""
+    if not role_models:
+        return "none"
+    unique_models = {model for model in role_models.values() if model}
+    if len(unique_models) == 1:
+        return f"all={next(iter(unique_models))}"
+    return ", ".join(f"{role}={model}" for role, model in sorted(role_models.items()))
+
+
+def collect_catalog_runtime_snapshot(catalog_path: Path | str) -> dict[str, object]:
+    """Collect role/model provenance from agent-catalog.yaml."""
+    catalog = Path(catalog_path)
+    data = load_agent_catalog(catalog)
+    roles = data.get("roles") or {}
+    if not isinstance(roles, dict):
+        return {}
+
+    role_models: dict[str, str] = {}
+    enabled_roles: list[str] = []
+    for role_name, role_config in sorted(roles.items()):
+        if not isinstance(role_config, dict):
+            continue
+        model = str(role_config.get("model") or "").strip()
+        if model:
+            role_models[str(role_name)] = model
+        if role_config.get("enabled", True):
+            enabled_roles.append(str(role_name))
+
+    return {
+        "role_models": role_models,
+        "role_models_summary": _summarize_role_models(role_models),
+        "role_models_sha256": _stable_object_sha256(role_models),
+        "enabled_roles": enabled_roles,
+        "enabled_roles_summary": ",".join(enabled_roles) if enabled_roles else "none",
+    }
+
+
+def collect_aux_skills_snapshot(skills_dir: Path | str) -> dict[str, object]:
+    """Collect benchmark-local auxiliary skill provenance from config/skills."""
+    base = Path(skills_dir)
+    files = [path for path in _list_relative_files(base) if Path(path).name != ".gitkeep"]
+
+    skill_names: set[str] = set()
+    for rel_path in files:
+        parts = Path(rel_path).parts
+        if not parts:
+            continue
+        if len(parts) >= 2 and parts[-1] == "SKILL.md":
+            skill_names.add(parts[-2])
+        else:
+            skill_names.add(parts[0])
+
+    names = sorted(skill_names)
+    return {
+        "aux_skill_names": names,
+        "aux_skills_enabled": bool(names),
+        "aux_skills_summary": ",".join(names) if names else "none",
+        "aux_skills_sha256": _digest_file_set(base, files) if files else "",
+    }
+
+
+def collect_orchestra_config_snapshot(config_dir: Path | str) -> dict[str, object]:
+    """Collect benchmark-local orchestra config provenance."""
+    base = Path(config_dir)
+    files = _list_relative_files(base)
+    return {
+        "orchestra_config_files": files,
+        "orchestra_config_sha256": _digest_file_set(base, files) if files else "",
+    }
+
+
+def _parse_pi_list_package_names(stdout: str) -> list[str]:
+    """Parse `pi list` output into a stable list of package names."""
+    names: list[str] = []
+    for raw_line in stdout.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.endswith(":"):
+            continue
+        if stripped.startswith("/"):
+            continue
+        if stripped.startswith("http://") or stripped.startswith("https://"):
+            source = stripped.split()[0].rstrip("/")
+            name = source.rsplit("/", 1)[-1]
+            if name:
+                names.append(name)
+    return sorted(set(names))
+
+
+def collect_container_runtime_snapshot() -> dict[str, object]:
+    """Collect installed Pi package/extension provenance from the live container."""
+    snapshot: dict[str, object] = {}
+    if not _docker_ok():
+        return snapshot
+
+    try:
+        pi_list = _docker_exec("sh", "-lc", "pi list 2>/dev/null || true")
+        package_names = _parse_pi_list_package_names(pi_list.stdout)
+        snapshot["pi_package_names"] = package_names
+        snapshot["pi_packages_summary"] = ",".join(package_names) if package_names else "none"
+        snapshot["pi_packages_sha256"] = _stable_object_sha256(package_names)
+    except Exception:
+        pass
+
+    try:
+        ext_result = _docker_exec(
+            "sh",
+            "-lc",
+            "find /root/.pi/agent/extensions -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' 2>/dev/null | sort",
+        )
+        extension_names = sorted({line.strip() for line in ext_result.stdout.splitlines() if line.strip()})
+        snapshot["pi_extensions"] = extension_names
+        snapshot["pi_extensions_summary"] = ",".join(extension_names) if extension_names else "none"
+        snapshot["pi_extensions_sha256"] = _stable_object_sha256(extension_names)
+    except Exception:
+        pass
+
+    return snapshot
+
+
+def collect_runtime_snapshot(
+    catalog_path: Path | str,
+    orchestra_config_dir: Path | str | None = None,
+    skills_dir: Path | str | None = None,
+) -> dict[str, object]:
+    """Collect benchmark/runtime provenance to persist with each run."""
+    catalog = Path(catalog_path)
+    root = catalog.parent.parent.parent if catalog.parent.parent.parent.exists() else _REPO_ROOT
+    snapshot: dict[str, object] = {}
+    snapshot.update(collect_catalog_runtime_snapshot(catalog))
+    snapshot.update(collect_orchestra_config_snapshot(orchestra_config_dir or root / "config" / "orchestra"))
+    snapshot.update(collect_aux_skills_snapshot(skills_dir or root / "config" / "skills"))
+    snapshot.update(collect_container_runtime_snapshot())
+    return snapshot
+
+
 def build_run_metadata(
     task_id: str,
     run_id: str,
@@ -126,6 +293,7 @@ def build_run_metadata(
     extra_skills: Sequence[str] | None = None,
     notes: str = "",
     catalog_label: str | None = None,
+    runtime_snapshot: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the run metadata snapshot persisted to .bench_run.json."""
     meta = {
@@ -136,6 +304,8 @@ def build_run_metadata(
         "extra_skills": list(extra_skills or []),
         "notes": notes,
     }
+    if runtime_snapshot:
+        meta.update(runtime_snapshot)
     if catalog_label:
         meta["catalog_path"] = catalog_label
     return meta
@@ -824,6 +994,31 @@ def _parse_pi_session_dispatches(pi_sessions_dir: Path) -> list[dict[str, object
     return dispatches
 
 
+def _count_pi_session_compactions(pi_sessions_dir: Path) -> int:
+    """Count explicit Pi compaction events across copied session JSONL files."""
+    if not pi_sessions_dir.is_dir():
+        return 0
+
+    count = 0
+    for jsonl_file in sorted(pi_sessions_dir.glob("*.jsonl")):
+        try:
+            text = jsonl_file.read_text(errors="replace")
+        except Exception:
+            continue
+
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = _json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(event, dict) and event.get("type") == "compaction":
+                count += 1
+
+    return count
+
+
 def _parse_orchestra_logs(orchestra_debug_dir: Path) -> list[dict[str, object]]:
     """Extract structured events from Orchestra debug log JSONL files.
 
@@ -984,9 +1179,10 @@ def extract_orchestration_checks(
 
     checks: dict[str, object] = {}
 
-    # ── 1. Parse Pi session dispatches ───────────────────────
+    # ── 1. Parse Pi session dispatches / compactions ─────────────────
     pi_sessions_dir = artifacts_dir / "pi-sessions"
     dispatches = _parse_pi_session_dispatches(pi_sessions_dir)
+    checks["compaction_count"] = _count_pi_session_compactions(pi_sessions_dir)
 
     roles_dispatched: list[str] = []
     goals_seen: dict[str, int] = {}
@@ -1354,6 +1550,20 @@ _PROVENANCE_FIELDS = (
     "catalog_sha256",
     "orchestra",
     "extra_skills",
+    "role_models_summary",
+    "role_models_sha256",
+    "enabled_roles_summary",
+    "aux_skill_names",
+    "aux_skills_enabled",
+    "aux_skills_summary",
+    "aux_skills_sha256",
+    "orchestra_config_sha256",
+    "pi_package_names",
+    "pi_packages_summary",
+    "pi_packages_sha256",
+    "pi_extensions",
+    "pi_extensions_summary",
+    "pi_extensions_sha256",
     "config_path",
     "config_sha256",
     "config_version",
@@ -1404,7 +1614,17 @@ def _extract_run_provenance(run_meta: dict[str, object] | None) -> dict[str, obj
 def _provenance_label(provenance: dict[str, object]) -> str:
     """Render a compact human-readable label for provenance groups."""
     parts: list[str] = []
-    for key in ("role", "model", "orchestra", "catalog_sha256", "catalog_path"):
+    for key in (
+        "role",
+        "model",
+        "orchestra",
+        "role_models_summary",
+        "pi_packages_summary",
+        "pi_extensions_summary",
+        "aux_skills_summary",
+        "catalog_sha256",
+        "catalog_path",
+    ):
         if key not in provenance:
             continue
         value = provenance[key]
@@ -1412,7 +1632,18 @@ def _provenance_label(provenance: dict[str, object]) -> str:
             value = "on" if value else "off"
         parts.append(f"{key}={value}")
 
-    for key in sorted(k for k in provenance if k not in {"role", "model", "orchestra", "catalog_sha256", "catalog_path"}):
+    handled = {
+        "role",
+        "model",
+        "orchestra",
+        "role_models_summary",
+        "pi_packages_summary",
+        "pi_extensions_summary",
+        "aux_skills_summary",
+        "catalog_sha256",
+        "catalog_path",
+    }
+    for key in sorted(k for k in provenance if k not in handled):
         parts.append(f"{key}={provenance[key]}")
 
     return " | ".join(parts) if parts else "unknown"
@@ -1921,6 +2152,7 @@ def orchestration_warnings(orchestration_checks: dict[str, object] | None) -> li
         ("retries", "retry", "retries"),
         ("scope_blockers", "scope blocker", "scope blockers"),
         ("same_slice_redispatches", "same-slice redispatch", "same-slice redispatches"),
+        ("compaction_count", "compaction", "compactions"),
     ):
         value = orchestration_checks.get(key)
         if isinstance(value, (int, float)) and value > 0:

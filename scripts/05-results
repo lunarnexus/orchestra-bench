@@ -9,17 +9,24 @@ usage() {
 Usage: $(basename "$0") [view] [options]
 
 Views:
-  dashboard        Default: overview, recent runs, task breakdown, token summary
+  dashboard        Default: overview, per-suite breakdown, per-test breakdown
   runs             List historical graded runs
   run <id|dir>     Show one run in detail
   tasks            Task pass/fail breakdown
   timeline         Results over time
   tokens           Token usage across runs/tasks
   timing           Elapsed time across tasks/roles
+  notes            List distinct run notes (sort/uniq style)
 
 Options:
-  --task <id>      Filter to one task
-  --limit <n>      Limit rows for runs/timeline (default: 20)
+  --task <id>         Filter to one task
+  --suite <name>      Filter to one suite/batch/family
+  --notes <text>      Filter runs by notes substring match
+  --detail <1|2|3>    Dashboard detail level (default: 3)
+  --rubric [names]    Show only rubric breakdowns; optional comma-separated names
+  --checks [names]    Show only check breakdowns; optional comma-separated names
+  --behaviors [names] Show only behavior breakdowns; optional comma-separated names
+  --limit <n>         Limit rows for runs/timeline (default: 20)
 
 Examples:
   scripts/05-results
@@ -37,12 +44,18 @@ view="dashboard"
 if [ $# -gt 0 ]; then
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    dashboard|runs|run|tasks|timeline|tokens|timing) view="$1"; shift ;;
+    dashboard|runs|run|tasks|timeline|tokens|timing|notes) view="$1"; shift ;;
   esac
 fi
 
 run_query=""
 task_filter=""
+suite_filter=""
+notes_filter=""
+detail_level="3"
+rubric_filter=""
+checks_filter=""
+behaviors_filter=""
 limit="20"
 
 if [ "$view" = "run" ]; then
@@ -54,13 +67,28 @@ fi
 while [ $# -gt 0 ]; do
   case "$1" in
     --task) task_filter="$2"; shift 2 ;;
+    --suite) suite_filter="$2"; shift 2 ;;
+    --notes) notes_filter="$2"; shift 2 ;;
+    --detail) detail_level="$2"; shift 2 ;;
+    --rubric)
+      if [ $# -gt 1 ] && [[ "$2" != --* ]]; then rubric_filter="$2"; shift 2
+      else rubric_filter="__all__"; shift
+      fi ;;
+    --checks)
+      if [ $# -gt 1 ] && [[ "$2" != --* ]]; then checks_filter="$2"; shift 2
+      else checks_filter="__all__"; shift
+      fi ;;
+    --behaviors)
+      if [ $# -gt 1 ] && [[ "$2" != --* ]]; then behaviors_filter="$2"; shift 2
+      else behaviors_filter="__all__"; shift
+      fi ;;
     --limit) limit="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[bench] unknown argument: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$limit" <<'PY'
+python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_filter" "$detail_level" "$rubric_filter" "$checks_filter" "$behaviors_filter" "$limit" <<'PY'
 from __future__ import annotations
 
 import json
@@ -77,8 +105,19 @@ from eval_harness import format_efficiency_summary, format_rubric_summary, orche
 view = sys.argv[2]
 run_query = sys.argv[3]
 task_filter = sys.argv[4]
+suite_filter = sys.argv[5].strip().lower()
+notes_filter = sys.argv[6].strip().lower()
 try:
-    limit = int(sys.argv[5])
+    detail_level = int(sys.argv[7])
+except Exception:
+    detail_level = 3
+if detail_level not in (1, 2, 3):
+    detail_level = 3
+rubric_filter = sys.argv[8].strip()
+checks_filter = sys.argv[9].strip()
+behaviors_filter = sys.argv[10].strip()
+try:
+    limit = int(sys.argv[11])
 except Exception:
     limit = 20
 
@@ -111,6 +150,12 @@ def prepared_only_runs():
                 continue
             if task_filter and task_id != task_filter:
                 continue
+            suite = str(d.get("batch", d.get("family", "")) or "").strip().lower()
+            if suite_filter and suite_filter != suite:
+                continue
+            notes = str(d.get("notes", "") or "")
+            if notes_filter and notes_filter not in notes.lower():
+                continue
             d["_dir"] = str(p.parent.relative_to(root))
             out.append(d)
     return out
@@ -129,6 +174,12 @@ def load_results():
         if current_tasks and task_id not in current_tasks:
             continue
         if task_filter and task_id != task_filter:
+            continue
+        suite = suite_name(d).strip().lower()
+        if suite_filter and suite_filter != suite:
+            continue
+        notes = str(((d.get("run_meta") or {}).get("notes", "")) or "")
+        if notes_filter and notes_filter not in notes.lower():
             continue
         d["_dir"] = str(p.parent.relative_to(root))
         d["_path"] = str(p.relative_to(root))
@@ -174,6 +225,264 @@ def status(r):
     return "PASS" if r.get("score") == "pass" else "FAIL"
 
 
+def _parse_name_filter(raw):
+    raw = str(raw or "").strip()
+    if not raw:
+        return None
+    if raw == "__all__":
+        return []
+    return [part.strip().lower() for part in raw.split(",") if part.strip()]
+
+
+rubric_names = _parse_name_filter(rubric_filter)
+check_names = _parse_name_filter(checks_filter)
+behavior_names = _parse_name_filter(behaviors_filter)
+section_only_mode = any(x is not None for x in (rubric_names, check_names, behavior_names))
+
+
+def _name_selected(name, selected):
+    if selected is None:
+        return False
+    if selected == []:
+        return True
+    lowered = str(name or "").strip().lower()
+    return lowered in selected
+
+
+def suite_name(r):
+    task_meta = r.get("task_meta") or {}
+    batch = str(task_meta.get("batch", "") or "").strip()
+    family = str(task_meta.get("family", "") or "").strip()
+    if batch:
+        return batch
+    if family and family != "default":
+        return family
+    return "unbatched"
+
+
+def numeric_scores(rows):
+    vals = []
+    for r in rows:
+        v = r.get("score_numeric")
+        if isinstance(v, (int, float)):
+            vals.append(float(v))
+    return vals
+
+
+def bool_check_rate(rows, key):
+    vals = []
+    for r in rows:
+        checks = r.get("checks") or {}
+        if isinstance(checks.get(key), bool):
+            vals.append(bool(checks.get(key)))
+    if not vals:
+        return None
+    return sum(1 for v in vals if v) / len(vals)
+
+
+def aggregate_rubric(rows):
+    by_cat = defaultdict(list)
+    total_pairs = []
+    for r in rows:
+        rubric = r.get("rubric") or {}
+        run_score = 0.0
+        run_max = 0.0
+        has_any = False
+        for name, value in rubric.items():
+            if not isinstance(value, dict):
+                continue
+            score = value.get("score")
+            max_score = value.get("max")
+            if isinstance(score, (int, float)) and isinstance(max_score, (int, float)):
+                score_f = float(score)
+                max_f = float(max_score)
+                by_cat[str(name)].append((score_f, max_f))
+                run_score += score_f
+                run_max += max_f
+                has_any = True
+        if has_any:
+            total_pairs.append((run_score, run_max))
+    out = []
+    for name in sorted(by_cat):
+        vals = by_cat[name]
+        avg_score = statistics.mean(v[0] for v in vals)
+        avg_max = statistics.mean(v[1] for v in vals)
+        pct = (avg_score / avg_max * 100.0) if avg_max else 0.0
+        out.append((name, avg_score, avg_max, pct, len(vals)))
+    return out, total_pairs
+
+
+def aggregate_bool_checks(rows):
+    keys = set()
+    for r in rows:
+        checks = r.get("checks") or {}
+        for key, value in checks.items():
+            if isinstance(value, bool):
+                keys.add(str(key))
+    out = []
+    for key in sorted(keys):
+        rate = bool_check_rate(rows, key)
+        if rate is None:
+            continue
+        out.append((key, rate, sum(1 for r in rows if isinstance((r.get("checks") or {}).get(key), bool))))
+    return out
+
+
+def aggregate_orchestration(rows):
+    metrics = {}
+    numeric_keys = (
+        "compaction_count",
+        "dispatch_count",
+        "timeouts",
+        "retries",
+        "scope_blockers",
+        "same_slice_redispatches",
+    )
+    bool_keys = (
+        "target_role_dispatched",
+        "worker_completed",
+        "worker_running_without_exit",
+        "fallback_answer_after_dispatch",
+        "premature_completion",
+        "missing_expected_role",
+        "no_orchestration",
+        "process_penalty_applied",
+    )
+    for key in numeric_keys:
+        vals = []
+        for r in rows:
+            checks = r.get("orchestration_checks") or {}
+            v = checks.get(key, 0)
+            if isinstance(v, (int, float)):
+                vals.append(float(v))
+            else:
+                vals.append(0.0)
+        if vals:
+            metrics[key] = {
+                "kind": "numeric",
+                "total": sum(vals),
+                "avg": statistics.mean(vals),
+                "high": max(vals),
+                "low": min(vals),
+                "count": len(vals),
+            }
+    for key in bool_keys:
+        vals = []
+        for r in rows:
+            checks = r.get("orchestration_checks") or {}
+            v = checks.get(key)
+            if isinstance(v, bool):
+                vals.append(v)
+        if vals:
+            true_count = sum(1 for v in vals if v)
+            metrics[key] = {
+                "kind": "bool",
+                "true": true_count,
+                "false": len(vals) - true_count,
+                "rate": true_count / len(vals),
+                "count": len(vals),
+            }
+    return metrics
+
+
+def print_metric_line(label, values, *, integer=False, formatter=None):
+    if not values:
+        print(f"{label:<12}: none captured yet")
+        return
+    total = sum(values)
+    avg = statistics.mean(values)
+    median = statistics.median(values)
+    high = max(values)
+    low = min(values)
+    if formatter is None:
+        if integer:
+            formatter = lambda v: f"{int(v):,}"
+        else:
+            formatter = lambda v: str(v)
+    print(
+        f"{label:<12}: total={formatter(total)} avg={formatter(avg)} median={formatter(median)} high={formatter(high)} low={formatter(low)}"
+    )
+
+
+def print_score_breakdown(rows, indent="  "):
+    if not section_only_mode and detail_level >= 2:
+        scores = numeric_scores(rows)
+        if scores:
+            print(f"{indent}score_numeric: avg={statistics.mean(scores):.2f} median={statistics.median(scores):.2f} high={max(scores):.2f} low={min(scores):.2f} n={len(scores)}")
+
+    rubric_items, rubric_totals = aggregate_rubric(rows)
+    rubric = rubric_items if rubric_names is None else [item for item in rubric_items if _name_selected(item[0], rubric_names)]
+    if rubric_names is not None and rubric:
+        print(f"{indent}rubric:")
+        for name, avg_score, avg_max, pct, count in rubric:
+            print(f"{indent}  - {name}: {avg_score:.2f}/{avg_max:.2f} ({pct:.0f}%) n={count}")
+    elif not section_only_mode and rubric and detail_level >= 3:
+        print(f"{indent}rubric:")
+        for name, avg_score, avg_max, pct, count in rubric:
+            print(f"{indent}  - {name}: {avg_score:.2f}/{avg_max:.2f} ({pct:.0f}%) n={count}")
+    elif not section_only_mode and rubric_totals and detail_level == 2:
+        scores_only = [v[0] for v in rubric_totals]
+        max_only = [v[1] for v in rubric_totals]
+        avg_score = statistics.mean(scores_only)
+        avg_max = statistics.mean(max_only)
+        pct = (avg_score / avg_max * 100.0) if avg_max else 0.0
+        print(f"{indent}rubric       : avg={avg_score:.2f}/{avg_max:.2f} ({pct:.0f}%) n={len(rubric_totals)}")
+
+    bool_checks = aggregate_bool_checks(rows) if check_names is None else [item for item in aggregate_bool_checks(rows) if _name_selected(item[0], check_names)]
+    if check_names is not None and bool_checks:
+        print(f"{indent}checks:")
+        for key, rate, count in bool_checks:
+            print(f"{indent}  - {key}: {rate*100:.0f}% pass ({int(round(rate*count))}/{count})")
+    elif not section_only_mode and bool_checks and detail_level >= 3:
+        print(f"{indent}checks:")
+        for key, rate, count in bool_checks:
+            print(f"{indent}  - {key}: {rate*100:.0f}% pass ({int(round(rate*count))}/{count})")
+    elif not section_only_mode and bool_checks and detail_level == 2:
+        avg_rate = statistics.mean(rate for _, rate, _ in bool_checks) * 100.0
+        print(f"{indent}checks       : avg_pass_rate={avg_rate:.0f}% metrics={len(bool_checks)}")
+
+    orchestration_all = aggregate_orchestration(rows)
+    orchestration = orchestration_all if behavior_names is None else {k: v for k, v in orchestration_all.items() if _name_selected(k, behavior_names)}
+    if behavior_names is not None and orchestration:
+        print(f"{indent}behaviors:")
+        for key in sorted(orchestration):
+            data = orchestration[key]
+            if data.get("kind") == "bool":
+                print(f"{indent}  - {key}: true={int(data['true'])} false={int(data['false'])} rate={data['rate']*100:.0f}%")
+            else:
+                print(f"{indent}  - {key}: total={int(data['total'])} avg={data['avg']:.2f} high={int(data['high'])} low={int(data['low'])}")
+    elif not section_only_mode and orchestration and detail_level >= 3:
+        print(f"{indent}behaviors:")
+        for key in sorted(orchestration):
+            data = orchestration[key]
+            if data.get("kind") == "bool":
+                print(f"{indent}  - {key}: true={int(data['true'])} false={int(data['false'])} rate={data['rate']*100:.0f}%")
+            else:
+                print(f"{indent}  - {key}: total={int(data['total'])} avg={data['avg']:.2f} high={int(data['high'])} low={int(data['low'])}")
+    elif not section_only_mode and orchestration and detail_level == 2:
+        summary_parts = []
+        for key in sorted(orchestration):
+            data = orchestration[key]
+            if data.get("kind") == "bool":
+                summary_parts.append(f"{key}={int(data['true'])}/{int(data['count'])}")
+            else:
+                summary_parts.append(f"{key}={int(data['total'])}")
+        print(f"{indent}behaviors    : {', '.join(summary_parts)}")
+
+
+def print_section_metrics(rows, indent=""):
+    passed = sum(1 for r in rows if r.get("score") == "pass")
+    failed = len(rows) - passed
+    print(f"{indent}runs        : {len(rows)}")
+    print(f"{indent}pass rate   : {passed}/{len(rows)}" if rows else f"{indent}pass rate   : n/a")
+    toks = [token_total(r) for r in rows if token_total(r)]
+    print_metric_line(f"{indent}tokens", toks, integer=True)
+    times = [elapsed(r) for r in rows if elapsed(r)]
+    print_metric_line(f"{indent}elapsed", times, formatter=fmt_seconds)
+    if detail_level >= 2 or section_only_mode:
+        print_score_breakdown(rows, indent + "  ")
+
+
 def find_run(rows, q):
     for r in rows:
         if q in {str(r.get("run_id", "")), f"{r.get('run_id')}-{r.get('task_id')}", r.get("_dir", "").split("/", 1)[-1]}:
@@ -188,21 +497,28 @@ def print_overview(rows):
     pending = prepared_only_runs()
     passed = sum(1 for r in rows if r.get("score") == "pass")
     failed = len(rows) - passed
-    toks = [token_total(r) for r in rows if token_total(r)]
     print("=== orchestra-bench results dashboard ===")
+    if task_filter:
+        print(f"task filter : {task_filter}")
+    if suite_filter:
+        print(f"suite filter: {suite_filter}")
+    if notes_filter:
+        print(f"notes filter: {notes_filter}")
+    print(f"detail level: {detail_level}")
+    if rubric_names is not None:
+        print(f"rubric view : {'all' if rubric_names == [] else ', '.join(rubric_names)}")
+    if check_names is not None:
+        print(f"checks view : {'all' if check_names == [] else ', '.join(check_names)}")
+    if behavior_names is not None:
+        print(f"behaviors   : {'all' if behavior_names == [] else ', '.join(behavior_names)}")
     print(f"graded runs : {len(rows)}")
     print(f"passed      : {passed}")
     print(f"failed      : {failed}")
     print(f"pass rate   : {passed}/{len(rows)}" if rows else "pass rate   : n/a")
-    if toks:
-        print(f"tokens      : total={sum(toks):,} avg={int(statistics.mean(toks)):,} median={int(statistics.median(toks)):,}")
-    else:
-        print("tokens      : none captured yet")
+    toks = [token_total(r) for r in rows if token_total(r)]
+    print_metric_line("tokens", toks, integer=True)
     times = [elapsed(r) for r in rows if elapsed(r)]
-    if times:
-        print(f"elapsed     : total={fmt_seconds(sum(times))} avg={fmt_seconds(statistics.mean(times))} median={fmt_seconds(statistics.median(times))}")
-    else:
-        print("elapsed     : none captured yet")
+    print_metric_line("elapsed", times, formatter=fmt_seconds)
     if pending:
         print(f"ungraded    : {len(pending)} prepared run(s); grade with scripts/03-collect-results <task-id>")
         for r in pending[-5:][::-1]:
@@ -218,18 +534,16 @@ def print_runs(rows, n=20):
 
 
 def print_tasks(rows):
-    print("\n=== task breakdown ===")
-    by = defaultdict(list)
+    print("\n=== per-test breakdown ===")
+    suites = defaultdict(lambda: defaultdict(list))
     for r in rows:
-        by[r.get("task_id", "")].append(r)
-    for task_id in sorted(by):
-        rs = by[task_id]
-        passed = sum(1 for r in rs if r.get("score") == "pass")
-        toks = [token_total(r) for r in rs if token_total(r)]
-        times = [elapsed(r) for r in rs if elapsed(r)]
-        avg = int(statistics.mean(toks)) if toks else 0
-        avg_time = fmt_seconds(statistics.mean(times)) if times else "-"
-        print(f"{task_id:<38} {passed:>3}/{len(rs):<3} avg_time={avg_time:<6} avg_tokens={avg:,}")
+        suites[suite_name(r)][r.get("task_id", "")].append(r)
+    for suite in sorted(suites):
+        print(f"\n[{suite}]")
+        for task_id in sorted(suites[suite]):
+            rs = suites[suite][task_id]
+            print(f"- {task_id}")
+            print_section_metrics(rs, indent="    ")
 
 
 def print_tokens(rows):
@@ -250,6 +564,16 @@ def print_tokens(rows):
     for task_id in sorted(by):
         vals = by[task_id]
         print(f"{task_id:<38} runs={len(vals):<3} total={sum(vals):<10,} avg={int(statistics.mean(vals)):,}")
+
+
+def print_suites(rows):
+    print("\n=== per-suite breakdown ===")
+    by = defaultdict(list)
+    for r in rows:
+        by[suite_name(r)].append(r)
+    for suite in sorted(by):
+        print(f"\n[{suite}]")
+        print_section_metrics(by[suite], indent="  ")
 
 
 def print_timing(rows):
@@ -278,6 +602,18 @@ def print_timeline(rows, n=20):
     for r in rows[-n:]:
         parts = token_parts(r)
         print(f"{r.get('run_id',''):<18} {status(r):4s} {r.get('task_id',''):<36} time={fmt_seconds(elapsed(r)):<6} total={parts['total']:<8} in={parts['input']:<8} out={parts['output']:<6} reason={parts['reasoning']}")
+
+
+def print_notes(rows):
+    print("\n=== notes ===")
+    by = defaultdict(list)
+    for r in rows:
+        note = str(((r.get("run_meta") or {}).get("notes", "")) or "").strip() or "(empty)"
+        by[note].append(r)
+    for note in sorted(by):
+        rs = by[note]
+        passed = sum(1 for r in rs if r.get("score") == "pass")
+        print(f"runs={len(rs):<3} pass={passed}/{len(rs):<3} notes={note}")
 
 
 def print_run_detail(rows, q):
@@ -321,6 +657,10 @@ def print_run_detail(rows, q):
         print("  none")
 
     orch_checks = r.get("orchestration_checks") or {}
+    if orch_checks:
+        print("\norchestration:")
+        for key in sorted(orch_checks):
+            print(f"  {key}: {orch_checks[key]}")
     warnings = orchestration_warnings(orch_checks)
     if warnings:
         print("\norchestration warnings:")
@@ -335,7 +675,7 @@ def print_run_detail(rows, q):
 
 rows = load_results()
 if view == "dashboard":
-    print_overview(rows); print_runs(rows, min(limit, 10)); print_tasks(rows); print_tokens(rows); print_timing(rows)
+    print_overview(rows); print_suites(rows); print_tasks(rows)
 elif view == "runs":
     print_runs(rows, limit)
 elif view == "run":
@@ -348,6 +688,8 @@ elif view == "tokens":
     print_tokens(rows)
 elif view == "timing":
     print_timing(rows)
+elif view == "notes":
+    print_notes(rows)
 else:
     print(f"unknown view: {view}", file=sys.stderr)
     raise SystemExit(1)

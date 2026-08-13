@@ -6,7 +6,7 @@ ROOT="$SCRIPT_DIR/.."
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <suite> [--auto] [--no-orchestra]
+Usage: $(basename "$0") <suite> [--auto] [--no-orchestra] [--notes <text>]
        $(basename "$0") --list
 
 Run every task in a suite with scripts/02-open-pi <task-id> --auto, grade each
@@ -15,12 +15,13 @@ run, then print the summary. This is the default dogfood suite flow.
 Options:
   --auto          Run each task with 02-open-pi --auto before grading (default)
   --no-orchestra  Pass --no-orchestra to 02-open-pi for baseline/no-Orchestra runs
+  --notes <text>  Store free-form run notes in each run's .bench_run.json
 
 Suites:
   smoke
   role-focused
+  capability-easy
   capability-normal
-  capability-hard
 
 Examples:
   scripts/04-run-suite --list
@@ -41,14 +42,14 @@ for y in base.glob('*/task.yaml'):
         s=line.strip()
         if s.startswith('batch:'):
             c[s.split(':',1)[1].strip().strip('"')]+=1
-for name in ['smoke','role-focused','capability-normal','capability-hard']:
+for name in ['smoke','role-focused','capability-easy','capability-normal']:
     print(f"  {name:<18} {c[name]} tasks")
 PY
 }
 
 is_known_suite() {
   case "$1" in
-    smoke|role-focused|capability-normal|capability-hard) return 0 ;;
+    smoke|role-focused|capability-easy|capability-normal) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -81,10 +82,12 @@ shift || true
 
 run_auto=true
 no_orchestra=false
+run_notes="${BENCH_NOTES:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto) run_auto=true; shift ;;
     --no-orchestra) no_orchestra=true; shift ;;
+    --notes) run_notes="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[bench] unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -114,7 +117,7 @@ for task_id in "${task_ids[@]}"; do
     if $no_orchestra; then
       open_pi_args+=(--no-orchestra)
     fi
-    if ! "$ROOT/scripts/02-open-pi" "${open_pi_args[@]}"; then
+    if ! BENCH_NOTES="$run_notes" "$ROOT/scripts/02-open-pi" "${open_pi_args[@]}"; then
       echo "[bench] auto run failed: $task_id" >&2
       failures=$((failures + 1))
       continue

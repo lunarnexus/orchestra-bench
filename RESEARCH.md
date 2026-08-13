@@ -271,8 +271,8 @@ Smoke tasks should be:
 Current agreed direction after capability cleanup:
 - `smoke`
 - `role-focused`
+- `capability-easy`
 - `capability-normal`
-- `capability-hard`
 
 Old standalone `contract` tasks are retired from the public benchmark inventory. Runtime/workdir contract checks belong in harness/container tests or startup health checks.
 
@@ -293,8 +293,8 @@ But grading should remain focused on the delivered outcome.
 Current implemented public task inventory:
 - `smoke`: 6 real smoke/workflow tasks.
 - `role-focused`: 18 per-role tasks, 3 each for planner, researcher, verifier, reviewer, builder, and appsec.
-- `capability-normal`: 3 integrated app-building tasks.
-- `capability-hard`: 3 harder integrated app-building tasks.
+- `capability-easy`: 3 integrated app-building tasks.
+- `capability-normal`: 3 harder integrated app-building tasks.
 
 Retired task IDs:
 - `smoke` legacy contract task
@@ -319,7 +319,7 @@ Likely default:
 
 ### Batching work next
 Current benchmark-level design step:
-- build `capability-normal` and `capability-hard` tasks
+- build `capability-easy` and `capability-normal` tasks
 - score, rather than hard-fail, full workflow evidence across planner/researcher/builder/verifier/reviewer/appsec
 - keep old contract checks out of public suite inventory
 
