@@ -92,10 +92,18 @@ python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_fi
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+ANSI = {
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "reset": "\033[0m",
+}
+COLOR_ENABLED = sys.stdout.isatty() and not bool(os.environ.get("NO_COLOR"))
 
 root = Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(root))
@@ -221,8 +229,73 @@ def fmt_seconds(value):
     return f"{value/60:.1f}m"
 
 
+def colorize(text, color):
+    if not COLOR_ENABLED:
+        return text
+    code = ANSI.get(color)
+    if not code:
+        return text
+    return f"{code}{text}{ANSI['reset']}"
+
+
+def color_pass_fail(text, passed):
+    return colorize(text, "green" if passed else "red")
+
+
+def color_for_rate(text, numerator, denominator):
+    if denominator <= 0:
+        return text
+    if numerator == denominator:
+        return colorize(text, "green")
+    if numerator == 0:
+        return colorize(text, "red")
+    return text
+
+
+def color_for_behavior_rate(name, text, numerator, denominator):
+    if denominator <= 0:
+        return text
+    positive_when_true = {
+        "target_role_dispatched",
+        "worker_completed",
+    }
+    negative_when_true = {
+        "premature_completion",
+        "fallback_answer_after_dispatch",
+        "worker_running_without_exit",
+        "missing_expected_role",
+        "no_orchestration",
+        "process_penalty_applied",
+    }
+    name = str(name or "")
+    if name in positive_when_true:
+        return color_for_rate(text, numerator, denominator)
+    if name in negative_when_true:
+        if numerator == 0:
+            return colorize(text, "green")
+        if numerator == denominator:
+            return colorize(text, "red")
+        return text
+    return text
+
+
+def color_for_behavior_count(name, text, total):
+    name = str(name or "")
+    bad_when_nonzero = {
+        "timeouts",
+        "retries",
+        "scope_blockers",
+        "same_slice_redispatches",
+    }
+    if name in bad_when_nonzero:
+        if total == 0:
+            return colorize(text, "green")
+        return colorize(text, "red")
+    return text
+
+
 def status(r):
-    return "PASS" if r.get("score") == "pass" else "FAIL"
+    return color_pass_fail("PASS" if r.get("score") == "pass" else "FAIL", r.get("score") == "pass")
 
 
 def _parse_name_filter(raw):
@@ -432,11 +505,15 @@ def print_score_breakdown(rows, indent="  "):
     if check_names is not None and bool_checks:
         print(f"{indent}checks:")
         for key, rate, count in bool_checks:
-            print(f"{indent}  - {key}: {rate*100:.0f}% pass ({int(round(rate*count))}/{count})")
+            passed = int(round(rate * count))
+            text = f"{rate*100:.0f}% pass ({passed}/{count})"
+            print(f"{indent}  - {key}: {color_for_rate(text, passed, count)}")
     elif not section_only_mode and bool_checks and detail_level >= 3:
         print(f"{indent}checks:")
         for key, rate, count in bool_checks:
-            print(f"{indent}  - {key}: {rate*100:.0f}% pass ({int(round(rate*count))}/{count})")
+            passed = int(round(rate * count))
+            text = f"{rate*100:.0f}% pass ({passed}/{count})"
+            print(f"{indent}  - {key}: {color_for_rate(text, passed, count)}")
     elif not section_only_mode and bool_checks and detail_level == 2:
         avg_rate = statistics.mean(rate for _, rate, _ in bool_checks) * 100.0
         print(f"{indent}checks       : avg_pass_rate={avg_rate:.0f}% metrics={len(bool_checks)}")
@@ -448,17 +525,21 @@ def print_score_breakdown(rows, indent="  "):
         for key in sorted(orchestration):
             data = orchestration[key]
             if data.get("kind") == "bool":
-                print(f"{indent}  - {key}: true={int(data['true'])} false={int(data['false'])} rate={data['rate']*100:.0f}%")
+                text = f"true={int(data['true'])} false={int(data['false'])} rate={data['rate']*100:.0f}%"
+                print(f"{indent}  - {key}: {color_for_behavior_rate(key, text, int(data['true']), int(data['count']))}")
             else:
-                print(f"{indent}  - {key}: total={int(data['total'])} avg={data['avg']:.2f} high={int(data['high'])} low={int(data['low'])}")
+                text = f"total={int(data['total'])} avg={data['avg']:.2f} high={int(data['high'])} low={int(data['low'])}"
+                print(f"{indent}  - {key}: {color_for_behavior_count(key, text, int(data['total']))}")
     elif not section_only_mode and orchestration and detail_level >= 3:
         print(f"{indent}behaviors:")
         for key in sorted(orchestration):
             data = orchestration[key]
             if data.get("kind") == "bool":
-                print(f"{indent}  - {key}: true={int(data['true'])} false={int(data['false'])} rate={data['rate']*100:.0f}%")
+                text = f"true={int(data['true'])} false={int(data['false'])} rate={data['rate']*100:.0f}%"
+                print(f"{indent}  - {key}: {color_for_behavior_rate(key, text, int(data['true']), int(data['count']))}")
             else:
-                print(f"{indent}  - {key}: total={int(data['total'])} avg={data['avg']:.2f} high={int(data['high'])} low={int(data['low'])}")
+                text = f"total={int(data['total'])} avg={data['avg']:.2f} high={int(data['high'])} low={int(data['low'])}"
+                print(f"{indent}  - {key}: {color_for_behavior_count(key, text, int(data['total']))}")
     elif not section_only_mode and orchestration and detail_level == 2:
         summary_parts = []
         for key in sorted(orchestration):
@@ -474,7 +555,10 @@ def print_section_metrics(rows, indent=""):
     passed = sum(1 for r in rows if r.get("score") == "pass")
     failed = len(rows) - passed
     print(f"{indent}runs        : {len(rows)}")
-    print(f"{indent}pass rate   : {passed}/{len(rows)}" if rows else f"{indent}pass rate   : n/a")
+    if rows:
+        print(f"{indent}pass rate   : {color_for_rate(f'{passed}/{len(rows)}', passed, len(rows))}")
+    else:
+        print(f"{indent}pass rate   : n/a")
     toks = [token_total(r) for r in rows if token_total(r)]
     print_metric_line(f"{indent}tokens", toks, integer=True)
     times = [elapsed(r) for r in rows if elapsed(r)]
@@ -512,9 +596,9 @@ def print_overview(rows):
     if behavior_names is not None:
         print(f"behaviors   : {'all' if behavior_names == [] else ', '.join(behavior_names)}")
     print(f"graded runs : {len(rows)}")
-    print(f"passed      : {passed}")
-    print(f"failed      : {failed}")
-    print(f"pass rate   : {passed}/{len(rows)}" if rows else "pass rate   : n/a")
+    print(f"passed      : {colorize(str(passed), 'green') if passed else passed}")
+    print(f"failed      : {colorize(str(failed), 'red') if failed else failed}")
+    print(f"pass rate   : {color_for_rate(f'{passed}/{len(rows)}', passed, len(rows))}" if rows else "pass rate   : n/a")
     toks = [token_total(r) for r in rows if token_total(r)]
     print_metric_line("tokens", toks, integer=True)
     times = [elapsed(r) for r in rows if elapsed(r)]
@@ -624,7 +708,9 @@ def print_run_detail(rows, q):
     print("=== run detail ===")
     print(f"run_id       : {r.get('run_id','')}")
     print(f"task_id      : {r.get('task_id','')}")
-    print(f"score        : {r.get('score','')}")
+    score_value = str(r.get('score',''))
+    score_display = color_pass_fail(score_value, score_value == 'pass') if score_value in {'pass', 'fail'} else score_value
+    print(f"score        : {score_display}")
     score_numeric = r.get("score_numeric")
     if isinstance(score_numeric, (int, float)):
         print(f"score_numeric: {score_numeric:.2f}")
@@ -665,7 +751,7 @@ def print_run_detail(rows, q):
     if warnings:
         print("\norchestration warnings:")
         for warning in warnings:
-            print(f"  - {warning}")
+            print(f"  - {colorize(warning, 'red')}")
 
     orch = meta.get("orchestra_artifacts") or {}
     if orch:
