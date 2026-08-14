@@ -54,7 +54,7 @@ class TestCapabilityAdvancedUrlShortenerReviewTask:
         assert "task_id: cap-advanced-url-shortener-review" in text
         assert "batch: capability-advanced" in text
         assert "scoring_type: numeric" in text
-        assert "expected_workflow: planner,researcher,builder,verifier,reviewer,appsec" in text
+        assert "expected_workflow:" not in text
         assert "source_benchmark: SaaSBench+SWE-bench-inspired" in text
 
     def test_task_docs_describe_live_e2e_shortlink_requirements(self):

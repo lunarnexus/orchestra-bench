@@ -282,7 +282,7 @@ class TestCapabilityHardTsApprovalQueueTask:
         assert "task_id: cap-normal-ts-approval-queue" in text
         assert "batch: capability-normal" in text
         assert "scoring_type: numeric" in text
-        assert "expected_workflow: planner,researcher,builder,verifier,reviewer,appsec" in text
+        assert "expected_workflow:" not in text
 
     def test_browser_homepage_requirement_is_documented_and_graded(self):
         prd = (_TASK_DIR / "PRD.md").read_text()

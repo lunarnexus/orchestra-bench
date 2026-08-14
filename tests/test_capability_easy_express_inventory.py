@@ -230,7 +230,7 @@ class TestCapabilityNormalExpressInventoryTask:
         assert "task_id: cap-easy-express-inventory" in text
         assert "batch: capability-easy" in text
         assert "scoring_type: numeric" in text
-        assert "expected_workflow: planner,researcher,builder,verifier,reviewer,appsec" in text
+        assert "expected_workflow:" not in text
 
     def test_pristine_fixture_fails(self, tmp_path):
         _copy_tree(_TASK_DIR / "fixture", tmp_path)

@@ -6,5 +6,4 @@ scoring_type: numeric
 timeout_minutes: 30
 evaluator: evaluate/run.sh
 split: dev
-expected_workflow: planner,researcher,builder,verifier,reviewer,appsec
 source_benchmark: SaaSBench+SWE-bench-inspired

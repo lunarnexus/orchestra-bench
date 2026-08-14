@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 05-results — Historical benchmark reporting, plus guarded result deletion.
+# 05-results — Historical benchmark reporting, plus guarded result maintenance.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
@@ -18,6 +18,7 @@ Views:
   timing           Elapsed time across tasks/roles
   notes            List distinct run notes (sort/uniq style)
   delete           Delete graded result directories matching filters (requires --notes; dry-run unless --yes)
+  set-notes        Rewrite notes for graded results matching filters (requires --notes and --set-notes; dry-run unless --yes)
 
 Options:
   --task <id>         Filter to one task
@@ -28,7 +29,8 @@ Options:
   --checks [names]    Show only check breakdowns; optional comma-separated names
   --behaviors [names] Show only behavior breakdowns; optional comma-separated names
   --limit <n>         Limit rows for runs/timeline (default: 20)
-  --yes               Actually delete matches for the delete view (default is dry-run)
+  --set-notes <text>  New notes text for the set-notes view
+  --yes               Apply delete/set-notes changes (default is dry-run)
 
 Examples:
   scripts/05-results
@@ -41,6 +43,8 @@ Examples:
   scripts/05-results timing
   scripts/05-results delete --notes "Batch1"       # dry-run preview
   scripts/05-results delete --notes "Batch1" --yes # delete matched run dirs
+  scripts/05-results set-notes --notes "Batch1" --set-notes "Batch1 qwen3.6-35b"       # dry-run
+  scripts/05-results set-notes --notes "Batch1" --set-notes "Batch1 qwen3.6-35b" --yes # rewrite notes
 EOF
 }
 
@@ -48,7 +52,7 @@ view="dashboard"
 if [ $# -gt 0 ]; then
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    dashboard|runs|run|tasks|timeline|tokens|timing|notes|delete) view="$1"; shift ;;
+    dashboard|runs|run|tasks|timeline|tokens|timing|notes|delete|set-notes) view="$1"; shift ;;
   esac
 fi
 
@@ -62,6 +66,7 @@ checks_filter=""
 behaviors_filter=""
 limit="20"
 yes_delete="false"
+new_notes=""
 
 if [ "$view" = "run" ]; then
   run_query="${1:-}"
@@ -88,13 +93,14 @@ while [ $# -gt 0 ]; do
       else behaviors_filter="__all__"; shift
       fi ;;
     --limit) limit="$2"; shift 2 ;;
+    --set-notes) new_notes="$2"; shift 2 ;;
     --yes) yes_delete="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[bench] unknown argument: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_filter" "$detail_level" "$rubric_filter" "$checks_filter" "$behaviors_filter" "$limit" "$yes_delete" <<'PY'
+python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_filter" "$detail_level" "$rubric_filter" "$checks_filter" "$behaviors_filter" "$limit" "$yes_delete" "$new_notes" <<'PY'
 from __future__ import annotations
 
 import json
@@ -136,6 +142,7 @@ try:
 except Exception:
     limit = 20
 yes_delete = sys.argv[12].strip().lower() == "true"
+new_notes = sys.argv[13]
 
 results_dir = root / "results"
 tasks_dir = root / "tasks"
@@ -482,7 +489,6 @@ def print_metric_line(label, values, *, integer=False, formatter=None):
     if not values:
         print(f"{label:<12}: none captured yet")
         return
-    total = sum(values)
     avg = statistics.mean(values)
     median = statistics.median(values)
     high = max(values)
@@ -493,7 +499,7 @@ def print_metric_line(label, values, *, integer=False, formatter=None):
         else:
             formatter = lambda v: str(v)
     print(
-        f"{label:<12}: total={formatter(total)} avg={formatter(avg)} median={formatter(median)} high={formatter(high)} low={formatter(low)}"
+        f"{label:<12}: avg={formatter(avg)} median={formatter(median)} high={formatter(high)} low={formatter(low)}"
     )
 
 
@@ -847,6 +853,65 @@ def delete_filtered_results(rows):
             shutil.rmtree(target)
 
 
+def _safe_result_dir(rel_dir):
+    target = (root / str(rel_dir or "")).resolve()
+    try:
+        target.relative_to(results_dir.resolve())
+    except ValueError:
+        return None
+    if target == results_dir.resolve() or not target.is_dir():
+        return None
+    return target
+
+
+def set_notes_for_filtered_results(rows):
+    print("\n=== set result notes ===")
+    if not notes_filter:
+        print("[bench] refusing to rewrite notes without --notes <substring>", file=sys.stderr)
+        raise SystemExit(2)
+    if new_notes == "":
+        print("[bench] refusing to rewrite notes without --set-notes <text>", file=sys.stderr)
+        raise SystemExit(2)
+    if not rows:
+        print(f"no graded result directories match notes filter: {notes_filter}")
+        return
+
+    print(f"notes filter: {notes_filter}")
+    print(f"new notes   : {new_notes}")
+    print(f"matches     : {len(rows)} graded result director{'y' if len(rows) == 1 else 'ies'}")
+    print(f"mode        : {'apply' if yes_delete else 'dry-run (add --yes to rewrite)'}")
+
+    for r in rows:
+        rel_dir = str(r.get("_dir", ""))
+        target = _safe_result_dir(rel_dir)
+        old_notes = str(((r.get("run_meta") or {}).get("notes", "")) or "")
+        if target is None:
+            print(f"SKIP unsafe/missing path: {rel_dir}", file=sys.stderr)
+            continue
+        print(f"{'UPDATE' if yes_delete else 'WOULD UPDATE'} {rel_dir}  notes={old_notes} -> {new_notes}")
+        if not yes_delete:
+            continue
+
+        result_path = target / "result.json"
+        data = json.loads(result_path.read_text())
+        run_meta = data.get("run_meta")
+        if not isinstance(run_meta, dict):
+            run_meta = {}
+            data["run_meta"] = run_meta
+        run_meta["notes"] = new_notes
+        result_path.write_text(json.dumps(data, indent=2) + "\n")
+
+        bench_run_path = target / ".bench_run.json"
+        if bench_run_path.is_file():
+            try:
+                bench_data = json.loads(bench_run_path.read_text())
+            except Exception:
+                bench_data = None
+            if isinstance(bench_data, dict):
+                bench_data["notes"] = new_notes
+                bench_run_path.write_text(json.dumps(bench_data, indent=2) + "\n")
+
+
 def print_run_detail(rows, q):
     r = find_run(rows, q)
     if not r:
@@ -936,6 +1001,8 @@ elif view == "notes":
     print_notes(rows)
 elif view == "delete":
     delete_filtered_results(rows)
+elif view == "set-notes":
+    set_notes_for_filtered_results(rows)
 else:
     print(f"unknown view: {view}", file=sys.stderr)
     raise SystemExit(1)

@@ -149,7 +149,6 @@ export BENCH_RUN_ID BENCH_TASK_ID="$task_id"
 
 family="$(_yaml_value "$TASK_YAML" family || true)"
 batch="$(_yaml_value "$TASK_YAML" batch || true)"
-expected_workflow="$(_yaml_value "$TASK_YAML" expected_workflow || true)"
 parent_role="builder"
 target_role=""
 case "$family" in
@@ -188,17 +187,9 @@ fi
 echo "[bench] model:  ${model_to_use:-<default>}"
 echo "[bench] collect: scripts/03-collect-results $task_id --run-id $BENCH_RUN_ID"
 
-role_instruction=""
-if [ -n "$target_role" ]; then
-  role_instruction="This is a role-focused benchmark for the $target_role role. If Orchestra is enabled, keep this Pi session as the parent/coordinator and dispatch to the $target_role role to do the task. If Orchestra is unavailable or disabled, complete the task directly."
-elif [ -n "$expected_workflow" ]; then
-  expected_workflow_words="$(printf '%s' "$expected_workflow" | sed 's/,/, /g')"
-  if [ "$family" = "capability" ]; then
-    role_instruction="This is a capability benchmark for Orchestra workflow behavior. First use /orch on. Then keep this Pi session as the parent/coordinator and dispatch to $expected_workflow_words for scoped planning, research, implementation, verification, review, and appsec work as appropriate. Integrate worker results before finalizing. If Orchestra is unavailable or disabled, complete the task directly and say so."
-  else
-    role_instruction="This task expects Orchestra workflow behavior. First use /orch on. Then keep this Pi session as the parent/coordinator and dispatch to $expected_workflow_words for scoped planning, research, implementation, verification, review, and appsec work as appropriate. Integrate worker results before finalizing. If Orchestra is unavailable or disabled, complete the task directly and say so."
-  fi
-fi
+# Keep benchmark prompts task-local and concise. Prompt.md contains all
+# role/task-specific instructions. --auto may still run an explicit /orch on
+# preflight when enabled, but the harness does not prepend prompt text.
 
 if $auto; then
   echo "[bench] auto:   running Prompt.md with pi -p"
@@ -216,7 +207,6 @@ if $auto; then
     -e BENCH_TASK_ID="$task_id" \
     -e BENCH_WORKDIR="$WORKDIR" \
     -e BENCH_MODEL="$model_to_use" \
-    -e BENCH_ROLE_INSTRUCTION="$role_instruction" \
     -e BENCH_AUTO_ORCH_ON="$auto_orch_on_value" \
     "$CONTAINER_NAME" sh -c '
       set -eu
@@ -252,11 +242,6 @@ if $auto; then
       else
         prompt="Inspect the workspace and complete the benchmark task."
       fi
-      if [ -n "$BENCH_ROLE_INSTRUCTION" ]; then
-        prompt="$BENCH_ROLE_INSTRUCTION
-
-$prompt"
-      fi
       if [ "$BENCH_AUTO_ORCH_ON" = "true" ]; then
         pi --model "$BENCH_MODEL" -p "/orch on"
         pi --continue --model "$BENCH_MODEL" -p "$prompt"
@@ -279,7 +264,6 @@ if docker exec "$CONTAINER_NAME" test -f "$PROMPT_MD"; then
     "$CONTAINER_NAME" bash -c "
       cd $WORKDIR && \
       echo '=== Task: $task_id ===' && \
-      if [ -n '$role_instruction' ]; then echo '$role_instruction'; echo ''; fi && \
       cat $PROMPT_MD && \
       echo '' && \
       echo '--- Starting Pi in workdir: $WORKDIR ---' && \

@@ -1,6 +1,7 @@
 # Run Prompt
 
-Read `PRD.md` and `kb/url_safety.md`, inspect the fixture, dispatch to useful Orchestra roles early, and finish ShortLink Desk.
+Read `PRD.md` and `kb/url_safety.md`, inspect the fixture, and finish ShortLink Desk.
+Dispatch and proceed until finished.
 
 Requirements:
 - make the FastAPI app runnable with `uvicorn app:app --host 127.0.0.1 --port 8123`

@@ -166,7 +166,7 @@ class TestCapabilityHardRubyBillingLedgerTask:
         assert "task_id: cap-normal-ruby-billing-ledger" in text
         assert "batch: capability-normal" in text
         assert "scoring_type: numeric" in text
-        assert "expected_workflow: planner,researcher,builder,verifier,reviewer,appsec" in text
+        assert "expected_workflow:" not in text
 
     def test_dockerfile_preinstalls_ruby_task_deps(self):
         dockerfile = (_REPO_ROOT / "docker" / "Dockerfile").read_text().lower()

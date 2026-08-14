@@ -74,7 +74,7 @@ Current intended batch philosophy:
 - `capability-normal` — restored more involved SaaSBench-style E2E tasks with seeded conflicts/traps
 - `capability-advanced` — larger full-app tasks such as ShortLink Desk
 
-Old standalone `contract` tasks are not public benchmark suites; container/workdir invariants belong in harness/container checks. Capability tasks are the exception to the normal outcome-first/no-forced-roles principle: they intentionally score full Orchestra workflow evidence across planner, researcher, builder, verifier, reviewer, and appsec. That workflow evidence is required as task material but scored, not an automatic pass/fail gate.
+Old standalone `contract` tasks are not public benchmark suites; container/workdir invariants belong in harness/container checks. Workflow evidence requirements must be visible in `Prompt.md` and implemented by the task-local evaluator. Capability evaluators score that evidence as secondary numeric/rubric quality without changing functional pass/fail; workflow smoke evaluators may make concise evidence files part of their explicit pass/fail contract when the prompt says so.
 
 Smoke E2E tests should be inspired by SaaSBench-style product patterns:
 - dependent setup chain -> one core action
@@ -92,7 +92,7 @@ Keep support for:
 - model and catalog provenance
 - Orchestra on/off comparisons
 - comparison across catalog / prompt / skill changes
-- baseline/no-Orchestra suite runs with `04-run-suite --no-orchestra`
+- baseline suite runs with `04-run-suite --no-orchestra`, which skips automatic `/orch on` without rewriting task prompts
 
 ### 10. Task material should borrow from SaaSBench
 Task structure and benchmark wisdom should be borrowed from SaaSBench where useful:
@@ -105,7 +105,7 @@ Use markdown for human-facing requirement and knowledge artifacts.
 
 Current preferred mapping:
 - `PRD.md` — product requirements document / authoritative spec
-- `Prompt.md` — agent-facing run prompt / instructions
+- `Prompt.md` — complete agent-facing run prompt / instructions, including dispatch, role, and artifact requirements
 - `kb.md` or `kb/` markdown files — bounded knowledge / clarifications
 - `fixture/` — starting workspace
 - `evaluate/` — grader-only materials kept outside the agent-visible workspace

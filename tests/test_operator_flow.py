@@ -516,8 +516,13 @@ class TestOpenPiInteractiveSession:
         assert "/orch on preflight skipped" in result.stdout
         log = docker_log.read_text()
         assert "BENCH_AUTO_ORCH_ON=false" in log
+        assert "BENCH_ROLE_INSTRUCTION" not in log
+        assert '-p "/orch on"' in log  # shell branch remains present but gated by BENCH_AUTO_ORCH_ON
+        assert "First use /orch on" not in log
+        assert "This task expects Orchestra workflow behavior" not in log
+        assert "parent/coordinator" not in log
 
-    def test_role_focused_auto_asks_parent_to_dispatch_target_role(self, tmp_path):
+    def test_role_focused_auto_keeps_workflow_instruction_in_task_prompt_only(self, tmp_path):
         import os
         import shutil
 
@@ -570,13 +575,13 @@ class TestOpenPiInteractiveSession:
         assert cfg["target_role"] == "planner"
         assert cfg["orchestra"] is True
         log = docker_log.read_text()
-        assert "parent/coordinator" in log
-        assert "dispatch to the planner role" in log
+        assert "BENCH_ROLE_INSTRUCTION" not in log
+        assert "parent/coordinator" not in log
+        assert "dispatch to the planner role" not in log
         assert "dispatch the $target_role role" not in log
         assert "dispatch the $BENCH_TARGET_ROLE role" not in log
-        assert "BENCH_ROLE_INSTRUCTION" in log
 
-    def test_expected_workflow_task_auto_marks_orchestra_and_prompts_expected_workflow(self, tmp_path):
+    def test_orchestrator_task_auto_marks_orchestra_without_verbose_prompt_injection(self, tmp_path):
         import os
         import shutil
 
@@ -626,10 +631,12 @@ class TestOpenPiInteractiveSession:
         assert cfg["orchestra"] is True
         log = docker_log.read_text()
         assert '-p "/orch on"' in log
-        assert "dispatch to planner, researcher, builder, verifier, reviewer, appsec" in log
-        assert "BENCH_ROLE_INSTRUCTION" in log
+        assert "BENCH_ROLE_INSTRUCTION" not in log
+        assert "dispatch to planner, researcher, builder, verifier, reviewer, appsec" not in log
+        assert "First use /orch on" not in log
+        assert "parent/coordinator" not in log
 
-    def test_smoke_auto_prompts_expected_workflow_when_declared(self, tmp_path):
+    def test_smoke_auto_uses_task_prompt_without_workflow_injection(self, tmp_path):
         import os
         import shutil
 
@@ -679,9 +686,11 @@ class TestOpenPiInteractiveSession:
         assert cfg["orchestra"] is True
         log = docker_log.read_text()
         assert '-p "/orch on"' in log
-        assert "dispatch to planner, researcher, builder, verifier, reviewer, appsec" in log
-        assert "This task expects Orchestra workflow behavior" in log
-        assert "BENCH_ROLE_INSTRUCTION" in log
+        assert "BENCH_ROLE_INSTRUCTION" not in log
+        assert "dispatch to planner, researcher, builder, verifier, reviewer, appsec" not in log
+        assert "This task expects Orchestra workflow behavior" not in log
+        assert "First use /orch on" not in log
+        assert "parent/coordinator" not in log
 
 
 class TestCollectResultsUsage:

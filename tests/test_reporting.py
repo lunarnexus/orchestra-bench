@@ -573,6 +573,10 @@ class TestDashboardReporting:
         assert "extensions  : orchestra,pi-codegraph,pi-lmstudio" in result.stdout
         assert "skills      : none" in result.stdout
         assert "config      : (none)" in result.stdout
+        assert "tokens      : avg=" in result.stdout
+        assert "elapsed     : avg=" in result.stdout
+        assert "tokens      : total=" not in result.stdout
+        assert "elapsed     : total=" not in result.stdout
         assert "=== per-suite breakdown ===" in result.stdout
         assert "[smoke]" in result.stdout
         assert "[capability-easy]" in result.stdout
@@ -735,6 +739,95 @@ class TestDashboardReporting:
         assert "DELETE results/run-a-task-a" in result.stdout
         assert not (tmp_path / "results" / "run-a-task-a").exists()
         assert (tmp_path / "results" / "run-b-task-b").exists()
+
+    def test_set_notes_requires_notes_filter_and_new_notes(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-a", run_id="run-a", score="pass", run_meta={"notes": "Batch1 alpha"}),
+        )
+
+        no_filter = __import__("subprocess").run(
+            ["bash", str(script), "set-notes", "--set-notes", "Batch1 renamed", "--yes"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        no_new_notes = __import__("subprocess").run(
+            ["bash", str(script), "set-notes", "--notes", "Batch1", "--yes"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert no_filter.returncode == 2
+        assert "refusing to rewrite notes without --notes" in no_filter.stderr
+        assert no_new_notes.returncode == 2
+        assert "refusing to rewrite notes without --set-notes" in no_new_notes.stderr
+
+    def test_set_notes_is_dry_run_by_default(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_task_yaml(tmp_path, "task-b", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-a", run_id="run-a", score="pass", run_meta={"notes": "Batch1 alpha"}),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-b", run_id="run-b", score="pass", run_meta={"notes": "Batch2 beta"}),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "set-notes", "--notes", "batch1", "--set-notes", "Batch1 renamed"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "mode        : dry-run" in result.stdout
+        assert "WOULD UPDATE results/run-a-task-a" in result.stdout
+        assert "run-b-task-b" not in result.stdout
+        data = json.loads((tmp_path / "results" / "run-a-task-a" / "result.json").read_text())
+        assert data["run_meta"]["notes"] == "Batch1 alpha"
+
+    def test_set_notes_with_yes_updates_matching_result_and_bench_run(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_task_yaml(tmp_path, "task-b", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-a", run_id="run-a", score="pass", run_meta={"notes": "Batch1 alpha"}),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-b", run_id="run-b", score="pass", run_meta={"notes": "Batch2 beta"}),
+        )
+        bench_run = tmp_path / "results" / "run-a-task-a" / ".bench_run.json"
+        bench_run.write_text(json.dumps({"run_id": "run-a", "task_id": "task-a", "notes": "Batch1 alpha"}) + "\n")
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "set-notes", "--notes", "Batch1", "--set-notes", "Batch1 renamed", "--yes"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "mode        : apply" in result.stdout
+        assert "UPDATE results/run-a-task-a" in result.stdout
+        updated = json.loads((tmp_path / "results" / "run-a-task-a" / "result.json").read_text())
+        untouched = json.loads((tmp_path / "results" / "run-b-task-b" / "result.json").read_text())
+        updated_bench = json.loads(bench_run.read_text())
+        assert updated["run_meta"]["notes"] == "Batch1 renamed"
+        assert updated_bench["notes"] == "Batch1 renamed"
+        assert untouched["run_meta"]["notes"] == "Batch2 beta"
 
     def test_rubric_filter_shows_only_rubric_section(self, tmp_path):
         script = _install_results_script(tmp_path)

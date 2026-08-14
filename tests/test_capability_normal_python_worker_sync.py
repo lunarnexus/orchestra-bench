@@ -189,7 +189,7 @@ class TestCapabilityHardPythonWorkerSyncTask:
         assert "task_id: cap-normal-python-worker-sync" in text
         assert "batch: capability-normal" in text
         assert "scoring_type: numeric" in text
-        assert "expected_workflow: planner,researcher,builder,verifier,reviewer,appsec" in text
+        assert "expected_workflow:" not in text
 
     def test_task_docs_require_browser_homepage(self):
         prd = (_TASK_DIR / "PRD.md").read_text()

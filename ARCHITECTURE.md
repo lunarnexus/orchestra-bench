@@ -101,7 +101,8 @@ Keep the operator surface simple, but with clear semantics:
 - `scripts/01-start stop` removes the benchmark container cleanly
 - task isolation comes from a fresh per-run workdir created by `scripts/02-open-pi <task-id>`
 - `scripts/02-open-pi <task-id> --auto` uses the same prep path, runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` non-interactively and exits
-- role-focused tasks keep the Pi session as the parent/coordinator and ask it to dispatch the target role through Orchestra when Orchestra is enabled; the harness records `target_role` separately instead of running Pi as the worker role
+- `scripts/02-open-pi <task-id> --auto --no-orchestra` skips only the automatic `/orch on` preflight and sends `Prompt.md` unchanged
+- all role/workflow/artifact requirements live in `Prompt.md`; the harness records metadata such as `target_role` for diagnostics but does not inject prompt text
 - `scripts/03-collect-results` grades all prepared/ungraded runs idempotently
 - `scripts/04-run-suite <suite>` runs each suite task through `02-open-pi --auto`, then grades it; `--no-orchestra` passes through for baseline/no-Orchestra suite runs
 
@@ -146,7 +147,7 @@ Grader/evaluator materials are not mounted for the agent session. During grading
 The benchmark should group tasks by batch, not by abstract tooling mode.
 
 Target batch structure:
-- `smoke` — 6 real end-to-end tasks: 3 compact runtime smokes plus 3 workflow smokes that require role evidence
+- `smoke` — 6 real end-to-end tasks: 3 compact runtime smokes plus 3 workflow smokes whose `Prompt.md` and evaluators require concise workflow evidence files
 - `role-focused` — exactly 3 tasks each for planner, researcher, verifier, reviewer, builder, and appsec
 - `capability-easy` — integrated end-to-end tasks: restored prior easy tasks plus rebuilt ShortLink Desk
 - `capability-normal` — integrated end-to-end tasks: restored prior normal/hard tasks
@@ -224,7 +225,7 @@ scripts/03-collect-results
 scripts/05-results run <run-id>
 ```
 
-`--auto` must use the same preparation path as interactive runs. By default it first runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` inside the per-run workdir. This proves the operator flow, orchestrator-skill loading, Pi session capture, grading, token capture, timing, and result display against the actual benchmark path. Use `--no-orchestra` only for intentional baseline/debug runs.
+`--auto` must use the same preparation path as interactive runs. By default it first runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` inside the per-run workdir. `--no-orchestra` skips only that automatic `/orch on` preflight; it does not rewrite or weaken the task prompt, and Orchestra tools may still be used if available and requested by `Prompt.md`. This proves the operator flow, orchestrator-skill loading, Pi session capture, grading, token capture, timing, and result display against the actual benchmark path.
 
 ### Verification expectations
 When dogfooding a run, verify:

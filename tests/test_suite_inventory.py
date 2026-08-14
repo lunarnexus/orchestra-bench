@@ -49,20 +49,45 @@ class TestFinalSuiteInventory:
             "smoke-public-admin-upload",
         ]
 
-    def test_workflow_smokes_require_full_role_evidence(self):
-        expected = {
+    def test_tasks_do_not_use_expected_workflow_metadata(self):
+        for meta in _task_meta():
+            assert "expected_workflow" not in meta
+
+    def test_all_tasks_keep_dispatch_instruction_in_prompt_md(self):
+        for meta in _task_meta():
+            prompt = (_TASKS_DIR / str(meta["task_id"]) / "Prompt.md").read_text()
+            assert "Dispatch and proceed until finished." in prompt
+
+    def test_workflow_smoke_artifacts_are_prompted_and_graded(self):
+        workflow_smokes = {
             "smoke-billing-webhook-lifecycle",
-            "smoke-public-admin-upload",
             "smoke-migration-release-check",
+            "smoke-public-admin-upload",
         }
-        workflow = {
-            str(m.get("task_id")): str(m.get("expected_workflow"))
-            for m in _task_meta()
-            if m.get("task_id") in expected
-        }
-        assert set(workflow) == expected
-        for roles in workflow.values():
-            assert roles == "planner,researcher,builder,verifier,reviewer,appsec"
+        required = ["RESEARCH.md", "PLAN.md", "VERIFY.md", "REVIEW.md", "SECURITY.md"]
+        for task_id in workflow_smokes:
+            task_dir = _TASKS_DIR / task_id
+            prompt = (task_dir / "Prompt.md").read_text()
+            evaluator = (task_dir / "evaluate" / "run.sh").read_text()
+            for artifact in required:
+                assert artifact in prompt
+                assert artifact in evaluator
+
+    def test_capability_artifacts_are_prompted_and_soft_scored(self):
+        required = ["RESEARCH.md", "PLAN.md", "VERIFY.md", "REVIEW.md", "APPSEC.md"]
+        for meta in _task_meta():
+            if not str(meta.get("batch", "")).startswith("capability-"):
+                continue
+            task_dir = _TASKS_DIR / str(meta["task_id"])
+            prompt = (task_dir / "Prompt.md").read_text()
+            evaluator = (task_dir / "evaluate" / "run.sh").read_text()
+            for artifact in required:
+                assert artifact in prompt
+            assert "evaluate_workflow_evidence" in evaluator
+            assert (
+                "functional_pass = all" in evaluator
+                or ('"functional"' in evaluator and '"workflow"' in evaluator and 'threshold=0.70' in evaluator)
+            )
 
     def test_role_focused_has_three_tasks_per_role(self):
         by_family: defaultdict[str, list[str]] = defaultdict(list)

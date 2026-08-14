@@ -218,9 +218,14 @@ Should specify:
 - done condition
 
 ### `Prompt.md`
-The run prompt used by the agent.
+The complete run prompt used by the agent.
 
-Should be short and operational, not the full spec duplicated.
+Should be short and operational, not the full spec duplicated. Put all task-specific execution instructions here, including:
+- `Dispatch and proceed until finished.` when dispatch is desired
+- role-focused instructions such as asking the parent session to dispatch the target role
+- required workflow evidence files such as `RESEARCH.md`, `PLAN.md`, `VERIFY.md`, `REVIEW.md`, `SECURITY.md`, `APPSEC.md`, or `answer.md`
+
+The harness must not prepend hidden role/workflow instructions. `--auto` may run `/orch on` as a separate preflight unless `--no-orchestra` is used, but the task prompt itself is still exactly `Prompt.md`.
 
 ### `kb.md` or `kb/`
 Bounded research material.
@@ -255,7 +260,8 @@ Should define:
 - `description`
 - `timeout_minutes`
 - `scoring_type`
-- `expected_workflow` when relevant
+
+Do not use prompt-control metadata such as `expected_workflow`; workflow/role/artifact requirements belong in `Prompt.md` and evaluator logic.
 
 ---
 

@@ -91,7 +91,7 @@ tasks/<task-id>/
 ```
 
 - `PRD.md` is the authoritative product spec, copied into the task workdir so the agent can reference it.
-- `Prompt.md` is what `02-open-pi` prints to kick off the session — concise instructions for the agent.
+- `Prompt.md` is the complete agent-facing run prompt — concise instructions for the agent, including any dispatch/role/artifact requirements. The harness does not prepend role/workflow instructions.
 - `kb/` or `kb.md` provides bounded knowledge / clarifications (markdown only).
 - `evaluate/` contains grader materials. These are not mounted during the agent session; grading copies them into the container only temporarily.
 
@@ -144,11 +144,11 @@ scripts/05-results timing
 
 ### `02-open-pi <task-id>`
 
-Lists tasks with `--list`, grouped by suite and role. Use `config` to open Pi's package/resource config TUI inside the benchmark container. For a task run, it prepares an isolated per-run workdir inside the container, copies only agent-visible task materials into it, resolves the parent model from `config/orchestra/agent-catalog.yaml`, and writes `.bench_run.json` in `results/<run_id>-<task_id>/`. By default it prints `Prompt.md` and starts Pi interactively. With `--auto`, it first runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` non-interactively. Use `--auto --no-orchestra` only for baseline/debug runs that intentionally skip Orchestra preflight. For role-focused tasks, the parent Pi session is instructed to dispatch the target role through Orchestra when Orchestra is enabled; the harness records `target_role` separately instead of running Pi as that worker role. Evaluator files are not mounted during this session. After interactive use, exit normally (Ctrl+D).
+Lists tasks with `--list`, grouped by suite and role. Use `config` to open Pi's package/resource config TUI inside the benchmark container. For a task run, it prepares an isolated per-run workdir inside the container, copies only agent-visible task materials into it, resolves the parent model from `config/orchestra/agent-catalog.yaml`, and writes `.bench_run.json` in `results/<run_id>-<task_id>/`. By default it prints `Prompt.md` and starts Pi interactively. With `--auto`, it first runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` non-interactively. With `--auto --no-orchestra`, it skips only that automatic `/orch on` preflight and sends `Prompt.md` as-is; if Orchestra tools are available, the model may still dispatch when the task prompt asks it to. Role-focused dispatch instructions belong in the task's `Prompt.md`; the harness records `target_role` separately for diagnostics instead of injecting prompt text or running Pi as that worker role. Evaluator files are not mounted during this session. After interactive use, exit normally (Ctrl+D).
 
 ### `03-collect-results [task-id]`
 
-With no task id, grades every prepared/ungraded run under `results/`, captures run artifacts, and then shows the historical dashboard. Already-graded runs are skipped so repeated collection is safe. With a task id, grades the latest prepared run for that task. Use `--force` to re-grade, `--splits` for dev/holdout summary, or `--compare` for provenance grouping (role/model/catalog hash/path/orchestra).
+With no task id, grades every prepared/ungraded run under `results/` and captures run artifacts. Already-graded runs are skipped so repeated collection is safe. With a task id, grades the latest prepared run for that task. Use `--force` to re-grade, `--splits` for dev/holdout summary, or `--compare` for provenance grouping (role/model/catalog hash/path/orchestra). Use `scripts/05-results` explicitly for dashboards and reporting.
 
 For each graded run, the result folder contains:
 - `result.json` — score, checks, metadata, token totals, Pi session ids
@@ -161,7 +161,7 @@ For each graded run, the result folder contains:
 
 ### `04-run-suite <suite>`
 
-Runs every task in a suite through `scripts/02-open-pi <task-id> --auto`, grades each run, then prints the result summary. This is the dogfood batch path for suite-level checks. Use `--no-orchestra` for baseline/no-Orchestra suite runs. Use `scripts/04-run-suite --list` to see suites. To grade already prepared runs without opening Pi, use `scripts/03-collect-results`.
+Runs every task in a suite through `scripts/02-open-pi <task-id> --auto`, grades each run, then prints the result summary. This is the dogfood batch path for suite-level checks. Use `--no-orchestra` for baseline runs that skip automatic `/orch on` skill loading while leaving the task prompt unchanged. Use `scripts/04-run-suite --list` to see suites. To grade already prepared runs without opening Pi, use `scripts/03-collect-results`.
 
 ### `05-results [view]`
 
