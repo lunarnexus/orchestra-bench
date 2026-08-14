@@ -35,6 +35,10 @@ class TestNewOptionalFieldsExist:
         r = TaskResult(task_id="t", run_id="r")
         assert r.efficiency == {}
 
+    def test_category_scores_defaults_to_empty_dict(self):
+        r = TaskResult(task_id="t", run_id="r")
+        assert r.category_scores == {}
+
     def test_score_numeric_can_be_set(self):
         r = TaskResult(task_id="t", run_id="r", score_numeric=0.85)
         assert r.score_numeric == 0.85
@@ -53,6 +57,11 @@ class TestNewOptionalFieldsExist:
         eff = {"tokens_position": "normal"}
         r = TaskResult(task_id="t", run_id="r", efficiency=eff)
         assert r.efficiency == eff
+
+    def test_category_scores_can_be_populated(self):
+        scores = {"intelligence": 0.9, "speed": 0.75}
+        r = TaskResult(task_id="t", run_id="r", category_scores=scores)
+        assert r.category_scores == scores
 
 
 class TestIsPassUnchanged:
@@ -94,12 +103,14 @@ class TestSerialization:
             rubric={"cat": {"score": 0.3}},
             orchestration_checks={"dispatched": True},
             efficiency={"pos": "normal"},
+            category_scores={"intelligence": 0.9},
         )
         d = r.to_dict()
         assert d["score_numeric"] == 0.85
         assert d["rubric"]["cat"]["score"] == 0.3
         assert d["orchestration_checks"]["dispatched"] is True
         assert d["efficiency"]["pos"] == "normal"
+        assert d["category_scores"]["intelligence"] == 0.9
 
     def test_to_dict_empty_defaults(self):
         r = TaskResult(task_id="t", run_id="r")
@@ -108,6 +119,7 @@ class TestSerialization:
         assert d["rubric"] == {}
         assert d["orchestration_checks"] == {}
         assert d["efficiency"] == {}
+        assert d["category_scores"] == {}
 
     def test_write_json_roundtrip(self, tmp_path):
         """Write result with new fields and read back identical."""
@@ -116,6 +128,7 @@ class TestSerialization:
             rubric={"cat": {"score": 0.3}},
             orchestration_checks={"dispatched": True},
             efficiency={"pos": "normal"},
+            category_scores={"intelligence": 0.9},
         )
 
         result_dir = tmp_path / "results" / "r-t"
@@ -129,6 +142,21 @@ class TestSerialization:
         assert loaded.rubric["cat"]["score"] == 0.3
         assert loaded.orchestration_checks["dispatched"] is True
         assert loaded.efficiency["pos"] == "normal"
+        assert loaded.category_scores["intelligence"] == 0.9
+
+    def test_write_json_accepts_explicit_file_path(self, tmp_path):
+        r = TaskResult(task_id="t", run_id="r", score="pass")
+        path = r.write_json(tmp_path / "nested" / "result.json")
+        assert path == tmp_path / "nested" / "result.json"
+        assert path.is_file()
+
+    def test_write_json_default_targets_repo_results(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        r = TaskResult(task_id="t2", run_id="r2", score="pass")
+        path = r.write_json()
+        assert path.name == "result.json"
+        assert path.parent.name == "r2-t2"
+        assert path.parent.parent.name == "results"
 
 
 class TestBackwardCompatibility:

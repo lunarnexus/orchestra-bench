@@ -788,6 +788,64 @@ class TestCombinedParsing:
         assert checks["worker_running_without_exit"] is False
         assert checks["fallback_answer_after_dispatch"] is False
 
+    def test_worker_success_marker_without_logs_counts_as_completed(self, tmp_path):
+        run_dir = _build_artifacts_dir(tmp_path, "run-cb1", "task-cb1")
+
+        lines = [
+            _session_line("session", id="sess-cb1"),
+            _session_line("message", message={
+                "role": "assistant",
+                "content": [{"type": "toolCall", "name": "orch_dispatch",
+                             "arguments": {"goal": "review code", "role": "reviewer"}}],
+            }),
+            _session_line("message", message={
+                "role": "user",
+                "content": [{"type": "text", "text": "[orchestra: reviewer wcb1 success]\nResult: done"}],
+            }),
+        ]
+        _write_session_jsonl(run_dir, lines)
+
+        from eval_harness import extract_orchestration_checks
+
+        result = TaskResult(
+            task_id="task-cb1",
+            run_id="run-cb1",
+            score="pass",
+            checks={"answer_exists": True},
+            run_meta={"target_role": "reviewer"},
+        )
+        checks = extract_orchestration_checks(result, base_dir=tmp_path / "results")
+
+        assert checks["worker_completed"] is True
+        assert checks["worker_running_without_exit"] is False
+        assert checks["fallback_answer_after_dispatch"] is False
+
+    def test_missing_answer_check_does_not_flag_premature_completion(self, tmp_path):
+        run_dir = _build_artifacts_dir(tmp_path, "run-cb1b", "task-cb1b")
+
+        lines = [
+            _session_line("session", id="sess-cb1b"),
+            _session_line("message", message={
+                "role": "assistant",
+                "content": [{"type": "toolCall", "name": "orch_dispatch",
+                             "arguments": {"goal": "review code", "role": "reviewer"}}],
+            }),
+        ]
+        _write_session_jsonl(run_dir, lines)
+
+        from eval_harness import extract_orchestration_checks
+
+        result = TaskResult(
+            task_id="task-cb1b",
+            run_id="run-cb1b",
+            score="pass",
+            checks={},
+            run_meta={"target_role": "reviewer"},
+        )
+        checks = extract_orchestration_checks(result, base_dir=tmp_path / "results")
+
+        assert checks["premature_completion"] is False
+
     def test_detects_fallback_answer_after_dispatch(self, tmp_path):
         run_dir = _build_artifacts_dir(tmp_path, "run-cb3", "task-cb3")
 

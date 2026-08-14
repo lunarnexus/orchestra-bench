@@ -148,8 +148,8 @@ The benchmark should group tasks by batch, not by abstract tooling mode.
 Target batch structure:
 - `smoke` — 6 real end-to-end tasks: 3 compact runtime smokes plus 3 workflow smokes that require role evidence
 - `role-focused` — exactly 3 tasks each for planner, researcher, verifier, reviewer, builder, and appsec
-- `capability-easy` — integrated end-to-end tasks
-- `capability-normal` — integrated end-to-end tasks
+- `capability-easy` — integrated end-to-end tasks: restored prior easy tasks plus rebuilt ShortLink Desk
+- `capability-normal` — integrated end-to-end tasks: restored prior normal/hard tasks
 
 `capability-raw-material` was a temporary construction bucket and should not appear in the final task inventory.
 The old monolithic `capability` suite is retired; Slice 1 removes its flawed placeholder tasks before new normal/hard tasks are added.

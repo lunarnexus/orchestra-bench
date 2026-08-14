@@ -265,10 +265,10 @@ class TestOpenPiScript:
 
     def test_task_list_order_uses_current_public_suites(self):
         script = (_REPO_ROOT / "scripts" / "02-open-pi").read_text()
-        assert "order = ['smoke', 'role-focused', 'capability-easy', 'capability-normal']" in script
+        assert "order = ['smoke', 'role-focused', 'capability-easy', 'capability-normal', 'capability-advanced']" in script
         assert "order = ['smoke', 'role-focused', 'capability']" not in script
 
-    def test_task_list_shows_current_capability_tasks(self):
+    def test_task_list_shows_capability_easy_and_normal_tasks(self):
         result = sp.run(
             [_REPO_ROOT / "scripts" / "02-open-pi", "--list"],
             capture_output=True, text=True, timeout=5,
@@ -276,9 +276,14 @@ class TestOpenPiScript:
         assert result.returncode == 0
         assert "[capability-easy]" in result.stdout
         assert "[capability-normal]" in result.stdout
-        assert "cap-normal-fastapi-helpdesk" in result.stdout
-        assert "cap-hard-python-worker-sync" in result.stdout
-        assert "(no tasks yet)" not in result.stdout
+        assert "cap-easy-fastapi-helpdesk" in result.stdout
+        assert "cap-easy-express-inventory" in result.stdout
+        assert "cap-easy-django-reports" in result.stdout
+        assert "cap-normal-python-worker-sync" in result.stdout
+        assert "cap-normal-ruby-billing-ledger" in result.stdout
+        assert "cap-normal-ts-approval-queue" in result.stdout
+        assert "[capability-advanced]" in result.stdout
+        assert "cap-advanced-url-shortener-review" in result.stdout
 
 
 class TestBuildStartScript:
@@ -446,11 +451,24 @@ class TestOpenPiInteractiveSession:
         assert result.returncode == 0
         assert "--auto" in result.stdout or "auto:" in result.stdout
         log = docker_log.read_text()
-        assert "exec pi --model" in log
+        assert "pi --model" in log
         assert " -p " in log
         assert "BENCH_AUTO_ORCH_ON=true" in log
         assert '-p "/orch on"' in log
         assert "--continue --model" in log
+
+    def test_auto_flow_uses_run_process_cleanup_without_task_timeout(self):
+        open_pi = (_REPO_ROOT / "scripts" / "02-open-pi").read_text()
+        collect = (_REPO_ROOT / "scripts" / "03-collect-results").read_text()
+        cleanup = (_REPO_ROOT / "scripts" / "_cleanup-run-processes")
+
+        assert cleanup.exists()
+        assert cleanup.stat().st_mode & 0o111
+        assert "cleanup_run_processes" in open_pi
+        assert "trap cleanup_run_processes EXIT" in open_pi
+        assert "\"$ROOT/scripts/_cleanup-run-processes\" \"$task_id\" --run-id \"$BENCH_RUN_ID\"" in open_pi
+        assert "\"$ROOT/scripts/_cleanup-run-processes\" \"$task_id\" --run-id \"$run_id\"" in collect
+        assert "timeout" not in cleanup.read_text().lower()
 
     def test_open_pi_auto_can_skip_orch_on_for_baseline(self, tmp_path):
         import os
@@ -558,7 +576,7 @@ class TestOpenPiInteractiveSession:
         assert "dispatch the $BENCH_TARGET_ROLE role" not in log
         assert "BENCH_ROLE_INSTRUCTION" in log
 
-    def test_capability_auto_marks_orchestra_and_prompts_expected_workflow(self, tmp_path):
+    def test_expected_workflow_task_auto_marks_orchestra_and_prompts_expected_workflow(self, tmp_path):
         import os
         import shutil
 
@@ -585,7 +603,7 @@ class TestOpenPiInteractiveSession:
             "DOCKER_LOG": str(docker_log),
         })
 
-        task_id = "cap-normal-fastapi-helpdesk"
+        task_id = "smoke-migration-release-check"
         results_dir = _REPO_ROOT / "results"
         before = {p for p in results_dir.glob(f"*-{task_id}")}
         try:
@@ -667,7 +685,12 @@ class TestOpenPiInteractiveSession:
 
 
 class TestCollectResultsUsage:
-    """03-collect-results docs should match grading-all behavior."""
+    """03-collect-results docs should match grading behavior."""
+
+    def test_collect_results_does_not_run_results_dashboard(self):
+        script = (_REPO_ROOT / "scripts" / "03-collect-results").read_text()
+        assert '"$ROOT/scripts/05-results"' not in script
+        assert "Use scripts/05-results explicitly for reporting" in script
 
     def test_help_describes_grade_all_default(self):
         result = sp.run(
@@ -681,6 +704,7 @@ class TestCollectResultsUsage:
         help_text = result.stdout
         assert "grade every prepared/ungraded run" in help_text.lower()
         assert "already-graded runs are skipped" in help_text.lower()
+        assert "use scripts/05-results explicitly for reporting" in help_text.lower()
         assert "--force" in help_text
         assert "compare" in help_text.lower()
 
@@ -736,16 +760,18 @@ class TestRunSuiteScript:
         script = (_REPO_ROOT / "scripts" / "04-run-suite").read_text()
         assert "capability-easy" in script
         assert "capability-normal" in script
+        assert "capability-advanced" in script
         assert "capability\n" not in script
 
-    def test_capability_normal_suite_is_no_longer_placeholder(self):
+    def test_capability_suite_counts_include_restored_tasks(self):
         result = sp.run(
             [_REPO_ROOT / "scripts" / "04-run-suite", "--list"],
             capture_output=True, text=True, timeout=5,
         )
         assert result.returncode == 0
         assert "capability-easy" in result.stdout and "3 tasks" in result.stdout
-        assert "capability-normal" in result.stdout and result.stdout.count("3 tasks") >= 2
+        assert "capability-normal" in result.stdout and "3 tasks" in result.stdout
+        assert "capability-advanced" in result.stdout and "1 tasks" in result.stdout
 
     def test_unknown_suite_still_fails(self):
         result = sp.run(
@@ -1006,6 +1032,45 @@ class TestEvalFlowUsesExistingWorkdir:
 
         assert result.elapsed_seconds == pytest.approx(123.45)
         assert result.efficiency["elapsed"]["current"] == pytest.approx(123.45)
+
+    def test_grade_preserves_previous_result_when_regrade_returns_no_json(self, tmp_path, monkeypatch):
+        import eval_harness
+
+        base_results = tmp_path / "results"
+        run_dir = base_results / "run-1-smoke-public-admin-handoff"
+        run_dir.mkdir(parents=True)
+        TaskResult(
+            task_id="smoke-public-admin-handoff",
+            run_id="run-1",
+            score="pass",
+            checks={"answer_exists": True},
+            score_numeric=0.86,
+            rubric={"role_result_quality": {"score": 0.35, "max": 0.40}},
+            tokens={"total": 900},
+            elapsed_seconds=55.0,
+        ).write_json(run_dir)
+
+        monkeypatch.setattr(eval_harness, "RESULTS_DIR", str(base_results))
+        monkeypatch.setattr(eval_harness, "_docker_ok", lambda: True)
+        monkeypatch.setattr(eval_harness.sp, "run", lambda *a, **k: sp.CompletedProcess(args=a[0], returncode=0, stdout="", stderr=""))
+
+        def fake_docker_exec(*args: str, env: dict[str, str] | None = None):
+            if args[:3] == ("bench-entrypoint", "eval", "smoke-public-admin-handoff"):
+                return sp.CompletedProcess(args=["docker"], returncode=1, stdout="", stderr="")
+            return sp.CompletedProcess(args=["docker"], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(eval_harness, "_docker_exec", fake_docker_exec)
+
+        result = eval_harness.grade(
+            "smoke-public-admin-handoff",
+            "run-1",
+            task_meta=TaskMeta(task_id="smoke-public-admin-handoff", description="smoke", family="smoke"),
+        )
+
+        assert result.score == "pass"
+        assert result.score_numeric == pytest.approx(0.86)
+        assert result.checks == {"answer_exists": True}
+        assert result.tokens["total"] == 900
 
 
 class TestOperatorDocs:

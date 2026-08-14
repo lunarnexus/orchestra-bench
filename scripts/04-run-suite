@@ -22,6 +22,7 @@ Suites:
   role-focused
   capability-easy
   capability-normal
+  capability-advanced
 
 Examples:
   scripts/04-run-suite --list
@@ -42,14 +43,14 @@ for y in base.glob('*/task.yaml'):
         s=line.strip()
         if s.startswith('batch:'):
             c[s.split(':',1)[1].strip().strip('"')]+=1
-for name in ['smoke','role-focused','capability-easy','capability-normal']:
+for name in ['smoke','role-focused','capability-easy','capability-normal','capability-advanced']:
     print(f"  {name:<18} {c[name]} tasks")
 PY
 }
 
 is_known_suite() {
   case "$1" in
-    smoke|role-focused|capability-easy|capability-normal) return 0 ;;
+    smoke|role-focused|capability-easy|capability-normal|capability-advanced) return 0 ;;
     *) return 1 ;;
   esac
 }

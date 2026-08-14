@@ -70,8 +70,9 @@ The benchmark should be organized into a few batches, not many modes.
 Current intended batch philosophy:
 - `smoke` — 6 real end-to-end tasks: 3 compact runtime smokes plus 3 workflow smokes that require research/planning/build/verify/review/security evidence
 - `role-focused` — 3 tasks each for planner, researcher, verifier, reviewer, builder, and appsec
-- `capability-easy` — 3 straightforward, passable, real-app E2E tasks across varied stacks
-- `capability-normal` — 3 passable but difficult SaaSBench-style E2E tasks with seeded conflicts/traps
+- `capability-easy` — restored straightforward, passable, real-app E2E tasks across varied stacks
+- `capability-normal` — restored more involved SaaSBench-style E2E tasks with seeded conflicts/traps
+- `capability-advanced` — larger full-app tasks such as ShortLink Desk
 
 Old standalone `contract` tasks are not public benchmark suites; container/workdir invariants belong in harness/container checks. Capability tasks are the exception to the normal outcome-first/no-forced-roles principle: they intentionally score full Orchestra workflow evidence across planner, researcher, builder, verifier, reviewer, and appsec. That workflow evidence is required as task material but scored, not an automatic pass/fail gate.
 
@@ -121,8 +122,8 @@ Install rules:
 
 ## Capability-suite decisions
 - Delete old flawed capability task IDs rather than keep them in public inventory.
-- Use `capability-easy` and `capability-normal` as separate suites.
-- Include 3 tasks per capability suite.
+- Use `capability-easy`, `capability-normal`, and `capability-advanced` as separate suites.
+- Rebuild each capability suite with 3 tasks when replacement tasks are ready.
 - Use varied languages, frameworks, dependencies, app types, and DB/storage types.
 - Preinstall task platform dependencies in the benchmark image/container where practical so agents are not tested on boring package setup.
 - Use bundled local `kb/` docs instead of live web access for capability research; web surfing availability is not what these tasks test.
@@ -131,6 +132,10 @@ Install rules:
 - Use lightweight substitutes only when they preserve the same app behavior and failure modes being evaluated.
 - Each capability task should produce a real working app and test functionality, security, performance, and workflow artifacts where relevant.
 - Capability tasks must be browser-routable working applications, not API-only slices. A valid capability app needs at least one usable `GET /` or equivalent HTML/browser entrypoint that lets a human inspect and exercise the core workflow on a routable host/port. API endpoints can still be primary grading targets, but the first browser experience must not be a bare 404 or docs-only page.
+
+## Authoring guide
+
+Detailed task-creation methodology lives in `TEST_CREATION.md`. Use it when creating or replacing capability tasks, designing evaluators, calibrating difficulty, or teaching future agents how to author benchmark tasks.
 
 ## Non-goals
 - reproducing full SaaSBench complexity

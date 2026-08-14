@@ -50,23 +50,31 @@ Narrower tasks that isolate value/behavior by role: 3 tasks each for planner, re
 
 ### capability-easy — integrated end-to-end tasks
 
-Straightforward SaaSBench-inspired real-app tasks:
+Straightforward source/app-inspired end-to-end tasks:
 
 | Task | Stack | Description |
 |------|-------|-------------|
-| `cap-normal-django-reports` | Python / Django / SQLite | Build a reporting app with sales/refund ingest, grouped summary exports, report history, permissions, and workflow evidence scoring |
-| `cap-normal-express-inventory` | Node / Express-style / file-backed | Build an inventory API with product CRUD, stock adjustments, low-stock reporting, ledger history, and workflow evidence scoring |
-| `cap-normal-fastapi-helpdesk` | Python / FastAPI / SQLite | Build a helpdesk API with public ticket intake, admin triage, audit log, pagination, and workflow evidence scoring |
+| `cap-easy-express-inventory` | Node / Express / JSON persistence | Build an inventory API with stock adjustments, low-stock reports, ledger history, and workflow evidence |
+| `cap-easy-fastapi-helpdesk` | Python / FastAPI / SQLite | Build a helpdesk API with ticket creation, admin triage, audit log, and workflow evidence |
+| `cap-easy-django-reports` | Python / Django / SQLite | Build a reporting app with grouped summaries, exports, report history, and workflow evidence |
 
 ### capability-normal — integrated end-to-end tasks
 
-Harder SaaSBench-inspired real-app tasks with more realistic conflicts and traps.
+More involved app/system tasks restored from the prior hard suite:
 
 | Task | Stack | Description |
 |------|-------|-------------|
-| `cap-hard-python-worker-sync` | Python / FastAPI / SQLite worker | Build a document sync API plus background worker with durable SQLite jobs, retries, stale-job recovery, conflict handling, audit history, pagination, and workflow evidence scoring |
-| `cap-hard-ruby-billing-ledger` | Ruby / Sinatra / SQLite | Build a billing ledger API + CLI with invoices, payments, refunds/credits, durable idempotency, reconciliation, CSV export, and workflow evidence scoring |
-| `cap-hard-ts-approval-queue` | TypeScript / Node / file-backed | Build a moderation queue with durable submissions, approval/rejection flow, attachment path safety, XSS-safe public rendering, audit history, pagination, and workflow evidence scoring |
+| `cap-normal-python-worker-sync` | Python / FastAPI / SQLite worker | Build a document sync API plus worker with durable jobs, retries, conflict handling, stale recovery, and audit history |
+| `cap-normal-ruby-billing-ledger` | Ruby / Sinatra / SQLite | Build a billing ledger with idempotency, reconciliation, refunds, exports, and workflow evidence |
+| `cap-normal-ts-approval-queue` | TypeScript / Node | Build a moderation queue with approval workflow, attachment path safety, visibility rules, XSS-safe rendering, and audit history |
+
+### capability-advanced — larger integrated end-to-end tasks
+
+Full app/system tasks intended for longer multi-role orchestration:
+
+| Task | Stack | Description |
+|------|-------|-------------|
+| `cap-advanced-url-shortener-review` | Python / FastAPI / SQLite | Build ShortLink Desk: URL shortening, redirects, stats, suspicious-link review, admin decisions, audit history, URL safety checks, and live E2E grading |
 
 ## Task artifact model
 
@@ -195,6 +203,10 @@ The dogfood run should produce a real Pi session, result JSON, token/timing arti
 The numbered scripts handle the normal workflow. Use `scripts/01-start start` to build and recreate the container with fresh mounts/config, or `scripts/01-start stop` to stop and remove the container cleanly.
 
 Runtime internals and troubleshooting checks live in `ARCHITECTURE.md` so the README stays focused on the operator flow. The container installs the LM Studio and CodeGraph Pi plugins during image build, and copies `config/skills/` into Pi's in-container skills directory.
+
+## Test creation guide
+
+See `TEST_CREATION.md` for the benchmark authoring guide: capability task goals, difficulty calibration, evaluator rules, scoring intent, anti-patterns, and checklist for future test-creating agents.
 
 ## Methodology rules
 

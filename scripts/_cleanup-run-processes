@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# _cleanup-run-processes — stop leaked processes whose cwd belongs to one run workspace.
+set -euo pipefail
+
+CONTAINER_NAME="${CONTAINER_NAME:-orchestra-bench-runner}"
+run_id=""
+task_id=""
+workdir=""
+
+usage() {
+  echo "Usage: $(basename "$0") <task-id> --run-id <run-id> [--workdir <container-path>]" >&2
+}
+
+if [ $# -gt 0 ]; then
+  task_id="$1"
+  shift
+fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-id) run_id="$2"; shift 2 ;;
+    --workdir) workdir="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "[bench] cleanup: unknown option: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+if [ -z "$task_id" ] || [ -z "$run_id" ]; then
+  usage
+  exit 1
+fi
+if [ -z "$workdir" ]; then
+  workdir="/workspace/$run_id-$task_id"
+fi
+
+if ! docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" >/dev/null 2>&1; then
+  exit 0
+fi
+
+docker exec -e BENCH_WORKDIR="$workdir" "$CONTAINER_NAME" sh -lc '
+  set +e
+  cd / 2>/dev/null || true
+  workdir=${BENCH_WORKDIR%/}
+  [ -n "$workdir" ] || exit 0
+  [ "$workdir" != "/" ] || exit 0
+
+  me=$$
+  parent=${PPID:-}
+  pids=""
+  for f in /proc/[0-9]*/cwd; do
+    pid=${f#/proc/}; pid=${pid%/cwd}
+    [ "$pid" = "$me" ] && continue
+    [ -n "$parent" ] && [ "$pid" = "$parent" ] && continue
+    cwd=$(readlink "$f" 2>/dev/null || true)
+    case "$cwd" in
+      "$workdir"|"$workdir"/*)
+        pids="$pids $pid"
+        ;;
+    esac
+  done
+
+  [ -n "$pids" ] || exit 0
+  echo "[bench] cleanup: stopping leaked run processes:$pids" >&2
+  for pid in $pids; do kill "$pid" 2>/dev/null || true; done
+  sleep 1
+  for pid in $pids; do
+    if [ -d "/proc/$pid" ]; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+'

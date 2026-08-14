@@ -95,15 +95,22 @@ def evaluate_rubric(
 
         for chk_name in cat_checks_def:
             chk_def = cat_checks_def[chk_name] or {}
-            passed = bool(checks.get(chk_name))
+            raw_value = checks.get(chk_name)
+            if isinstance(raw_value, bool):
+                check_value = 1.0 if raw_value else 0.0
+            elif isinstance(raw_value, (int, float)):
+                check_value = max(0.0, min(1.0, float(raw_value)))
+            else:
+                check_value = 1.0 if bool(raw_value) else 0.0
+            passed = check_value >= 1.0 - 1e-9
             is_critical = bool((chk_def or {}).get("critical", False))
 
             if not passed and is_critical:
                 any_critical_miss = True
 
-            earned = effective_weights.get(chk_name, 0.0) if passed else 0.0
+            earned = effective_weights.get(chk_name, 0.0) * check_value
             cat_score += earned
-            cat_check_results[chk_name] = passed
+            cat_check_results[chk_name] = raw_value if isinstance(raw_value, (bool, int, float)) else passed
 
         # Clamp category score to its weight (safety against float drift)
         cat_score = min(cat_score, cat_weight + 1e-9)

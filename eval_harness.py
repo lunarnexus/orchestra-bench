@@ -229,11 +229,12 @@ def _parse_pi_list_package_names(stdout: str) -> list[str]:
             continue
         if stripped.startswith("/"):
             continue
-        if stripped.startswith("http://") or stripped.startswith("https://"):
-            source = stripped.split()[0].rstrip("/")
-            name = source.rsplit("/", 1)[-1]
-            if name:
-                names.append(name)
+        source = stripped.split()[0].rstrip("/")
+        if ":" not in source and "/" not in source:
+            continue
+        name = source.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        if name:
+            names.append(name)
     return sorted(set(names))
 
 
@@ -243,6 +244,7 @@ def collect_container_runtime_snapshot() -> dict[str, object]:
     if not _docker_ok():
         return snapshot
 
+    package_names: list[str] = []
     try:
         pi_list = _docker_exec("sh", "-lc", "pi list 2>/dev/null || true")
         package_names = _parse_pi_list_package_names(pi_list.stdout)
@@ -252,18 +254,21 @@ def collect_container_runtime_snapshot() -> dict[str, object]:
     except Exception:
         pass
 
+    local_extension_names: list[str] = []
     try:
         ext_result = _docker_exec(
             "sh",
             "-lc",
             "find /root/.pi/agent/extensions -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' 2>/dev/null | sort",
         )
-        extension_names = sorted({line.strip() for line in ext_result.stdout.splitlines() if line.strip()})
-        snapshot["pi_extensions"] = extension_names
-        snapshot["pi_extensions_summary"] = ",".join(extension_names) if extension_names else "none"
-        snapshot["pi_extensions_sha256"] = _stable_object_sha256(extension_names)
+        local_extension_names = sorted({line.strip() for line in ext_result.stdout.splitlines() if line.strip()})
     except Exception:
         pass
+
+    extension_names = sorted(set(package_names) | set(local_extension_names))
+    snapshot["pi_extensions"] = extension_names
+    snapshot["pi_extensions_summary"] = ",".join(extension_names) if extension_names else "none"
+    snapshot["pi_extensions_sha256"] = _stable_object_sha256(extension_names)
 
     return snapshot
 
@@ -290,6 +295,7 @@ def build_run_metadata(
     catalog_path: Path | str,
     role: str | None = None,
     orchestra: bool | None = None,
+    auto: bool | None = None,
     extra_skills: Sequence[str] | None = None,
     notes: str = "",
     catalog_label: str | None = None,
@@ -301,6 +307,7 @@ def build_run_metadata(
         "task_id": task_id,
         **resolve_catalog_model(catalog_path, role=role),
         "orchestra": orchestra,
+        "auto": auto,
         "extra_skills": list(extra_skills or []),
         "notes": notes,
     }
@@ -660,7 +667,7 @@ def grade(
     # Remove stale result.json before evaluator runs. If the evaluator prints
     # JSON instead of writing a file, fallback parsing must use this run's
     # stdout rather than a previous result file.
-    pre_result_dir = Path(RESULTS_DIR).resolve() / f"{run_id}-{task_id}"
+    pre_result_dir = (_REPO_ROOT / RESULTS_DIR / f"{run_id}-{task_id}").resolve()
     pre_result_path = pre_result_dir / "result.json"
     previous_result: TaskResult | None = None
     if pre_result_path.exists():
@@ -681,9 +688,7 @@ def grade(
     _docker_exec("rm", "-rf", eval_tmp, env=bench_env)
 
     # Read the result.json written by the evaluator into /bench/results/
-    result_dir = Path(RESULTS_DIR).resolve() / f"{run_id}-{task_id}"
-    if not (result_dir.is_absolute()):
-        result_dir = _REPO_ROOT / RESULTS_DIR / f"{run_id}-{task_id}"
+    result_dir = (_REPO_ROOT / RESULTS_DIR / f"{run_id}-{task_id}").resolve()
 
     result_path = result_dir / "result.json"
     task_result: TaskResult
@@ -695,24 +700,27 @@ def grade(
         stdout = result_proc.stdout.strip()
         parsed = _parse_json_object_from_stdout(stdout)
 
-        score = str(parsed.get("score") or ("pass" if result_proc.returncode == 0 else "fail"))
-        checks = parsed.get("checks") if isinstance(parsed.get("checks"), dict) else {}
-        score_numeric = parsed.get("score_numeric")
-        rubric = parsed.get("rubric") if isinstance(parsed.get("rubric"), dict) else {}
-        orchestration_checks = parsed.get("orchestration_checks") if isinstance(parsed.get("orchestration_checks"), dict) else {}
-        efficiency = parsed.get("efficiency") if isinstance(parsed.get("efficiency"), dict) else {}
-        details = parsed.get("details") if isinstance(parsed.get("details"), str) else stdout[-500:]
-        task_result = TaskResult(
-            task_id=task_id,
-            run_id=run_id,
-            score=score,
-            checks=checks,
-            score_numeric=float(score_numeric) if isinstance(score_numeric, (int, float)) else None,
-            rubric=rubric,
-            orchestration_checks=orchestration_checks,
-            efficiency=efficiency,
-            details=details,
-        )
+        if not parsed and previous_result is not None:
+            task_result = previous_result
+        else:
+            score = str(parsed.get("score") or ("pass" if result_proc.returncode == 0 else "fail"))
+            checks = parsed.get("checks") if isinstance(parsed.get("checks"), dict) else {}
+            score_numeric = parsed.get("score_numeric")
+            rubric = parsed.get("rubric") if isinstance(parsed.get("rubric"), dict) else {}
+            orchestration_checks = parsed.get("orchestration_checks") if isinstance(parsed.get("orchestration_checks"), dict) else {}
+            efficiency = parsed.get("efficiency") if isinstance(parsed.get("efficiency"), dict) else {}
+            details = parsed.get("details") if isinstance(parsed.get("details"), str) else stdout[-500:]
+            task_result = TaskResult(
+                task_id=task_id,
+                run_id=run_id,
+                score=score,
+                checks=checks,
+                score_numeric=float(score_numeric) if isinstance(score_numeric, (int, float)) else None,
+                rubric=rubric,
+                orchestration_checks=orchestration_checks,
+                efficiency=efficiency,
+                details=details,
+            )
 
     # Enrich with task metadata snapshot
     task_result.task_meta = {
@@ -813,7 +821,7 @@ def ingest_artifacts(
     Missing artifacts are silently skipped so results remain meaningful even
     when token data is absent.
     """
-    base = Path(base_dir or RESULTS_DIR).resolve()
+    base = Path(base_dir or (_REPO_ROOT / RESULTS_DIR)).resolve()
     run_dir = base / f"{result.run_id}-{result.task_id}"
     if not run_dir.is_dir():
         return result
@@ -824,13 +832,24 @@ def ingest_artifacts(
         try:
             data = _json.loads(token_file.read_text())
             tokens: dict[str, object] = {}
+            existing_tokens = result.tokens if isinstance(result.tokens, dict) else {}
             for key in _ARTIFACT_TOKEN_KEYS:
                 if key in data and isinstance(data[key], (int, float)):
-                    tokens[key] = data[key]
+                    value = data[key]
+                    existing_value = existing_tokens.get(key)
+                    if value > 0 or not isinstance(existing_value, (int, float)) or existing_value <= 0:
+                        tokens[key] = value
 
             # Also map to a simple 'total' if not already present
-            if "total" not in tokens and "total_tokens" in tokens:
-                tokens["total"] = int(tokens["total_tokens"])
+            existing_total = existing_tokens.get("total")
+            if "total" in data and isinstance(data["total"], (int, float)):
+                value = data["total"]
+                if value > 0 or not isinstance(existing_total, (int, float)) or existing_total <= 0:
+                    tokens["total"] = int(value)
+            elif "total_tokens" in tokens:
+                value = tokens["total_tokens"]
+                if value > 0 or not isinstance(existing_total, (int, float)) or existing_total <= 0:
+                    tokens["total"] = int(value)
 
             result.tokens = {**result.tokens, **tokens}
         except Exception as exc:
@@ -897,6 +916,7 @@ def ingest_artifacts(
               file=sys.stderr)
 
     apply_process_penalties(result)
+    result.category_scores = compute_category_scores(result)
     return result
 
 
@@ -912,7 +932,7 @@ def _enrich_result_with_bench_run(
 
     Never raises — missing or malformed config files are silently skipped.
     """
-    base = Path(base_dir or RESULTS_DIR).resolve()
+    base = Path(base_dir or (_REPO_ROOT / RESULTS_DIR)).resolve()
     run_dir = base / f"{result.run_id}-{result.task_id}"
     if not run_dir.is_dir():
         return result
@@ -1019,6 +1039,43 @@ def _count_pi_session_compactions(pi_sessions_dir: Path) -> int:
     return count
 
 
+def _count_pi_session_worker_successes(pi_sessions_dir: Path) -> int:
+    """Count orchestra worker success return markers seen in copied Pi sessions."""
+    if not pi_sessions_dir.is_dir():
+        return 0
+
+    count = 0
+    for jsonl_file in sorted(pi_sessions_dir.glob("*.jsonl")):
+        try:
+            text = jsonl_file.read_text(errors="replace")
+        except Exception:
+            continue
+
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = _json.loads(line)
+            except (ValueError, TypeError):
+                continue
+
+            msg = event.get("message")
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "text":
+                    continue
+                text_value = str(item.get("text", ""))
+                if text_value.startswith("[orchestra:") and " success]" in text_value:
+                    count += 1
+                    break
+
+    return count
+
+
 def _parse_orchestra_logs(orchestra_debug_dir: Path) -> list[dict[str, object]]:
     """Extract structured events from Orchestra debug log JSONL files.
 
@@ -1035,7 +1092,7 @@ def _parse_orchestra_logs(orchestra_debug_dir: Path) -> list[dict[str, object]]:
             _read_jsonl_events(jsonl_file, events)
         return events
 
-    for jsonl_file in sorted(logs_dir.glob("*.jsonl")):
+    for jsonl_file in sorted(logs_dir.rglob("*.jsonl")):
         _read_jsonl_events(jsonl_file, events)
     return events
 
@@ -1168,7 +1225,7 @@ def extract_orchestration_checks(
       - premature_completion (bool): dispatched but result suggests no integration
       - missing_expected_role (bool): target role expected but not found anywhere
     """
-    base = Path(base_dir or RESULTS_DIR).resolve()
+    base = Path(base_dir or (_REPO_ROOT / RESULTS_DIR)).resolve()
     run_dir = base / f"{result.run_id}-{result.task_id}"
     if not run_dir.is_dir():
         return {}
@@ -1183,6 +1240,7 @@ def extract_orchestration_checks(
     pi_sessions_dir = artifacts_dir / "pi-sessions"
     dispatches = _parse_pi_session_dispatches(pi_sessions_dir)
     checks["compaction_count"] = _count_pi_session_compactions(pi_sessions_dir)
+    worker_success_returns = _count_pi_session_worker_successes(pi_sessions_dir)
 
     roles_dispatched: list[str] = []
     goals_seen: dict[str, int] = {}
@@ -1240,8 +1298,8 @@ def extract_orchestration_checks(
     checks["timeouts"] = timeouts
     checks["retries"] = retries
     checks["scope_blockers"] = scope_blockers
-    checks["worker_completed"] = worker_exits_ok
-    checks["worker_running_without_exit"] = worker_started_count > worker_exit_count
+    checks["worker_completed"] = worker_exits_ok or worker_success_returns > 0
+    checks["worker_running_without_exit"] = worker_started_count > worker_exit_count and worker_success_returns == 0
     has_orchestra_log_evidence = bool(orch_events)
 
     task_meta = result.task_meta if isinstance(result.task_meta, dict) else {}
@@ -1270,14 +1328,15 @@ def extract_orchestration_checks(
         checks["missing_expected_role"] = False
 
     # ── 4. Premature completion / fallback detection ───────
+    has_answer_check = "answer_exists" in result.checks
     has_answer = result.checks.get("answer_exists") is True
     checks["fallback_answer_after_dispatch"] = (
         bool(dispatches)
         and has_answer
-        and not worker_exits_ok
+        and not checks["worker_completed"]
         and has_orchestra_log_evidence
     )
-    checks["premature_completion"] = bool(dispatches) and not has_answer
+    checks["premature_completion"] = bool(dispatches) and has_answer_check and not has_answer
 
     return checks
 
@@ -1883,15 +1942,15 @@ def _classify_position(current: float, mn: float, median: float, mx: float) -> s
     """Classify where *current* sits relative to min/median/max history.
 
     Returns one of: new-low, low, normal, high, new-high.
-    When all values are equal → 'normal'.
+    When all values are equal, exact matches are normal and outliers are new.
     """
-    if mn == mx:
-        return "normal"
-
     if current < mn:
         return "new-low"
     if current > mx:
         return "new-high"
+
+    if mn == mx:
+        return "normal"
 
     # Within [min, max]: classify by which side of median and how far
     lower_mid = (mn + median) / 2
@@ -1923,14 +1982,14 @@ def compare_efficiency(
             "pass_only": { ...same shape... },
         }
 
-    When fewer than 2 prior comparable runs exist for a metric, that metric
-    returns ``position: "insufficient-history"`` with empty stats.
+    When no prior comparable runs exist for a metric, that metric returns
+    ``position: "insufficient-history"`` with empty stats.
 
     The current run is excluded from history statistics (min/median/max).
     Missing token or elapsed data in either the current run or historical runs
     are handled gracefully — only runs with valid values contribute to each stat.
     """
-    base = Path(results_dir or RESULTS_DIR).resolve()
+    base = Path(results_dir or (_REPO_ROOT / RESULTS_DIR)).resolve()
     task_id = result.task_id
     run_id = result.run_id
 
@@ -1973,7 +2032,7 @@ def compare_efficiency(
     )
 
     def _token_block(values: list[int], current: int | None) -> dict[str, object]:
-        if len(values) < 2:
+        if len(values) < 1:
             return {
                 "min": None,
                 "median": None,
@@ -1996,7 +2055,7 @@ def compare_efficiency(
         }
 
     def _elapsed_block(values: list[float], current: float | None) -> dict[str, object]:
-        if len(values) < 2:
+        if len(values) < 1:
             return {
                 "min": None,
                 "median": None,
@@ -2023,7 +2082,7 @@ def compare_efficiency(
         "elapsed": _elapsed_block(hist_elapsed, cur_elapsed),
     }
 
-    # Pass-only history (when ≥ 2 prior pass runs exist)
+    # Pass-only history (when ≥ 1 prior pass run exists)
     pass_prior = [r for r in prior if r.is_pass()]
     pass_tokens: list[int] = []
     for r in pass_prior:
@@ -2035,7 +2094,7 @@ def compare_efficiency(
         if getattr(r, "elapsed_seconds", None) is not None
     ]
 
-    if len(pass_tokens) >= 2 or len(pass_elapsed) >= 2:
+    if len(pass_tokens) >= 1 or len(pass_elapsed) >= 1:
         out["pass_only"] = {
             "tokens": _token_block(pass_tokens, cur_token),
             "elapsed": _elapsed_block(pass_elapsed, cur_elapsed),
@@ -2055,15 +2114,11 @@ def _efficiency_block_for_penalties(efficiency: dict[str, object] | None, metric
     return block if isinstance(block, dict) else None
 
 
-def apply_process_penalties(result: TaskResult) -> TaskResult:
-    """Apply soft process penalties to score_numeric/rubric without changing pass/fail."""
-    if result.score_numeric is None:
-        return result
-    if (result.orchestration_checks or {}).get("process_penalty_applied") is True:
-        return result
-
+def _collect_process_penalties(result: TaskResult) -> list[tuple[str, float, str]]:
+    """Collect process penalties for orchestration/efficiency signals."""
     penalties: list[tuple[str, float, str]] = []
     orchestration_checks = result.orchestration_checks or {}
+    orchestra_enabled = (result.run_meta or {}).get("orchestra") is not False
 
     if orchestration_checks.get("missing_expected_role") is True:
         penalties.append(("missing_expected_role", 0.10, "missing expected role"))
@@ -2073,7 +2128,7 @@ def apply_process_penalties(result: TaskResult) -> TaskResult:
         penalties.append(("fallback_answer_after_dispatch", 0.08, "fallback answer after dispatch"))
     if orchestration_checks.get("worker_running_without_exit") is True:
         penalties.append(("worker_running_without_exit", 0.08, "worker still running / no exit"))
-    if orchestration_checks.get("no_orchestration") is True:
+    if orchestra_enabled and orchestration_checks.get("no_orchestration") is True:
         penalties.append(("no_orchestration", 0.10, "no orchestration"))
 
     for key, weight, label in (
@@ -2095,6 +2150,79 @@ def apply_process_penalties(result: TaskResult) -> TaskResult:
         elif position == "new-high":
             penalties.append((f"{metric}_new_high", 0.05, f"very high {metric}"))
 
+    return penalties
+
+
+def _position_score(position: str) -> float | None:
+    mapping = {
+        "new-low": 1.0,
+        "low": 0.75,
+        "normal": 0.5,
+        "high": 0.25,
+        "new-high": 0.0,
+    }
+    return mapping.get(position)
+
+
+def _positive_rubric_ratio(rubric: dict[str, object] | None) -> float | None:
+    if not isinstance(rubric, dict) or not rubric:
+        return None
+    total_score = 0.0
+    total_max = 0.0
+    for name, value in rubric.items():
+        if name == "process_penalties" or not isinstance(value, dict):
+            continue
+        score = value.get("score")
+        max_score = value.get("max")
+        if isinstance(score, (int, float)) and isinstance(max_score, (int, float)) and max_score > 0:
+            total_score += float(score)
+            total_max += float(max_score)
+    if total_max <= 0:
+        return None
+    return max(0.0, min(1.0, total_score / total_max))
+
+
+def compute_category_scores(result: TaskResult) -> dict[str, object]:
+    """Build category score views over the same run evidence."""
+    intelligence = _positive_rubric_ratio(result.rubric)
+    if intelligence is None and result.score_numeric is not None:
+        intelligence = max(0.0, min(1.0, float(result.score_numeric)))
+
+    speed = None
+    elapsed_block = _efficiency_block_for_penalties(result.efficiency, "elapsed")
+    if isinstance(elapsed_block, dict):
+        speed = _position_score(str(elapsed_block.get("position") or ""))
+
+    efficiency = None
+    token_block = _efficiency_block_for_penalties(result.efficiency, "tokens")
+    if isinstance(token_block, dict):
+        efficiency = _position_score(str(token_block.get("position") or ""))
+
+    process = None
+    if (result.run_meta or {}).get("orchestra") is not False:
+        penalties = _collect_process_penalties(result)
+        process_penalty_total = min(sum(weight for name, weight, _ in penalties if not name.startswith("tokens_") and not name.startswith("elapsed_")), 0.25)
+        process = max(0.0, min(1.0, 1.0 - (process_penalty_total / 0.25)))
+
+    def _norm(value: float | None) -> float | None:
+        return round(value, 6) if isinstance(value, (int, float)) else None
+
+    return {
+        "intelligence": _norm(intelligence),
+        "speed": _norm(speed),
+        "efficiency": _norm(efficiency),
+        "process": _norm(process),
+    }
+
+
+def apply_process_penalties(result: TaskResult) -> TaskResult:
+    """Apply soft process penalties to score_numeric/rubric without changing pass/fail."""
+    if result.score_numeric is None:
+        return result
+    if (result.orchestration_checks or {}).get("process_penalty_applied") is True:
+        return result
+
+    penalties = _collect_process_penalties(result)
     total_penalty = round(min(sum(weight for _, weight, _ in penalties), 0.25), 4)
     result.orchestration_checks["process_penalty_applied"] = True
     result.orchestration_checks["process_penalty_total"] = total_penalty
@@ -2126,7 +2254,7 @@ def format_rubric_summary(rubric: dict[str, object] | None) -> str:
         score = value.get("score")
         max_score = value.get("max")
         if isinstance(score, (int, float)) and isinstance(max_score, (int, float)):
-            parts.append(f"{name}={score:.2f}/{max_score:.2f}")
+            parts.append(f"{name}={score:.4f}/{max_score:.4f}")
     return "; ".join(parts) if parts else "no rubric score"
 
 

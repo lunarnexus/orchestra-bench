@@ -84,20 +84,26 @@ class TestFinalSuiteInventory:
         batches = Counter(str(m.get("batch")) for m in _task_meta())
         assert "capability-raw-material" not in batches
 
-    def test_capability_normal_includes_real_tasks(self):
-        capability_normal = [m for m in _task_meta() if m.get("batch") == "capability-easy"]
-        assert [m["task_id"] for m in capability_normal] == [
-            "cap-normal-django-reports",
-            "cap-normal-express-inventory",
-            "cap-normal-fastapi-helpdesk",
+    def test_capability_easy_includes_restored_tasks(self):
+        capability_easy = [m for m in _task_meta() if m.get("batch") == "capability-easy"]
+        assert [m["task_id"] for m in capability_easy] == [
+            "cap-easy-django-reports",
+            "cap-easy-express-inventory",
+            "cap-easy-fastapi-helpdesk",
         ]
 
-    def test_capability_hard_includes_current_real_tasks(self):
-        capability_hard = [m for m in _task_meta() if m.get("batch") == "capability-normal"]
-        assert [m["task_id"] for m in capability_hard] == [
-            "cap-hard-python-worker-sync",
-            "cap-hard-ruby-billing-ledger",
-            "cap-hard-ts-approval-queue",
+    def test_capability_advanced_includes_full_shortlink_task(self):
+        capability_advanced = [m for m in _task_meta() if m.get("batch") == "capability-advanced"]
+        assert [m["task_id"] for m in capability_advanced] == [
+            "cap-advanced-url-shortener-review",
+        ]
+
+    def test_capability_normal_includes_restored_hard_tasks(self):
+        capability_normal = [m for m in _task_meta() if m.get("batch") == "capability-normal"]
+        assert [m["task_id"] for m in capability_normal] == [
+            "cap-normal-python-worker-sync",
+            "cap-normal-ruby-billing-ledger",
+            "cap-normal-ts-approval-queue",
         ]
 
     def test_capability_cleanup_removes_old_public_batches_from_task_inventory(self):
@@ -106,21 +112,52 @@ class TestFinalSuiteInventory:
         assert batches["role-focused"] == 18
         assert batches["capability-easy"] == 3
         assert batches["capability-normal"] == 3
+        assert batches["capability-advanced"] == 1
         assert "contract" not in batches
         assert "capability" not in batches
+
+    def test_restored_capability_tasks_follow_methodology_contracts(self):
+        restored_ids = [
+            "cap-easy-django-reports",
+            "cap-easy-express-inventory",
+            "cap-easy-fastapi-helpdesk",
+            "cap-normal-python-worker-sync",
+            "cap-normal-ruby-billing-ledger",
+            "cap-normal-ts-approval-queue",
+        ]
+        for task_id in restored_ids:
+            task_dir = _TASKS_DIR / task_id
+            prd = (task_dir / "PRD.md").read_text()
+            prompt = (task_dir / "Prompt.md").read_text()
+            evaluator = (task_dir / "evaluate" / "run.sh").read_text()
+
+            for text in [prd, prompt]:
+                assert "Operational cleanup requirement" in text
+                assert "Do not leave" in text
+                assert "long-running" in text
+                assert "stop it before finalizing" in text
+
+            assert "functional_browser_homepage" in evaluator
+            assert "evaluate_workflow_evidence" in evaluator
+            assert "functional_pass = all" in evaluator
+            assert 'key.startswith("functional_")' in evaluator
+            assert 'result["score"] = "pass" if functional_pass else "fail"' in evaluator
 
     def test_readme_documents_current_public_suites(self):
         readme = (_REPO_ROOT / "README.md").read_text()
         assert "### smoke — 6 real end-to-end tasks" in readme
         assert "### role-focused — 18 per-role tasks" in readme
         assert "### capability-easy — integrated end-to-end tasks" in readme
-        assert "cap-normal-fastapi-helpdesk" in readme
-        assert "cap-normal-express-inventory" in readme
-        assert "cap-normal-django-reports" in readme
+        assert "cap-easy-fastapi-helpdesk" in readme
+        assert "cap-easy-express-inventory" in readme
+        assert "cap-easy-django-reports" in readme
         assert "### capability-normal — integrated end-to-end tasks" in readme
-        assert "cap-hard-python-worker-sync" in readme
-        assert "cap-hard-ruby-billing-ledger" in readme
-        assert "cap-hard-ts-approval-queue" in readme
+        assert "cap-normal-python-worker-sync" in readme
+        assert "cap-normal-ruby-billing-ledger" in readme
+        assert "cap-normal-ts-approval-queue" in readme
+        assert "### capability-advanced — larger integrated end-to-end tasks" in readme
+        assert "cap-advanced-url-shortener-review" in readme
+        assert "ShortLink Desk" in readme
         assert "### contract" not in readme
         assert "### capability — integrated end-to-end tasks" not in readme
         assert "capability-raw-material" not in readme

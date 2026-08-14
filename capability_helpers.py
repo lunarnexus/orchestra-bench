@@ -146,6 +146,29 @@ def _score_one_artifact(
     )
     mentions_changed_files = changed_file_coverage > 0 if check_changed_files else None
 
+    quality_components: list[float] = []
+    if text:
+        if min_words > 0:
+            quality_components.append(min(1.0, word_count / float(min_words)))
+        if min_substantive_lines > 0:
+            quality_components.append(min(1.0, len(substantive_lines) / float(min_substantive_lines)))
+        if keywords or min_keywords > 0:
+            keyword_denominator = max(1, len(keywords) or min_keywords)
+            quality_components.append(min(1.0, len(matched_keywords) / float(keyword_denominator)))
+        if evidence_terms or min_evidence_terms > 0:
+            evidence_denominator = max(1, len(evidence_terms) or min_evidence_terms)
+            quality_components.append(min(1.0, len(matched_evidence_terms) / float(evidence_denominator)))
+        if required_terms:
+            quality_components.append(len(matched_required_terms) / float(len(required_terms)))
+        if required_patterns:
+            quality_components.append(len(matched_required_patterns) / float(len(required_patterns)))
+        if check_changed_files and changed_files:
+            quality_components.append(changed_file_coverage)
+    quality = round(
+        (sum(quality_components) / len(quality_components)) if quality_components else 0.0,
+        6,
+    )
+
     score = 0.0
     if text:
         score += effective_weight * 0.35
@@ -154,18 +177,26 @@ def _score_one_artifact(
     if check_changed_files and changed_files:
         score += effective_weight * 0.20 * changed_file_coverage
 
+    credit = round(quality if relevant else quality * 0.5, 6)
+
     checks: dict[str, object] = {
         "present": bool(text),
         "relevant": relevant,
+        "quality": quality,
+        "credit": credit,
     }
     if check_changed_files and changed_files:
         checks["mentions_changed_files"] = bool(mentions_changed_files)
+        checks["changed_file_coverage"] = round(changed_file_coverage, 6)
+        checks["changed_file_credit"] = round(changed_file_coverage if relevant else changed_file_coverage * 0.5, 6)
 
     return {
         "score": round(min(score, effective_weight), 6),
         "max": effective_weight,
         "checks": checks,
         "source": str(path) if path else "final_answer" if artifact_id == "final_summary" else None,
+        "quality": quality,
+        "credit": credit,
         "word_count": word_count,
         "min_words": min_words,
         "matched_keywords": matched_keywords,

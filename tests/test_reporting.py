@@ -524,7 +524,7 @@ class TestDashboardReporting:
                 tokens={"total": 1000},
                 elapsed_seconds=30.0,
                 task_meta={"batch": "smoke"},
-                run_meta={"notes": "BatchA"},
+                run_meta={"notes": "BatchA", "auto": True, "orchestra": True, "pi_packages_summary": "pi-codegraph,pi-lmstudio", "pi_extensions_summary": "orchestra,pi-codegraph,pi-lmstudio", "aux_skills_summary": "none"},
             ),
         )
         _write_result_json(
@@ -540,7 +540,7 @@ class TestDashboardReporting:
                 tokens={"total": 500},
                 elapsed_seconds=45.0,
                 task_meta={"batch": "smoke"},
-                run_meta={"notes": "BatchA"},
+                run_meta={"notes": "BatchA", "auto": True, "orchestra": True, "pi_packages_summary": "pi-codegraph,pi-lmstudio", "pi_extensions_summary": "orchestra,pi-codegraph,pi-lmstudio", "aux_skills_summary": "none"},
             ),
         )
         _write_result_json(
@@ -556,7 +556,7 @@ class TestDashboardReporting:
                 tokens={"total": 2000},
                 elapsed_seconds=90.0,
                 task_meta={"batch": "capability-easy"},
-                run_meta={"notes": "BatchB"},
+                run_meta={"notes": "BatchB", "auto": True, "orchestra": False, "pi_packages_summary": "pi-codegraph,pi-lmstudio", "pi_extensions_summary": "orchestra,pi-codegraph,pi-lmstudio", "aux_skills_summary": "none"},
             ),
         )
 
@@ -569,10 +569,14 @@ class TestDashboardReporting:
         )
 
         assert result.returncode == 0, result.stderr
+        assert "args        : --auto | --auto --no-orchestra" in result.stdout
+        assert "extensions  : orchestra,pi-codegraph,pi-lmstudio" in result.stdout
+        assert "skills      : none" in result.stdout
+        assert "config      : (none)" in result.stdout
         assert "=== per-suite breakdown ===" in result.stdout
         assert "[smoke]" in result.stdout
         assert "[capability-easy]" in result.stdout
-        assert "score_numeric: avg=0.65" in result.stdout
+        assert "score_numeric: avg=0.6500" in result.stdout
         assert "- quality:" in result.stdout
         assert "- compaction_count: total=1 avg=0.50" in result.stdout
         assert "- target_role_dispatched:" not in result.stdout
@@ -656,6 +660,81 @@ class TestDashboardReporting:
         assert "runs=2" in result.stdout and "notes=Batch1 alpha" in result.stdout
         assert "pass=1/2" in result.stdout
         assert "runs=1" in result.stdout and "notes=Batch2 beta" in result.stdout
+
+    def test_delete_requires_notes_filter(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-a", run_id="run-a", score="pass", run_meta={"notes": "Batch1 alpha"}),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "delete", "--yes"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 2
+        assert "refusing to delete without --notes" in result.stderr
+        assert (tmp_path / "results" / "run-a-task-a").exists()
+
+    def test_delete_notes_filter_is_dry_run_by_default(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_task_yaml(tmp_path, "task-b", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-a", run_id="run-a", score="pass", run_meta={"notes": "Batch1 alpha"}),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-b", run_id="run-b", score="pass", run_meta={"notes": "Batch2 beta"}),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "delete", "--notes", "batch1"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "mode        : dry-run" in result.stdout
+        assert "WOULD DELETE results/run-a-task-a" in result.stdout
+        assert "run-b-task-b" not in result.stdout
+        assert (tmp_path / "results" / "run-a-task-a").exists()
+        assert (tmp_path / "results" / "run-b-task-b").exists()
+
+    def test_delete_notes_filter_with_yes_removes_only_matches(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_task_yaml(tmp_path, "task-b", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-a", run_id="run-a", score="pass", run_meta={"notes": "Batch1 alpha"}),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-b", run_id="run-b", score="pass", run_meta={"notes": "Batch2 beta"}),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "delete", "--notes", "Batch1", "--yes"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "mode        : delete" in result.stdout
+        assert "DELETE results/run-a-task-a" in result.stdout
+        assert not (tmp_path / "results" / "run-a-task-a").exists()
+        assert (tmp_path / "results" / "run-b-task-b").exists()
 
     def test_rubric_filter_shows_only_rubric_section(self, tmp_path):
         script = _install_results_script(tmp_path)
@@ -885,9 +964,13 @@ class TestRunDetailReporting:
 
         assert result.returncode == 0, result.stderr
         assert "score_numeric" in result.stdout
-        assert "0.86" in result.stdout
+        assert "0.8600" in result.stdout
         assert "rubric" in result.stdout
-        assert "role_result_quality=0.35/0.40" in result.stdout
+        assert "role_result_quality=0.3500/0.4000" in result.stdout
+        assert "args         :" in result.stdout
+        assert "extensions   :" in result.stdout
+        assert "skills       :" in result.stdout
+        assert "config       :" in result.stdout
         assert "orchestration:" in result.stdout
         assert "compaction_count: 2" in result.stdout
         assert "timeouts: 1" in result.stdout
@@ -971,7 +1054,7 @@ class TestRunDetailReporting:
         from eval_harness import ingest_artifacts
 
         base = tmp_path / "results"
-        run_dir = base / "run-zero-cap-normal-django-reports"
+        run_dir = base / "run-zero-cap-easy-django-reports"
         artifacts = run_dir / "artifacts"
         (artifacts / "pi-sessions").mkdir(parents=True)
         (artifacts / "manifest.json").write_text(json.dumps({"orchestra": {}}))
@@ -980,7 +1063,7 @@ class TestRunDetailReporting:
         )
 
         result_obj = TaskResult(
-            task_id="cap-normal-django-reports",
+            task_id="cap-easy-django-reports",
             run_id="run-zero",
             score="fail",
             score_numeric=0.04,
@@ -997,6 +1080,35 @@ class TestRunDetailReporting:
         assert "no orchestration" in enriched.orchestration_checks["process_penalty_reasons"]
         assert enriched.score_numeric == 0.0
         assert enriched.score == "fail"
+
+    def test_intentional_no_orchestra_does_not_apply_no_orchestration_penalty(self, tmp_path):
+        from eval_harness import ingest_artifacts
+
+        base = tmp_path / "results"
+        run_dir = base / "run-zero-cap-easy-django-reports"
+        artifacts = run_dir / "artifacts"
+        (artifacts / "pi-sessions").mkdir(parents=True)
+        (artifacts / "manifest.json").write_text(json.dumps({"orchestra": {}}))
+        (artifacts / "pi-sessions" / "sess.jsonl").write_text(
+            json.dumps({"type": "session", "id": "sess-zero"}) + "\n"
+        )
+
+        result_obj = TaskResult(
+            task_id="cap-easy-django-reports",
+            run_id="run-zero",
+            score="pass",
+            score_numeric=0.5,
+            rubric={"content": {"score": 0.5, "max": 1.0}},
+            checks={},
+            task_meta={"family": "capability", "batch": "capability-easy"},
+            run_meta={"orchestra": False},
+        )
+
+        enriched = ingest_artifacts(result_obj, base_dir=base)
+
+        assert enriched.orchestration_checks["no_orchestration"] is True
+        assert enriched.orchestration_checks["process_penalty_total"] == 0.0
+        assert "no orchestration" not in enriched.orchestration_checks["process_penalty_reasons"]
 
     def test_process_penalty_lowers_numeric_score_without_flipping_pass(self, tmp_path):
         from eval_harness import ingest_artifacts

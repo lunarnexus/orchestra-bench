@@ -125,6 +125,7 @@ env \
   BENCH_TASK_ID="$task_id" \
   BENCH_ROLE="$role" \
   BENCH_ORCHESTRA_JSON="$orchestra_json" \
+  BENCH_AUTO_JSON="${BENCH_AUTO_JSON:-null}" \
   BENCH_EXTRA_SKILLS_JSON="$skills_json" \
   BENCH_NOTES="$notes" \
   BENCH_TARGET_ROLE="${BENCH_TARGET_ROLE:-}" \
@@ -155,6 +156,7 @@ meta = build_run_metadata(
     catalog_label="config/orchestra/agent-catalog.yaml",
     role=os.environ.get("BENCH_ROLE") or None,
     orchestra=json.loads(os.environ["BENCH_ORCHESTRA_JSON"]),
+    auto=json.loads(os.environ["BENCH_AUTO_JSON"]),
     extra_skills=json.loads(os.environ["BENCH_EXTRA_SKILLS_JSON"]),
     notes=os.environ.get("BENCH_NOTES", ""),
     runtime_snapshot=runtime_snapshot,

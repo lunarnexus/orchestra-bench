@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 03-collect-results — Grade prepared runs, then report status.
+# 03-collect-results — Grade prepared runs.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
@@ -8,16 +8,16 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [task-id] [options]
 
-Without a task id, grade every prepared/ungraded run under results/ and show the
-historical dashboard. With a task id, grade the latest prepared run for that task.
-Already-graded runs are skipped unless --force is used.
+Without a task id, grade every prepared/ungraded run under results/. With a task
+id, grade the latest prepared run for that task. Already-graded runs are skipped
+unless --force is used. Use scripts/05-results explicitly for reporting.
 
 Options:
   --run-id <id>   With task-id, grade a specific run id
   --force         Re-grade even if result.json already exists
-  --no-eval       Do not grade; only show historical dashboard
+  --no-eval       Do not grade (normally used with --splits or --compare)
   --splits        Show split-aware summary
-  --compare       Show comparison view instead of dashboard
+  --compare       Show comparison view
   --aggregate     Use aggregated comparison view (with --compare)
 
 Examples:
@@ -25,6 +25,7 @@ Examples:
   scripts/03-collect-results smoke-public-admin-handoff
   scripts/03-collect-results smoke-public-admin-handoff --force
   scripts/03-collect-results --compare --aggregate
+  scripts/05-results
 EOF
 }
 
@@ -67,10 +68,12 @@ grade_one() {
     return 0
   fi
   echo "[bench] grading: $run_id-$task_id"
+  "$ROOT/scripts/_cleanup-run-processes" "$task_id" --run-id "$run_id" || true
   set +e
   "$ROOT/scripts/eval-task" "$task_id" --run-id "$run_id"
   local status=$?
   set -e
+  "$ROOT/scripts/_cleanup-run-processes" "$task_id" --run-id "$run_id" || true
   echo "[bench] result:    results/$run_id-$task_id/result.json"
   echo "[bench] artifacts: results/$run_id-$task_id/artifacts/"
   return "$status"
@@ -131,5 +134,4 @@ if $do_eval; then
   fi
 fi
 
-"$ROOT/scripts/05-results"
 exit "$status"

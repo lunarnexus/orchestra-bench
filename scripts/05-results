@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 05-results — Read-only historical benchmark reporting.
+# 05-results — Historical benchmark reporting, plus guarded result deletion.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
@@ -17,6 +17,7 @@ Views:
   tokens           Token usage across runs/tasks
   timing           Elapsed time across tasks/roles
   notes            List distinct run notes (sort/uniq style)
+  delete           Delete graded result directories matching filters (requires --notes; dry-run unless --yes)
 
 Options:
   --task <id>         Filter to one task
@@ -27,6 +28,7 @@ Options:
   --checks [names]    Show only check breakdowns; optional comma-separated names
   --behaviors [names] Show only behavior breakdowns; optional comma-separated names
   --limit <n>         Limit rows for runs/timeline (default: 20)
+  --yes               Actually delete matches for the delete view (default is dry-run)
 
 Examples:
   scripts/05-results
@@ -37,6 +39,8 @@ Examples:
   scripts/05-results timeline --task smoke-dependent-setup-chain
   scripts/05-results tokens
   scripts/05-results timing
+  scripts/05-results delete --notes "Batch1"       # dry-run preview
+  scripts/05-results delete --notes "Batch1" --yes # delete matched run dirs
 EOF
 }
 
@@ -44,7 +48,7 @@ view="dashboard"
 if [ $# -gt 0 ]; then
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    dashboard|runs|run|tasks|timeline|tokens|timing|notes) view="$1"; shift ;;
+    dashboard|runs|run|tasks|timeline|tokens|timing|notes|delete) view="$1"; shift ;;
   esac
 fi
 
@@ -57,6 +61,7 @@ rubric_filter=""
 checks_filter=""
 behaviors_filter=""
 limit="20"
+yes_delete="false"
 
 if [ "$view" = "run" ]; then
   run_query="${1:-}"
@@ -83,16 +88,18 @@ while [ $# -gt 0 ]; do
       else behaviors_filter="__all__"; shift
       fi ;;
     --limit) limit="$2"; shift 2 ;;
+    --yes) yes_delete="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[bench] unknown argument: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_filter" "$detail_level" "$rubric_filter" "$checks_filter" "$behaviors_filter" "$limit" <<'PY'
+python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_filter" "$detail_level" "$rubric_filter" "$checks_filter" "$behaviors_filter" "$limit" "$yes_delete" <<'PY'
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import statistics
 import sys
 from collections import defaultdict
@@ -128,6 +135,7 @@ try:
     limit = int(sys.argv[11])
 except Exception:
     limit = 20
+yes_delete = sys.argv[12].strip().lower() == "true"
 
 results_dir = root / "results"
 tasks_dir = root / "tasks"
@@ -342,6 +350,18 @@ def numeric_scores(rows):
     return vals
 
 
+def category_score_values(rows, name):
+    vals = []
+    for r in rows:
+        cats = r.get("category_scores") or {}
+        if not isinstance(cats, dict):
+            continue
+        v = cats.get(name)
+        if isinstance(v, (int, float)):
+            vals.append(float(v))
+    return vals
+
+
 def bool_check_rate(rows, key):
     vals = []
     for r in rows:
@@ -481,25 +501,35 @@ def print_score_breakdown(rows, indent="  "):
     if not section_only_mode and detail_level >= 2:
         scores = numeric_scores(rows)
         if scores:
-            print(f"{indent}score_numeric: avg={statistics.mean(scores):.2f} median={statistics.median(scores):.2f} high={max(scores):.2f} low={min(scores):.2f} n={len(scores)}")
+            print(f"{indent}score_numeric: avg={statistics.mean(scores):.4f} median={statistics.median(scores):.4f} high={max(scores):.4f} low={min(scores):.4f} n={len(scores)}")
 
     rubric_items, rubric_totals = aggregate_rubric(rows)
     rubric = rubric_items if rubric_names is None else [item for item in rubric_items if _name_selected(item[0], rubric_names)]
     if rubric_names is not None and rubric:
         print(f"{indent}rubric:")
         for name, avg_score, avg_max, pct, count in rubric:
-            print(f"{indent}  - {name}: {avg_score:.2f}/{avg_max:.2f} ({pct:.0f}%) n={count}")
+            print(f"{indent}  - {name}: {avg_score:.4f}/{avg_max:.4f} ({pct:.0f}%) n={count}")
     elif not section_only_mode and rubric and detail_level >= 3:
         print(f"{indent}rubric:")
         for name, avg_score, avg_max, pct, count in rubric:
-            print(f"{indent}  - {name}: {avg_score:.2f}/{avg_max:.2f} ({pct:.0f}%) n={count}")
+            print(f"{indent}  - {name}: {avg_score:.4f}/{avg_max:.4f} ({pct:.0f}%) n={count}")
     elif not section_only_mode and rubric_totals and detail_level == 2:
         scores_only = [v[0] for v in rubric_totals]
         max_only = [v[1] for v in rubric_totals]
         avg_score = statistics.mean(scores_only)
         avg_max = statistics.mean(max_only)
         pct = (avg_score / avg_max * 100.0) if avg_max else 0.0
-        print(f"{indent}rubric       : avg={avg_score:.2f}/{avg_max:.2f} ({pct:.0f}%) n={len(rubric_totals)}")
+        print(f"{indent}rubric       : avg={avg_score:.4f}/{avg_max:.4f} ({pct:.0f}%) n={len(rubric_totals)}")
+
+    category_blocks = []
+    for name in ("intelligence", "speed", "efficiency", "process"):
+        vals = category_score_values(rows, name)
+        if vals:
+            category_blocks.append((name, statistics.mean(vals), statistics.median(vals), max(vals), min(vals), len(vals)))
+    if category_blocks and detail_level >= 2:
+        print(f"{indent}categories:")
+        for name, avg_v, med_v, high_v, low_v, count in category_blocks:
+            print(f"{indent}  - {name}: avg={avg_v:.4f} median={med_v:.4f} high={high_v:.4f} low={low_v:.4f} n={count}")
 
     bool_checks = aggregate_bool_checks(rows) if check_names is None else [item for item in aggregate_bool_checks(rows) if _name_selected(item[0], check_names)]
     if check_names is not None and bool_checks:
@@ -577,6 +607,69 @@ def find_run(rows, q):
     return None
 
 
+def unique_meta_values(rows, key, *, default="(none)"):
+    values = []
+    seen = set()
+    for r in rows:
+        meta = r.get("run_meta") or {}
+        value = meta.get(key)
+        if isinstance(value, list):
+            value_text = ",".join(str(v) for v in value) if value else default
+        elif value is None or value == "":
+            value_text = default
+        else:
+            value_text = str(value)
+        if value_text not in seen:
+            seen.add(value_text)
+            values.append(value_text)
+    return values
+
+
+def render_command_args(meta):
+    args = []
+    if meta.get("auto") is True:
+        args.append("--auto")
+    if meta.get("orchestra") is False:
+        args.append("--no-orchestra")
+    return " ".join(args) if args else "(interactive/default)"
+
+
+def render_extensions(meta):
+    names = []
+    seen = set()
+    for key in ("pi_extensions", "pi_package_names"):
+        raw = meta.get(key)
+        if isinstance(raw, list):
+            parts = [str(v).strip() for v in raw if str(v).strip()]
+        else:
+            parts = []
+    
+        for part in parts:
+            if part not in seen:
+                seen.add(part)
+                names.append(part)
+
+    for key in ("pi_extensions_summary", "pi_packages_summary"):
+        raw = str(meta.get(key, "") or "")
+        for part in [p.strip() for p in raw.split(",") if p.strip() and p.strip() != "none"]:
+            if part not in seen:
+                seen.add(part)
+                names.append(part)
+
+    return ",".join(names) if names else "(none)"
+
+
+def unique_command_args(rows):
+    values = []
+    seen = set()
+    for r in rows:
+        text = render_command_args(r.get("run_meta") or {})
+        if text not in seen:
+            seen.add(text)
+            values.append(text)
+    return values
+
+
 def print_overview(rows):
     pending = prepared_only_runs()
     passed = sum(1 for r in rows if r.get("score") == "pass")
@@ -596,6 +689,28 @@ def print_overview(rows):
     if behavior_names is not None:
         print(f"behaviors   : {'all' if behavior_names == [] else ', '.join(behavior_names)}")
     print(f"graded runs : {len(rows)}")
+    arg_vals = unique_command_args(rows)
+    ext_vals = []
+    seen_exts = set()
+    for r in rows:
+        ext_text = render_extensions(r.get("run_meta") or {})
+        if ext_text not in seen_exts:
+            seen_exts.add(ext_text)
+            ext_vals.append(ext_text)
+    skill_vals = unique_meta_values(rows, "aux_skills_summary")
+    config_root_vals = []
+    seen_config_roots = set()
+    for r in rows:
+        meta = r.get("run_meta") or {}
+        catalog_path = str(meta.get("catalog_path", "") or "").strip()
+        config_root = str(Path(catalog_path).parent if catalog_path else "").strip() or "(none)"
+        if config_root not in seen_config_roots:
+            seen_config_roots.add(config_root)
+            config_root_vals.append(config_root)
+    print(f"args        : {' | '.join(arg_vals)}")
+    print(f"extensions  : {' | '.join(ext_vals)}")
+    print(f"skills      : {' | '.join(skill_vals)}")
+    print(f"config      : {' | '.join(config_root_vals)}")
     print(f"passed      : {colorize(str(passed), 'green') if passed else passed}")
     print(f"failed      : {colorize(str(failed), 'red') if failed else failed}")
     print(f"pass rate   : {color_for_rate(f'{passed}/{len(rows)}', passed, len(rows))}" if rows else "pass rate   : n/a")
@@ -700,6 +815,38 @@ def print_notes(rows):
         print(f"runs={len(rs):<3} pass={passed}/{len(rs):<3} notes={note}")
 
 
+def delete_filtered_results(rows):
+    print("\n=== delete results ===")
+    if not notes_filter:
+        print("[bench] refusing to delete without --notes <substring>", file=sys.stderr)
+        raise SystemExit(2)
+    if not rows:
+        print(f"no graded result directories match notes filter: {notes_filter}")
+        return
+
+    print(f"notes filter: {notes_filter}")
+    print(f"matches     : {len(rows)} graded result director{'y' if len(rows) == 1 else 'ies'}")
+    if not yes_delete:
+        print("mode        : dry-run (add --yes to delete)")
+    else:
+        print("mode        : delete")
+
+    for r in rows:
+        rel_dir = str(r.get("_dir", ""))
+        target = (root / rel_dir).resolve()
+        try:
+            target.relative_to(results_dir.resolve())
+        except ValueError:
+            print(f"SKIP unsafe path: {rel_dir}", file=sys.stderr)
+            continue
+        if target == results_dir.resolve() or not target.is_dir():
+            print(f"SKIP missing/invalid: {rel_dir}", file=sys.stderr)
+            continue
+        print(f"{'DELETE' if yes_delete else 'WOULD DELETE'} {rel_dir}  notes={((r.get('run_meta') or {}).get('notes', '') or '')}")
+        if yes_delete:
+            shutil.rmtree(target)
+
+
 def print_run_detail(rows, q):
     r = find_run(rows, q)
     if not r:
@@ -713,20 +860,31 @@ def print_run_detail(rows, q):
     print(f"score        : {score_display}")
     score_numeric = r.get("score_numeric")
     if isinstance(score_numeric, (int, float)):
-        print(f"score_numeric: {score_numeric:.2f}")
+        print(f"score_numeric: {score_numeric:.4f}")
     print(f"rubric       : {format_rubric_summary(r.get('rubric'))}")
     print(f"result       : {r.get('_path','')}")
     print(f"artifacts    : {r.get('_dir','')}/artifacts/")
     meta = r.get("run_meta") or {}
-    print(f"model        : {meta.get('model','')}")
     print(f"role         : {meta.get('role','')}")
+    print(f"args         : {render_command_args(meta)}")
     if meta.get("target_role"):
         print(f"target       : {meta.get('target_role','')}")
     sessions = meta.get("pi_session_ids") or []
     print(f"sessions     : {', '.join(sessions) if sessions else 'none captured'}")
+    print(f"extensions   : {render_extensions(meta)}")
+    print(f"skills       : {meta.get('aux_skills_summary','')}")
+    catalog_path = str(meta.get('catalog_path','') or '')
+    config_root = str(Path(catalog_path).parent if catalog_path else '')
+    print(f"config       : {config_root}")
     parts = token_parts(r)
     print(f"elapsed      : {fmt_seconds(elapsed(r))}")
     print(f"tokens       : total={parts['total']:,} input={parts['input']:,} output={parts['output']:,} reasoning={parts['reasoning']:,}")
+    category_scores = r.get("category_scores") or {}
+    if isinstance(category_scores, dict) and category_scores:
+        print("categories:")
+        for name in ("intelligence", "speed", "efficiency", "process"):
+            value = category_scores.get(name)
+            print(f"  {name}: {value:.4f}" if isinstance(value, (int, float)) else f"  {name}: n/a")
 
     efficiency_lines = format_efficiency_summary(TaskResult.from_json(root / r.get('_path', '')), results_dir)
     if efficiency_lines:
@@ -776,6 +934,8 @@ elif view == "timing":
     print_timing(rows)
 elif view == "notes":
     print_notes(rows)
+elif view == "delete":
+    delete_filtered_results(rows)
 else:
     print(f"unknown view: {view}", file=sys.stderr)
     raise SystemExit(1)

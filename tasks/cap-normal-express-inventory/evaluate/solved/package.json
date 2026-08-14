@@ -1,7 +1,0 @@
-{
-  "name": "cap-normal-express-inventory",
-  "private": true,
-  "scripts": {
-    "test": "node --test tests/api.test.js"
-  }
-}

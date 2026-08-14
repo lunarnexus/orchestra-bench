@@ -75,6 +75,7 @@ class TestRunMetadataProvenance:
             catalog_label="config/orchestra/agent-catalog.yaml",
             role="reviewer",
             orchestra=True,
+            auto=True,
             extra_skills=["builder"],
             notes="first trial",
             runtime_snapshot={"pi_package_names": ["pi-codegraph"], "aux_skills_summary": "none"},
@@ -86,6 +87,7 @@ class TestRunMetadataProvenance:
         assert meta["default_role"] == "builder"
         assert meta["model"] == "openai-codex/gpt-5.4"
         assert meta["orchestra"] is True
+        assert meta["auto"] is True
         assert meta["extra_skills"] == ["builder"]
         assert meta["catalog_path"] == "config/orchestra/agent-catalog.yaml"
         assert meta["catalog_sha256"]
@@ -157,7 +159,7 @@ class TestRunMetadataProvenance:
         snapshot = collect_runtime_snapshot(catalog, orchestra_config_dir=catalog.parent, skills_dir=skills_dir)
 
         assert snapshot["pi_package_names"] == ["pi-codegraph", "pi-lmstudio"]
-        assert snapshot["pi_extensions"] == ["orchestra"]
+        assert snapshot["pi_extensions"] == ["orchestra", "pi-codegraph", "pi-lmstudio"]
         assert snapshot["aux_skill_names"] == ["extra-skill"]
         assert snapshot["role_models_summary"] == "all=qwen/big"
 

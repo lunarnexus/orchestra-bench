@@ -41,11 +41,11 @@ def _build_history(base: Path, task_id: str):
     _write_result(base, task_id, "hist-3", score="fail", tokens={"total": 2000}, elapsed=80.0)
 
 
-# ── 1. Insufficient history (< 2 prior runs) ────────────────────
+# ── 1. Insufficient history (no prior runs) ────────────────────
 
 
 class TestInsufficientHistory:
-    """Fewer than 2 prior comparable runs → insufficient-history."""
+    """No prior comparable runs → insufficient-history."""
 
     def test_no_prior_runs(self, tmp_path):
         from eval_harness import compare_efficiency
@@ -56,15 +56,15 @@ class TestInsufficientHistory:
         assert result["tokens"]["position"] == "insufficient-history"
         assert result["elapsed"]["position"] == "insufficient-history"
 
-    def test_one_prior_run(self, tmp_path):
+    def test_one_prior_run_is_enough(self, tmp_path):
         from eval_harness import compare_efficiency
         base = tmp_path / "results"
         _write_result(base, "task-a", "hist-1", tokens={"total": 900}, elapsed=35.0)
         current = _write_result(base, "task-a", "current-1", tokens={"total": 700}, elapsed=28.0)
         result = compare_efficiency(current, base)
 
-        assert result["tokens"]["position"] == "insufficient-history"
-        assert result["elapsed"]["position"] == "insufficient-history"
+        assert result["tokens"]["position"] != "insufficient-history"
+        assert result["elapsed"]["position"] != "insufficient-history"
 
     def test_two_prior_runs_is_enough(self, tmp_path):
         from eval_harness import compare_efficiency
@@ -170,7 +170,7 @@ class TestElapsedStats:
 
 
 class TestPassOnlyHistory:
-    """When enough pass results exist, include a pass-only comparison view."""
+    """When any pass history exists, include a pass-only comparison view."""
 
     def test_pass_only_present_when_enough(self, tmp_path):
         from eval_harness import compare_efficiency
@@ -184,7 +184,7 @@ class TestPassOnlyHistory:
         result = compare_efficiency(current, base)
         assert "pass_only" in result
 
-    def test_pass_only_not_present_when_few(self, tmp_path):
+    def test_pass_only_not_present_when_none(self, tmp_path):
         from eval_harness import compare_efficiency
         base = tmp_path / "results"
         _write_result(base, "task-a", "h1", score="fail", tokens={"total": 2000}, elapsed=80.0)
@@ -284,7 +284,7 @@ class TestEdgeCases:
         assert result["tokens"]["count"] == 0
 
     def test_history_mixed_token_data(self, tmp_path):
-        """Prior runs: one with tokens, one without → insufficient-history."""
+        """One prior run with tokens is enough for comparison."""
         from eval_harness import compare_efficiency
         base = tmp_path / "results"
         _write_result(base, "task-a", "h1", tokens={"total": 800}, elapsed=25.0)
@@ -292,7 +292,7 @@ class TestEdgeCases:
         current = _write_result(base, "task-a", "current-1", tokens={"total": 500}, elapsed=20.0)
 
         result = compare_efficiency(current, base)
-        assert result["tokens"]["position"] == "insufficient-history"
+        assert result["tokens"]["position"] == "new-low"
         assert result["tokens"]["count"] == 1
 
     def test_history_two_with_tokens_one_without(self, tmp_path):

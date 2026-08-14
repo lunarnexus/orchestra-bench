@@ -64,6 +64,9 @@ class TaskResult:
     # Efficiency diagnostics (token/time comparisons vs history)
     efficiency: dict[str, object] = field(default_factory=dict)
 
+    # Category score views (e.g. intelligence / speed / efficiency / process)
+    category_scores: dict[str, object] = field(default_factory=dict)
+
     # Free-form notes from evaluator or harness
     details: str = ""
 
@@ -74,13 +77,24 @@ class TaskResult:
         return asdict(self)
 
     def write_json(self, path: Path | None = None) -> Path:
-        """Write result.json into results/<run_id>-<task_id>/ and return the file."""
+        """Write result JSON and return the final file path.
+
+        When *path* is omitted, write to <repo>/results/<run_id>-<task_id>/result.json.
+        When *path* ends with .json, treat it as the destination file path.
+        Otherwise treat *path* as the output directory.
+        """
         if path is not None:
-            out_dir = path
+            target = Path(path)
+            if target.suffix == ".json":
+                out_dir = target.parent
+                dest = target
+            else:
+                out_dir = target
+                dest = out_dir / "result.json"
         else:
-            out_dir = (Path(RESULTS_DIR) / f"{self.run_id}-{self.task_id}").resolve()
+            out_dir = (Path(__file__).resolve().parent / RESULTS_DIR / f"{self.run_id}-{self.task_id}").resolve()
+            dest = out_dir / "result.json"
         out_dir.mkdir(parents=True, exist_ok=True)
-        dest = out_dir / "result.json"
         dest.write_text(_json.dumps(self.to_dict(), indent=2) + "\n")
         return dest
 

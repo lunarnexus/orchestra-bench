@@ -67,7 +67,7 @@ for y in sorted(base.glob('*/task.yaml')):
         data[k.strip()] = v.strip().strip('"')
     rows.append(data)
 
-order = ['smoke', 'role-focused', 'capability-easy', 'capability-normal']
+order = ['smoke', 'role-focused', 'capability-easy', 'capability-normal', 'capability-advanced']
 by_batch = collections.defaultdict(list)
 for r in rows:
     by_batch[r.get('batch','')].append(r)
@@ -166,7 +166,9 @@ if $auto; then
 fi
 
 echo "[bench] preparing task run..."
-BENCH_TARGET_ROLE="$target_role" BENCH_NOTES="$run_notes" "$ROOT/scripts/_prepare-task-run" "$task_id" --run-id "$BENCH_RUN_ID" --role "$parent_role" $prepare_orchestra_arg
+auto_json="false"
+if $auto; then auto_json="true"; fi
+BENCH_AUTO_JSON="$auto_json" BENCH_TARGET_ROLE="$target_role" BENCH_NOTES="$run_notes" "$ROOT/scripts/_prepare-task-run" "$task_id" --run-id "$BENCH_RUN_ID" --role "$parent_role" $prepare_orchestra_arg
 
 config_path="$ROOT/results/$BENCH_RUN_ID-$task_id/.bench_run.json"
 model_to_use=""
@@ -184,7 +186,7 @@ if [ -n "$target_role" ]; then
   echo "[bench] target: $target_role"
 fi
 echo "[bench] model:  ${model_to_use:-<default>}"
-echo "[bench] grade:  scripts/03-collect-results $task_id"
+echo "[bench] collect: scripts/03-collect-results $task_id --run-id $BENCH_RUN_ID"
 
 role_instruction=""
 if [ -n "$target_role" ]; then
@@ -208,6 +210,7 @@ if $auto; then
   auto_orch_on_value="false"
   if $auto_orch_on; then auto_orch_on_value="true"; fi
 
+  set +e
   docker exec \
     -e BENCH_RUN_ID="$BENCH_RUN_ID" \
     -e BENCH_TASK_ID="$task_id" \
@@ -217,6 +220,30 @@ if $auto; then
     -e BENCH_AUTO_ORCH_ON="$auto_orch_on_value" \
     "$CONTAINER_NAME" sh -c '
       set -eu
+      cleanup_run_processes() {
+        cd / 2>/dev/null || true
+        workdir=${BENCH_WORKDIR%/}
+        [ -n "$workdir" ] || return 0
+        [ "$workdir" != "/" ] || return 0
+        me=$$
+        parent=${PPID:-}
+        pids=""
+        for f in /proc/[0-9]*/cwd; do
+          pid=${f#/proc/}; pid=${pid%/cwd}
+          [ "$pid" = "$me" ] && continue
+          [ -n "$parent" ] && [ "$pid" = "$parent" ] && continue
+          cwd=$(readlink "$f" 2>/dev/null || true)
+          case "$cwd" in
+            "$workdir"|"$workdir"/*) pids="$pids $pid" ;;
+          esac
+        done
+        [ -n "$pids" ] || return 0
+        echo "[bench] cleanup: stopping leaked run processes:$pids" >&2
+        for pid in $pids; do kill "$pid" 2>/dev/null || true; done
+        sleep 1
+        for pid in $pids; do [ -d "/proc/$pid" ] && kill -9 "$pid" 2>/dev/null || true; done
+      }
+      trap cleanup_run_processes EXIT
       cd "$BENCH_WORKDIR"
       if [ -f Prompt.md ]; then
         prompt=$(cat Prompt.md)
@@ -232,14 +259,19 @@ $prompt"
       fi
       if [ "$BENCH_AUTO_ORCH_ON" = "true" ]; then
         pi --model "$BENCH_MODEL" -p "/orch on"
-        exec pi --continue --model "$BENCH_MODEL" -p "$prompt"
+        pi --continue --model "$BENCH_MODEL" -p "$prompt"
+        exit $?
       fi
-      exec pi --model "$BENCH_MODEL" -p "$prompt"
+      pi --model "$BENCH_MODEL" -p "$prompt"
     '
-  echo "[bench] auto complete; grade with: scripts/03-collect-results $task_id"
-  exit 0
+  pi_status=$?
+  set -e
+  "$ROOT/scripts/_cleanup-run-processes" "$task_id" --run-id "$BENCH_RUN_ID" || true
+  "$ROOT/scripts/03-collect-results" "$task_id" --run-id "$BENCH_RUN_ID"
+  exit "$pi_status"
 fi
 
+set +e
 if docker exec "$CONTAINER_NAME" test -f "$PROMPT_MD"; then
   docker exec -it \
     -e BENCH_RUN_ID="$BENCH_RUN_ID" \
@@ -253,9 +285,15 @@ if docker exec "$CONTAINER_NAME" test -f "$PROMPT_MD"; then
       echo '--- Starting Pi in workdir: $WORKDIR ---' && \
       exec pi --model '$model_to_use'
     "
+  pi_status=$?
 else
   docker exec -it \
     -e BENCH_RUN_ID="$BENCH_RUN_ID" \
     -e BENCH_TASK_ID="$task_id" \
     "$CONTAINER_NAME" bash -c "cd $WORKDIR && echo '=== Task: $task_id (no Prompt.md) ===' && exec pi --model '$model_to_use'"
+  pi_status=$?
 fi
+set -e
+"$ROOT/scripts/_cleanup-run-processes" "$task_id" --run-id "$BENCH_RUN_ID" || true
+"$ROOT/scripts/03-collect-results" "$task_id" --run-id "$BENCH_RUN_ID"
+exit "$pi_status"
