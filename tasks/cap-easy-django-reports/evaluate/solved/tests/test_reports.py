@@ -8,6 +8,7 @@ from pathlib import Path
 os.environ.setdefault("REPORTS_DB", str(Path.cwd() / "test-reports.sqlite3"))
 
 import manage
+from django.db import connection
 from django.test import Client
 
 
@@ -106,9 +107,36 @@ def test_validation_and_permissions():
     unauthorized = client.get("/reports/summary")
     invalid_page = client.get("/reports/summary?page=0", **_ADMIN_HEADERS)
     invalid_format = client.get("/reports/summary?format=xml", **_ADMIN_HEADERS)
+    invalid_range = client.get(
+        "/reports/summary?start_date=2024-05-04&end_date=2024-05-01",
+        **_ADMIN_HEADERS,
+    )
+    history = client.get("/reports/history?page=1&page_size=10", **_ADMIN_HEADERS)
 
     assert invalid_event.status_code == 400
     assert "errors" in invalid_event.json()
     assert unauthorized.status_code == 401
     assert invalid_page.status_code == 400
     assert invalid_format.status_code == 400
+    assert invalid_range.status_code == 400
+    assert history.json()["total"] == 0
+
+
+def test_schema_is_created_automatically_on_first_endpoint_use():
+    db_path = Path(os.environ["REPORTS_DB"])
+    connection.close()
+    if db_path.exists():
+        db_path.unlink()
+
+    client = Client()
+    created = client.post(
+        "/events",
+        data={"event_type": "sale", "occurred_on": "2024-05-01", "category": "books", "amount": 1200},
+        content_type="application/json",
+    )
+    summary = client.get("/reports/summary?page=1&page_size=10", **_ADMIN_HEADERS)
+
+    assert created.status_code == 201
+    assert summary.status_code == 200
+    assert summary.json()["total"] == 1
+    assert db_path.exists()

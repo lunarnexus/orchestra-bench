@@ -5,6 +5,7 @@ from __future__ import annotations
 import json as _json
 import shlex
 import shutil
+import sqlite3
 import statistics as _stats
 import subprocess as sp
 import sys
@@ -238,6 +239,92 @@ def _parse_pi_list_package_names(stdout: str) -> list[str]:
     return sorted(set(names))
 
 
+def _package_name_from_source(source: object) -> str:
+    text = str(source or "").strip().rstrip("/")
+    if not text:
+        return ""
+    return text.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+
+
+def _extension_name_from_ref(ref: object) -> str:
+    text = str(ref or "").strip()
+    if text.startswith(("+", "-")):
+        text = text[1:]
+    parts = [part for part in text.replace("\\", "/").split("/") if part]
+    if "extensions" in parts:
+        idx = parts.index("extensions")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    if parts:
+        leaf = parts[-1]
+        if leaf.endswith(('.ts', '.js')) and len(parts) >= 2:
+            return parts[-2]
+        return leaf.rsplit(".", 1)[0]
+    return ""
+
+
+def _parse_pi_settings_disabled_extensions(settings: object) -> set[str]:
+    """Return local/global extension names explicitly disabled in Pi settings."""
+    disabled: set[str] = set()
+    if not isinstance(settings, dict):
+        return disabled
+    extensions = settings.get("extensions")
+    if isinstance(extensions, list):
+        for entry in extensions:
+            text = str(entry or "").strip()
+            if text.startswith("-"):
+                name = _extension_name_from_ref(text)
+                if name:
+                    disabled.add(name)
+    return disabled
+
+
+def _parse_pi_settings_enabled_plugins(settings: object) -> list[str]:
+    """Return plugins/resources enabled in Pi settings.json.
+
+    Pi packages can be present but resource-filtered off, e.g.
+    {"source": ".../pi-codegraph", "extensions": ["-index.ts"]}. Global
+    extensions use +path/-path references, e.g. +extensions/orchestra/index.ts.
+    """
+    if not isinstance(settings, dict):
+        return []
+    enabled: set[str] = set()
+
+    packages = settings.get("packages")
+    if isinstance(packages, list):
+        for entry in packages:
+            if isinstance(entry, str):
+                name = _package_name_from_source(entry)
+                if name:
+                    enabled.add(name)
+                continue
+            if not isinstance(entry, dict):
+                continue
+            name = _package_name_from_source(entry.get("source"))
+            filters = entry.get("extensions")
+            if isinstance(filters, list) and filters:
+                has_enabled = any(not str(item).strip().startswith("-") for item in filters)
+                has_disabled = any(str(item).strip().startswith("-") for item in filters)
+                if name and (has_enabled or not has_disabled):
+                    enabled.add(name)
+            elif name:
+                enabled.add(name)
+
+    extensions = settings.get("extensions")
+    if isinstance(extensions, list):
+        for entry in extensions:
+            text = str(entry or "").strip()
+            name = _extension_name_from_ref(text)
+            if not name:
+                continue
+            if text.startswith("-"):
+                enabled.discard(name)
+            else:
+                enabled.add(name)
+
+    return sorted(enabled)
+
+
 def collect_container_runtime_snapshot() -> dict[str, object]:
     """Collect installed Pi package/extension provenance from the live container."""
     snapshot: dict[str, object] = {}
@@ -269,6 +356,24 @@ def collect_container_runtime_snapshot() -> dict[str, object]:
     snapshot["pi_extensions"] = extension_names
     snapshot["pi_extensions_summary"] = ",".join(extension_names) if extension_names else "none"
     snapshot["pi_extensions_sha256"] = _stable_object_sha256(extension_names)
+
+    enabled_plugins: list[str] = []
+    disabled_extensions: set[str] = set()
+    try:
+        settings_result = _docker_exec("sh", "-lc", "cat /root/.pi/agent/settings.json 2>/dev/null || true")
+        if settings_result.stdout.strip():
+            settings_data = _json.loads(settings_result.stdout)
+            enabled_plugins = _parse_pi_settings_enabled_plugins(settings_data)
+            disabled_extensions = _parse_pi_settings_disabled_extensions(settings_data)
+    except Exception:
+        pass
+    # Locally installed Pi extensions under /root/.pi/agent/extensions are loaded
+    # by Pi even when they are not listed in settings.json packages/extensions,
+    # unless settings.json explicitly disables them with -extensions/name/...
+    enabled_plugins = sorted((set(enabled_plugins) | set(local_extension_names)) - disabled_extensions)
+    snapshot["pi_enabled_plugins"] = enabled_plugins
+    snapshot["pi_enabled_plugins_summary"] = ",".join(enabled_plugins) if enabled_plugins else "none"
+    snapshot["pi_enabled_plugins_sha256"] = _stable_object_sha256(enabled_plugins)
 
     return snapshot
 
@@ -407,28 +512,90 @@ def _copy_from_container(container_path: str, host_path: Path) -> bool:
     return proc.returncode == 0
 
 
+def _orchestra_db_run_count(path: Path) -> int | None:
+    """Return run count for an Orchestra sqlite DB, or None if unreadable."""
+    try:
+        con = sqlite3.connect(str(path))
+        try:
+            row = con.execute("select count(*) from runs").fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            con.close()
+    except Exception:
+        return None
+
+
+def _orchestra_debug_run_count(text: str) -> int | None:
+    """Parse the top-level `runs: N` line from `orchestra debug` markdown."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("runs:"):
+            raw = stripped.split(":", 1)[1].strip()
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+    return None
+
+
+def _copy_orchestra_db_preserving_nonempty(container_path: str, host_path: Path, warnings: list[object]) -> bool:
+    """Copy Orchestra DB without replacing a non-empty captured DB with empty state."""
+    tmp_path = host_path.with_suffix(host_path.suffix + ".tmp")
+    if not _copy_from_container(container_path, tmp_path):
+        return False
+
+    new_count = _orchestra_db_run_count(tmp_path)
+    old_count = _orchestra_db_run_count(host_path) if host_path.exists() else None
+    if old_count and old_count > 0 and new_count == 0:
+        tmp_path.unlink(missing_ok=True)
+        warnings.append("kept earlier non-empty Orchestra state DB; current runtime DB was empty")
+        return True
+
+    host_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path.replace(host_path)
+    return True
+
+
 def _parse_pi_session_file(path: Path) -> dict[str, object]:
-    """Extract session id and token totals from one Pi JSONL session file."""
+    """Extract session id, token totals, and final context usage from one Pi JSONL session file."""
     out: dict[str, object] = {"file": path.name}
     totals = {"input": 0, "output": 0, "reasoning": 0, "totalTokens": 0}
+    context_usage: dict[str, object] = {"api_call_count": 0}
+    last_usage: dict[str, int] = {}
+    compaction_count = 0
     try:
         for line in path.read_text(errors="replace").splitlines():
             if not line.strip():
                 continue
             event = _json.loads(line)
+            if isinstance(event, dict) and event.get("type") == "compaction":
+                compaction_count += 1
             if event.get("type") == "session" and event.get("id"):
                 out["session_id"] = event.get("id")
                 out["cwd"] = event.get("cwd", "")
             msg = event.get("message") if isinstance(event, dict) else None
             usage = msg.get("usage") if isinstance(msg, dict) else None
             if isinstance(usage, dict):
+                call_usage: dict[str, int] = {}
                 for key in totals:
                     value = usage.get(key)
                     if isinstance(value, (int, float)):
-                        totals[key] += int(value)
+                        int_value = int(value)
+                        totals[key] += int_value
+                        call_usage[key] = int_value
+                if call_usage:
+                    context_usage["api_call_count"] = int(context_usage["api_call_count"]) + 1
+                    last_usage = call_usage
     except Exception as exc:
         out["parse_error"] = str(exc)
     out["usage"] = totals
+    if last_usage:
+        context_usage.update({
+            "last_input_tokens": last_usage.get("input", 0),
+            "last_total_tokens": last_usage.get("totalTokens", 0),
+            "compaction_count": compaction_count,
+        })
+        out["context_usage"] = context_usage
     return out
 
 
@@ -495,7 +662,11 @@ def collect_run_artifacts(task_id: str, run_id: str) -> Path:
         manifest["orchestra"]["doctor_collected"] = True  # type: ignore[index]
 
         has_db = _docker_exec("sh", "-c", orch_checks["state/orchestra.db"]).stdout.strip() == "yes"
-        if has_db and _copy_from_container("/root/.pi/agent/orchestra/state/orchestra.db", orch_dir / "state" / "orchestra.db"):
+        if has_db and _copy_orchestra_db_preserving_nonempty(
+            "/root/.pi/agent/orchestra/state/orchestra.db",
+            orch_dir / "state" / "orchestra.db",
+            manifest["warnings"],  # type: ignore[arg-type]
+        ):
             manifest["orchestra"]["state_db"] = "orchestra-debug/state/orchestra.db"  # type: ignore[index]
 
         has_logs = _docker_exec("sh", "-c", orch_checks["logs"]).stdout.strip() == "yes"
@@ -517,33 +688,90 @@ def collect_run_artifacts(task_id: str, run_id: str) -> Path:
                     value = usage.get(key)
                     if isinstance(value, (int, float)):
                         totals[key] += int(value)
-    # Proper Orchestra trace capture uses `orchestra debug`. It may legitimately
-    # report zero runs when the user did not use Orchestra.
+    # Proper Orchestra trace capture uses `orchestra debug`. Query session-id
+    # variants, but expose only authoritative non-empty debug bundles when any
+    # variant resolves runs. Empty variant output is retained under debug-empty
+    # for troubleshooting, not listed as the primary debug trace.
     debug_files: list[str] = []
+    debug_entries: list[tuple[str, Path, int]] = []
     if _docker_ok():
         debug_dir = orch_dir / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
+        empty_debug_dir = orch_dir / "debug-empty"
+        def write_debug_output(debug_proc, debug_path: Path, manifest_name: str) -> None:
+            debug_text = (debug_proc.stdout or "") + (debug_proc.stderr or "")
+            if debug_proc.returncode == 0 and debug_text.strip():
+                run_count = _orchestra_debug_run_count(debug_text)
+                debug_path.write_text(debug_text)
+                debug_entries.append((manifest_name, debug_path, run_count or 0))
+                return
+            error_dir = orch_dir / "debug-errors"
+            error_dir.mkdir(parents=True, exist_ok=True)
+            error_path = error_dir / debug_path.name
+            error_path.write_text(debug_text or f"orchestra debug failed with exit code {debug_proc.returncode}\n")
+            manifest["warnings"].append(f"orchestra debug failed: {error_path.relative_to(artifacts_dir)}")  # type: ignore[union-attr]
+
+        debug_session_ids: list[str] = []
+        seen_debug_session_ids: set[str] = set()
         for session_id in session_ids:
+            for candidate in sorted(_session_id_variants(session_id)):
+                if candidate not in seen_debug_session_ids:
+                    seen_debug_session_ids.add(candidate)
+                    debug_session_ids.append(candidate)
+
+        for session_id in debug_session_ids:
             safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in session_id)
             debug_proc = _docker_exec(
                 "sh", "-c",
                 f"orchestra debug --session-id {shlex.quote(session_id)}",
             )
-            debug_text = (debug_proc.stdout or "") + (debug_proc.stderr or "")
             debug_path = debug_dir / f"session-{safe_name}.md"
-            debug_path.write_text(debug_text)
-            debug_files.append(f"orchestra-debug/debug/{debug_path.name}")
+            write_debug_output(debug_proc, debug_path, f"orchestra-debug/debug/{debug_path.name}")
         if not session_ids:
             debug_proc = _docker_exec(
                 "sh", "-c",
                 f"orchestra debug --run-id {shlex.quote(run_id)}",
             )
-            debug_text = (debug_proc.stdout or "") + (debug_proc.stderr or "")
             debug_path = debug_dir / f"run-{run_id}.md"
-            debug_path.write_text(debug_text)
-            debug_files.append(f"orchestra-debug/debug/{debug_path.name}")
-    if debug_files:
+            write_debug_output(debug_proc, debug_path, f"orchestra-debug/debug/{debug_path.name}")
+    if debug_entries:
+        nonempty_entries = [entry for entry in debug_entries if entry[2] > 0]
+        if nonempty_entries:
+            empty_debug_dir.mkdir(parents=True, exist_ok=True)
+            for _manifest_name, debug_path, run_count in debug_entries:
+                if run_count == 0 and debug_path.exists():
+                    debug_path.replace(empty_debug_dir / debug_path.name)
+            debug_files = [manifest_name for manifest_name, _path, _count in nonempty_entries]
+            manifest["orchestra"]["debug_empty"] = [
+                f"orchestra-debug/debug-empty/{path.name}"
+                for _manifest_name, path, count in debug_entries
+                if count == 0
+            ]  # type: ignore[index]
+            manifest["orchestra"]["debug_authoritative"] = debug_files  # type: ignore[index]
+        else:
+            debug_files = [manifest_name for manifest_name, _path, _count in debug_entries]
         manifest["orchestra"]["debug"] = debug_files  # type: ignore[index]
+
+    main_context_usage: dict[str, object] = {}
+    main_sessions = [
+        session for session in manifest["pi_sessions"]  # type: ignore[index]
+        if isinstance(session, dict)
+        and str(session.get("cwd") or "") == workdir
+        and not str(session.get("session_id") or "").startswith("orchestra-worker-")
+    ]
+    if main_sessions:
+        # Use the latest copied main session. Its final API call input token count
+        # is the best available snapshot of how full the main conversation context
+        # was when the session ended. Max input is kept for sessions that compact.
+        main_session = main_sessions[-1]
+        context_usage = main_session.get("context_usage")
+        if isinstance(context_usage, dict):
+            main_context_usage = {
+                "session_id": main_session.get("session_id", ""),
+                "file": main_session.get("file", ""),
+                **context_usage,
+            }
+            manifest["main_session_context_usage"] = main_context_usage
 
     token_payload = {
         "input_tokens": totals["input"],
@@ -551,6 +779,16 @@ def collect_run_artifacts(task_id: str, run_id: str) -> Path:
         "reasoning_tokens": totals["reasoning"],
         "total_tokens": totals["totalTokens"],
     }
+    if main_context_usage:
+        last_input = main_context_usage.get("last_input_tokens")
+        last_total = main_context_usage.get("last_total_tokens")
+        api_calls = main_context_usage.get("api_call_count")
+        if isinstance(last_input, (int, float)):
+            token_payload["main_session_context_input_tokens"] = int(last_input)
+        if isinstance(last_total, (int, float)):
+            token_payload["main_session_context_total_tokens"] = int(last_total)
+        if isinstance(api_calls, (int, float)):
+            token_payload["main_session_api_call_count"] = int(api_calls)
     (artifacts_dir / "tokens.json").write_text(_json.dumps(token_payload, indent=2) + "\n")
     (artifacts_dir / "pi-sessions.json").write_text(_json.dumps({"session_ids": session_ids, "sessions": manifest["pi_sessions"]}, indent=2) + "\n")
     (artifacts_dir / "manifest.json").write_text(_json.dumps(manifest, indent=2) + "\n")
@@ -700,6 +938,12 @@ def grade(
         stdout = result_proc.stdout.strip()
         parsed = _parse_json_object_from_stdout(stdout)
 
+        if not parsed and result_proc.returncode != 0:
+            raise RuntimeError(
+                result_proc.stderr.strip()
+                or result_proc.stdout.strip()
+                or f"evaluator failed without JSON for {run_id}-{task_id}"
+            )
         if not parsed and previous_result is not None:
             task_result = previous_result
         else:
@@ -807,6 +1051,8 @@ _ARTIFACT_TOKEN_KEYS = (
     "total_tokens", "prompt_tokens", "completion_tokens",
     "input_tokens", "output_tokens", "reasoning_tokens",
     "parent_tokens", "worker_tokens",
+    "main_session_context_input_tokens", "main_session_context_total_tokens",
+    "main_session_api_call_count",
 )
 
 
@@ -861,11 +1107,23 @@ def ingest_artifacts(
         try:
             data = _json.loads(sessions_file.read_text())
             session_ids = data.get("session_ids") if isinstance(data, dict) else None
-            if isinstance(session_ids, list):
+            if isinstance(session_ids, list) and session_ids:
                 result.run_meta["pi_session_ids"] = [str(s) for s in session_ids]
         except Exception as exc:
             print(f"[bench] warning: failed to parse Pi sessions from {sessions_file}: {exc}",
                   file=sys.stderr)
+
+    if not result.run_meta.get("pi_session_ids"):
+        session_ids_from_files: list[str] = []
+        pi_sessions_dir = artifacts_dir / "pi-sessions"
+        if pi_sessions_dir.is_dir():
+            for path in sorted(pi_sessions_dir.glob("*.jsonl")):
+                stem = path.stem
+                session_id = stem.split("_", 1)[1] if "_" in stem else stem
+                if session_id and session_id not in session_ids_from_files:
+                    session_ids_from_files.append(session_id)
+        if session_ids_from_files:
+            result.run_meta["pi_session_ids"] = session_ids_from_files
 
     manifest_file = artifacts_dir / "manifest.json"
     if manifest_file.is_file():
@@ -1141,6 +1399,20 @@ def _load_orchestration_session_ids(
     if session_ids:
         return session_ids
 
+    pi_sessions_dir = artifacts_dir / "pi-sessions"
+    if pi_sessions_dir.is_dir():
+        for path in pi_sessions_dir.glob("*.jsonl"):
+            stem = path.stem
+            # Session filenames are timestamp_sessionid.jsonl. Worker ids may
+            # contain underscores; split only on the timestamp separator.
+            if "_" in stem:
+                session_ids.update(_session_id_variants(stem.split("_", 1)[1]))
+            else:
+                session_ids.update(_session_id_variants(stem))
+
+    if session_ids:
+        return session_ids
+
     manifest_file = artifacts_dir / "manifest.json"
     if manifest_file.is_file():
         try:
@@ -1166,16 +1438,19 @@ def _filter_orchestra_events_for_run(
         return events
 
     relevant_run_ids: set[str] = set()
+    has_session_linkage = False
     for event in events:
         orchestrator_session_id = str(event.get("orchestrator_session_id", "")).strip()
         worker_session_id = str(event.get("worker_session_id", "")).strip()
+        if orchestrator_session_id or worker_session_id:
+            has_session_linkage = True
         if orchestrator_session_id in session_ids or worker_session_id in session_ids:
             run_id = str(event.get("run_id", "")).strip()
             if run_id:
                 relevant_run_ids.add(run_id)
 
     if not relevant_run_ids:
-        return events
+        return [] if has_session_linkage else events
 
     filtered = []
     for event in events:

@@ -37,9 +37,30 @@ require_lmstudio_config_source() {
 
 sync_orchestra_config() {
   require_orchestra_config_source
+
+  # The container's default startup path and scripts/01-start init-runtime can
+  # both try to sync config at nearly the same time. Serialize the destructive
+  # rm/copy sequence so concurrent startup cannot interleave two cp operations.
+  lock_parent="$(dirname "$PI_ORCHESTRA_RUNTIME_DIR")"
+  lock_dir="$lock_parent/.orchestra-config-sync.lock"
+  mkdir -p "$lock_parent"
+  attempts=0
+  until mkdir "$lock_dir" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 200 ]; then
+      echo "[bench] timed out waiting for orchestra config sync lock: $lock_dir" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  trap 'rmdir "$lock_dir" 2>/dev/null || true' RETURN
+
   rm -rf "$PI_ORCHESTRA_RUNTIME_DIR"
   mkdir -p "$PI_ORCHESTRA_RUNTIME_DIR"
-  cp -a "$BENCH_ORCHESTRA_CONFIG_SRC"/. "$PI_ORCHESTRA_RUNTIME_DIR"/
+  cp -R "$BENCH_ORCHESTRA_CONFIG_SRC"/. "$PI_ORCHESTRA_RUNTIME_DIR"/
+
+  rmdir "$lock_dir" 2>/dev/null || true
+  trap - RETURN
 }
 
 sync_lmstudio_config() {
@@ -118,7 +139,9 @@ case "$cmd" in
   eval)    # Enter existing workdir without recreating (for grading)
     task_id="${2:-}"
     [ -z "$task_id" ] && { echo "usage: bench-entrypoint eval <task-id> [<cmd>]"; exit 1; }
-    sync_orchestra_config
+    # Do not sync Orchestra config here: sync_orchestra_config recreates
+    # /root/.pi/agent/orchestra and would destroy run state/logs before
+    # artifact collection. Eval only needs the existing workdir and evaluator.
     WORKDIR="$BENCH_WORKSPACE/$RUN_ID-$task_id"
     if [ ! -d "$WORKDIR" ]; then
       echo "[bench] workdir not found: $WORKDIR (run_id=$RUN_ID task=$task_id)" >&2

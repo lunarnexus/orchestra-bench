@@ -45,8 +45,13 @@ COPY config/skills/ /tmp/bench-skills/
 RUN mkdir -p /root/.pi/agent/skills && \
     cp -a /tmp/bench-skills/. /root/.pi/agent/skills/
 
+# Bust cache for source/plugin installs while keeping base OS, Pi, and common
+# dependency layers cached. 01-start supplies a fresh value for each build.
+ARG SOURCE_PLUGIN_CACHE_BUST="manual"
+
 # Install Orchestra from source using the README dev flow.
-RUN git clone "$ORCHESTRA_REPO_URL" "$ORCHESTRA_HOME/src" && \
+RUN echo "source/plugin cache bust: $SOURCE_PLUGIN_CACHE_BUST" && \
+    git clone "$ORCHESTRA_REPO_URL" "$ORCHESTRA_HOME/src" && \
     python3 -m venv "$ORCHESTRA_HOME/.venv" && \
     . "$ORCHESTRA_HOME/.venv/bin/activate" && \
     python3 -m pip install --upgrade pip && \

@@ -1,4 +1,4 @@
-# Capability Normal — Django Reports
+# Capability Easy — Django Reports
 
 ## Goal
 Complete the provided Django workspace so it behaves like a small browser-routable reporting app backed by SQLite.
@@ -11,7 +11,7 @@ You are starting from an intentionally incomplete fixture. Deliver a runnable ap
 - Keep the main app entrypoint in `manage.py`.
 - Use Django with SQLite persistence.
 - Read the database file path from `REPORTS_DB`; default to `reports.sqlite3` in the current working directory.
-- Initialize required tables automatically when the app is first used.
+- Initialize required tables automatically when the app is first used. This must work for a fresh or deleted `REPORTS_DB` file before any endpoint touches the database; do not rely only on test-only setup such as `reset_database()`.
 - Implement a browser-routable `GET /` HTML entrypoint for the reports app.
 
 ### Browser homepage
@@ -84,6 +84,7 @@ Behavior:
 - Support pagination on grouped results.
 - Return grouped results newest date first.
 - Invalid dates, pagination, or export formats must return HTTP `400`.
+- If both `start_date` and `end_date` are present and `start_date > end_date`, return HTTP `400` and do not record a report history row.
 - JSON responses must use `{ "items", "total", "page", "page_size" }`.
 - CSV responses must include a header row and the same grouped fields.
 

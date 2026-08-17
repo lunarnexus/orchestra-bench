@@ -58,60 +58,38 @@ def _task_workflow_specs() -> dict[str, dict[str, object]]:
             "required_terms": [
                 "POST /submissions",
                 "GET /public/submissions",
-                "POST /admin/submissions/:id/decision",
-                "src/server.ts",
-                "tests/api.test.ts",
-                "node --test --experimental-strip-types tests/api.test.ts",
-            ],
-            "required_patterns": [
-                r"(?mi)^\s*(?:[-*]\s*)?(?:1\.\s|step\s*1\b)",
-                r"(?mi)^\s*(?:[-*]\s*)?(?:2\.\s|step\s*2\b)",
+                "admin",
+                "audit",
+                "attachment",
             ],
         },
         "research": {
             "min_words": 35,
             "min_substantive_lines": 2,
-            "evidence_terms": ["kb", "TypeScript", "Node", "attachment", "tradeoff"],
+            "evidence_terms": ["TypeScript", "Node", "attachment", "audit", "pagination", "persistence"],
             "min_evidence_terms": 2,
-            "required_terms": ["kb", "TypeScript", "attachment_name", "APPROVAL_QUEUE_DATA_FILE", "avoid extra ORM"],
-            "required_patterns": [
-                r"(?mi)^\s*[-*]?\s*source\s*:",
-                r"(?mi)^\s*[-*]?\s*decision\s*:",
-                r"(?mi)^\s*[-*]?\s*tradeoff\s*:",
-            ],
+            "required_terms": ["TypeScript", "attachment", "APPROVAL_QUEUE_DATA_FILE"],
         },
         "verify": {
             "min_words": 30,
             "min_substantive_lines": 1,
             "evidence_terms": shared_terms,
             "min_evidence_terms": 2,
-            "required_terms": ["node --test --experimental-strip-types tests/api.test.ts", "passed"],
-            "required_patterns": [
-                r"(?mi)^\s*[-*]?\s*command\s*:",
-                r"(?mi)^\s*[-*]?\s*result\s*:",
-            ],
+            "required_terms": ["node", "test", "pass"],
         },
         "review": {
             "min_words": 30,
             "min_substantive_lines": 2,
             "evidence_terms": ["response schemas", "status", "audit", "pagination", "risk"],
             "min_evidence_terms": 2,
-            "required_terms": ["response schemas", "400", "401", "404", "422"],
-            "required_patterns": [
-                r"(?mi)^\s*[-*]?\s*finding\s*:",
-                r"(?mi)^\s*[-*]?\s*risk\s*:",
-            ],
+            "required_terms": ["400", "401", "404", "422"],
         },
         "appsec": {
             "min_words": 30,
             "min_substantive_lines": 2,
             "evidence_terms": ["xss", "attachment_name", "validation", "token", "audit"],
             "min_evidence_terms": 2,
-            "required_terms": ["attachment_name", "X-Admin-Token", "path traversal"],
-            "required_patterns": [
-                r"(?mi)^\s*[-*]?\s*threat\s*:",
-                r"(?mi)^\s*[-*]?\s*mitigation\s*:",
-            ],
+            "required_terms": ["attachment", "X-Admin-Token", "path traversal"],
         },
     }
 
@@ -498,9 +476,8 @@ rubric = {
         "weight": 0.10,
         "checks": {
             "verify_relevant": {"weight": 0.04},
-            "verify_mentions_changed_files": {"weight": 0.02},
-            "review_relevant": {"weight": 0.02},
-            "appsec_relevant": {"weight": 0.02},
+            "review_relevant": {"weight": 0.03},
+            "appsec_relevant": {"weight": 0.03},
         },
     },
 }

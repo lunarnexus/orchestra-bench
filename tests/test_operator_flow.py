@@ -311,6 +311,15 @@ class TestBuildStartScript:
         assert "stop" in help_text.lower()
         assert "build|start" not in help_text
 
+    def test_start_busts_source_plugin_cache_only(self):
+        script = (_REPO_ROOT / "scripts" / "01-start").read_text()
+        dockerfile = (_REPO_ROOT / "docker" / "Dockerfile").read_text()
+        assert "--no-cache" not in script
+        assert "--build-arg SOURCE_PLUGIN_CACHE_BUST=" in script
+        assert "ARG SOURCE_PLUGIN_CACHE_BUST" in dockerfile
+        assert dockerfile.index("ARG SOURCE_PLUGIN_CACHE_BUST") < dockerfile.index("git clone \"$ORCHESTRA_REPO_URL\"")
+        assert dockerfile.index("ARG SOURCE_PLUGIN_CACHE_BUST") < dockerfile.index("pi install \"$PI_LMSTUDIO_PLUGIN_URL\"")
+
     def test_stop_removes_container(self, tmp_path):
         import os
 
@@ -456,6 +465,18 @@ class TestOpenPiInteractiveSession:
         assert "BENCH_AUTO_ORCH_ON=true" in log
         assert '-p "/orch on"' in log
         assert "--continue --model" in log
+
+    def test_auto_orchestra_preflight_is_verified_and_task_prompt_gets_skill(self):
+        script = (_REPO_ROOT / "scripts" / "02-open-pi").read_text()
+        assert "preflight_output=$(pi --model \"$BENCH_MODEL\" -p \"/orch on\" 2>&1)" in script
+        assert "Orchestra orchestrator skill refreshed" in script
+        assert "orchestrator_skill=$(orchestra _orchestrator-skill)" in script
+        assert 'prompt="$orchestrator_skill' in script
+
+    def test_auto_flow_collects_artifacts_before_grading_cleanup(self):
+        script = (_REPO_ROOT / "scripts" / "02-open-pi").read_text()
+        assert "from eval_harness import collect_run_artifacts" in script
+        assert script.index("collect_run_artifacts(sys.argv[2], sys.argv[3])") < script.index("$ROOT/scripts/03-collect-results")
 
     def test_auto_flow_uses_run_process_cleanup_without_task_timeout(self):
         open_pi = (_REPO_ROOT / "scripts" / "02-open-pi").read_text()
@@ -1042,7 +1063,7 @@ class TestEvalFlowUsesExistingWorkdir:
         assert result.elapsed_seconds == pytest.approx(123.45)
         assert result.efficiency["elapsed"]["current"] == pytest.approx(123.45)
 
-    def test_grade_preserves_previous_result_when_regrade_returns_no_json(self, tmp_path, monkeypatch):
+    def test_grade_fails_when_regrade_returns_no_json(self, tmp_path, monkeypatch):
         import eval_harness
 
         base_results = tmp_path / "results"
@@ -1070,16 +1091,12 @@ class TestEvalFlowUsesExistingWorkdir:
 
         monkeypatch.setattr(eval_harness, "_docker_exec", fake_docker_exec)
 
-        result = eval_harness.grade(
-            "smoke-public-admin-handoff",
-            "run-1",
-            task_meta=TaskMeta(task_id="smoke-public-admin-handoff", description="smoke", family="smoke"),
-        )
-
-        assert result.score == "pass"
-        assert result.score_numeric == pytest.approx(0.86)
-        assert result.checks == {"answer_exists": True}
-        assert result.tokens["total"] == 900
+        with pytest.raises(RuntimeError, match="evaluator failed without JSON"):
+            eval_harness.grade(
+                "smoke-public-admin-handoff",
+                "run-1",
+                task_meta=TaskMeta(task_id="smoke-public-admin-handoff", description="smoke", family="smoke"),
+            )
 
 
 class TestOperatorDocs:

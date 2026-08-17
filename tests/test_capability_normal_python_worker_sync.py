@@ -303,7 +303,7 @@ class TestCapabilityHardPythonWorkerSyncTask:
         assert result["checks"]["review_relevant"] is False
         assert result["checks"]["appsec_relevant"] is False
 
-    def test_prose_shaped_boilerplate_workflow_artifacts_do_not_receive_full_credit(self, tmp_path):
+    def test_prose_shaped_task_specific_workflow_artifacts_receive_credit(self, tmp_path):
         _copy_tree(_TASK_DIR / "evaluate" / "solved", tmp_path)
         _write_prose_shaped_boilerplate_workflow_artifacts(tmp_path)
 
@@ -311,9 +311,9 @@ class TestCapabilityHardPythonWorkerSyncTask:
 
         assert code == 0
         assert result["score"] == "pass"
-        assert result["score_numeric"] < 0.9
-        assert result["checks"]["plan_relevant"] is False
-        assert result["checks"]["research_relevant"] is False
-        assert result["checks"]["verify_relevant"] is False
-        assert result["checks"]["review_relevant"] is False
-        assert result["checks"]["appsec_relevant"] is False
+        assert result["score_numeric"] >= 0.9
+        assert result["checks"]["plan_relevant"] is True
+        assert result["checks"]["research_relevant"] is True
+        assert result["checks"]["verify_relevant"] is True
+        assert result["checks"]["review_relevant"] is True
+        assert result["checks"]["appsec_relevant"] is True

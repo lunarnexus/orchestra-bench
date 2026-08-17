@@ -202,13 +202,29 @@ def _write_dogfood_style_workflow_artifacts(workspace: Path) -> None:
         (workspace / name).write_text(text)
 
 
-class TestCapabilityNormalDjangoReportsTask:
+class TestCapabilityEasyDjangoReportsTask:
     def test_task_metadata_marks_capability_workflow(self):
         text = (_TASK_DIR / "task.yaml").read_text()
         assert "task_id: cap-easy-django-reports" in text
         assert "batch: capability-easy" in text
         assert "scoring_type: numeric" in text
         assert "expected_workflow:" not in text
+
+    def test_prompt_and_visible_tests_call_out_easy_edge_cases(self):
+        prd = (_TASK_DIR / "PRD.md").read_text()
+        prompt = (_TASK_DIR / "Prompt.md").read_text()
+        fixture_tests = (_TASK_DIR / "fixture" / "tests" / "test_reports.py").read_text()
+        persistence_notes = (_TASK_DIR / "kb" / "persistence_notes.md").read_text()
+
+        assert "# Capability Easy" in prd
+        assert "start_date > end_date" in prd
+        assert "do not record a report history row" in prd
+        assert "fresh or deleted `REPORTS_DB`" in prd
+        assert "start_date > end_date" in prompt
+        assert "first endpoint use" in prompt
+        assert "start_date=2024-05-04&end_date=2024-05-01" in fixture_tests
+        assert "test_schema_is_created_automatically_on_first_endpoint_use" in fixture_tests
+        assert "not only during tests or `reset_database()`" in persistence_notes
 
     def test_pristine_fixture_fails(self, tmp_path):
         _copy_tree(_TASK_DIR / "fixture", tmp_path)

@@ -243,7 +243,21 @@ if $auto; then
         prompt="Inspect the workspace and complete the benchmark task."
       fi
       if [ "$BENCH_AUTO_ORCH_ON" = "true" ]; then
-        pi --model "$BENCH_MODEL" -p "/orch on"
+        preflight_output=$(pi --model "$BENCH_MODEL" -p "/orch on" 2>&1)
+        printf "%s\n" "$preflight_output"
+        case "$preflight_output" in
+          *"Orchestra orchestrator skill refreshed"*) ;;
+          *)
+            echo "[bench] /orch on preflight failed" >&2
+            exit 1
+            ;;
+        esac
+        orchestrator_skill=$(orchestra _orchestrator-skill)
+        prompt="$orchestrator_skill
+
+---
+
+$prompt"
         pi --continue --model "$BENCH_MODEL" -p "$prompt"
         exit $?
       fi
@@ -251,6 +265,16 @@ if $auto; then
     '
   pi_status=$?
   set -e
+  # Capture Pi/Orchestra artifacts immediately after the agent run, before
+  # grading or any later runtime sync can rotate/clear Orchestra state/logs.
+  python3 - "$ROOT" "$task_id" "$BENCH_RUN_ID" <<'PY' || true
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from eval_harness import collect_run_artifacts
+collect_run_artifacts(sys.argv[2], sys.argv[3])
+PY
   "$ROOT/scripts/_cleanup-run-processes" "$task_id" --run-id "$BENCH_RUN_ID" || true
   "$ROOT/scripts/03-collect-results" "$task_id" --run-id "$BENCH_RUN_ID"
   exit "$pi_status"

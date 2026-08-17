@@ -169,6 +169,29 @@ class TestDetectDispatchesFromSession:
 
         assert isinstance(checks, dict)
 
+    def test_parse_pi_session_file_captures_context_usage_snapshot(self, tmp_path):
+        session_file = tmp_path / "session.jsonl"
+        session_file.write_text("\n".join([
+            json.dumps({"type": "session", "id": "sess-main", "cwd": "/workspace/run-task"}),
+            json.dumps({"type": "message", "message": {"role": "assistant", "content": [], "usage": {"input": 100, "output": 20, "reasoning": 3, "totalTokens": 123}}}),
+            json.dumps({"type": "compaction", "id": "cmp-1"}),
+            json.dumps({"type": "message", "message": {"role": "assistant", "content": [], "usage": {"input": 75, "output": 10, "reasoning": 1, "totalTokens": 86}}}),
+            "",
+        ]))
+
+        from eval_harness import _parse_pi_session_file
+
+        parsed = _parse_pi_session_file(session_file)
+
+        assert parsed["session_id"] == "sess-main"
+        assert parsed["usage"]["input"] == 175
+        assert parsed["context_usage"] == {
+            "api_call_count": 2,
+            "last_input_tokens": 75,
+            "last_total_tokens": 86,
+            "compaction_count": 1,
+        }
+
     def test_counts_compactions_across_pi_sessions(self, tmp_path):
         run_dir = _build_artifacts_dir(tmp_path, "run-3b", "task-c2")
 
@@ -548,6 +571,25 @@ class TestOrchestrationChecksIntegration:
 
         assert isinstance(checks, dict)
 
+
+    def test_ingests_main_session_context_token_metrics(self, tmp_path):
+        run_dir = _build_artifacts_dir(tmp_path, "run-context", "task-context")
+        tokens_file = run_dir / "artifacts" / "tokens.json"
+        tokens_file.write_text(json.dumps({
+            "total_tokens": 1234,
+            "main_session_context_input_tokens": 900,
+            "main_session_context_total_tokens": 950,
+            "main_session_api_call_count": 4,
+        }))
+
+        from eval_harness import ingest_artifacts
+
+        result = TaskResult(task_id="task-context", run_id="run-context", score="pass")
+        ingest_artifacts(result, base_dir=tmp_path / "results")
+
+        assert result.tokens["main_session_context_input_tokens"] == 900
+        assert result.tokens["main_session_context_total_tokens"] == 950
+        assert result.tokens["main_session_api_call_count"] == 4
 
     def test_result_roundtrips_with_checks(self, tmp_path):
         """Orchestration checks survive JSON serialization."""

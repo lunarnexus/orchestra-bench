@@ -81,8 +81,7 @@ roles:
     - harness_config: hermes
       profile: tori
     model: lmstudio/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved
-    skills:
-    - builder
+    skills: []
     prompt_addition: Implement the assigned task only. Stay in scope. Return files
       changed, checks run, results, blockers, and risks.
     enabled: true
@@ -92,8 +91,7 @@ roles:
   verifier:
     harness_config: pi
     model: lmstudio/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved
-    skills:
-    - verifier
+    skills: []
     prompt_addition: Independently prove whether the work satisfies its scope and
       acceptance criteria using fresh evidence. Stay read-only. Return verdict, evidence,
       missing checks, blockers, and risks.
@@ -104,8 +102,7 @@ roles:
   reviewer:
     harness_config: pi
     model: lmstudio/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved
-    skills:
-    - reviewer
+    skills: []
     prompt_addition: Independently review whether the change is correct, maintainable,
       appropriately scoped, and ready to merge. Stay read-only. Return only evidence-backed
       material findings and readiness.
@@ -130,8 +127,7 @@ roles:
     env:
       HINDSIGHT4PI_AUTO_RETAIN: '0'
       HINDSIGHT4PI_AUTO_RECALL: '0'
-    skills:
-    - researcher
+    skills: []
   intern:
     harness_config: pi
     model: lmstudio/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved
@@ -143,8 +139,7 @@ roles:
   appsec:
     harness_config: pi
     model: lmstudio/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved
-    skills:
-    - appsec
+    skills: []
     prompt_addition: Independently identify realistic vulnerabilities across changed
       trust boundaries. Stay read-only. Return only evidence-backed material findings
       and security readiness.
@@ -155,8 +150,7 @@ roles:
   planner:
     harness_config: pi
     model: lmstudio/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved
-    skills:
-    - planner
+    skills: []
     prompt_addition: Plan the work. Ask numbered questions for unknowns. May dispatch
       researchers for facts, docs, web, and code evidence. Return concise plan findings
       and open questions.

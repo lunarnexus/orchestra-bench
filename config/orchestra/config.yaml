@@ -1,6 +1,6 @@
 state_dir: /root/.pi/agent/orchestra/state
 log_dir: /root/.pi/agent/orchestra/logs
-default_timeout: 900
+default_timeout: 1500
 concurrency:
   global: 6
   per_session: 3

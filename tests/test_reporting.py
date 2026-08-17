@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import textwrap
 from pathlib import Path
+import sqlite3
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -632,6 +634,217 @@ class TestDashboardReporting:
         assert "- task-a" in result.stdout
         assert "- task-b" not in result.stdout
 
+    def test_model_filter_matches_parent_model_not_other_role_models(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_task_yaml(tmp_path, "task-b", batch="smoke")
+
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-27",
+                score="pass",
+                task_meta={"batch": "smoke"},
+                run_meta={
+                    "model": "lmstudio/qwen3.6-27b",
+                    "role_models_summary": "builder=lmstudio/qwen3.6-27b, intern=lmstudio/qwen3.6-35b",
+                },
+            ),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-b",
+                run_id="run-35",
+                score="pass",
+                task_meta={"batch": "smoke"},
+                run_meta={"model": "lmstudio/qwen3.6-35b"},
+            ),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "runs", "--suite", "smoke", "--model", "35b", "--limit", "20"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "run-35" in result.stdout
+        assert "run-27" not in result.stdout
+
+    def test_runs_detail_three_shows_config_fields(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="capability-easy")
+
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-detail",
+                score="pass",
+                tokens={"total": 123},
+                elapsed_seconds=12.0,
+                task_meta={"batch": "capability-easy"},
+                run_meta={
+                    "model": "lmstudio/qwen3.6-35b",
+                    "auto": True,
+                    "orchestra": False,
+                    "catalog_path": "config/orchestra/agent-catalog.yaml",
+                    "enabled_roles_summary": "builder,reviewer",
+                    "role_models_summary": "builder=lmstudio/qwen3.6-35b, reviewer=lmstudio/qwen3.6-27b",
+                    "pi_extensions_summary": "orchestra,pi-codegraph,pi-lmstudio",
+                    "aux_skills_summary": "build-tdd,verify-work",
+                    "notes": "config detail smoke",
+                },
+            ),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "runs", "--suite", "capability-easy", "--detail", "3", "--limit", "5"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "run-detail" in result.stdout
+        assert "model       : qwen3.6-35b" in result.stdout
+        assert "run config  : orchestra=none; orch_on=off; args=--auto --no-orchestra" in result.stdout
+        assert "catalog     : config/orchestra/agent-catalog.yaml" in result.stdout
+        assert "roles       : builder,reviewer" in result.stdout
+        assert "extensions  : orchestra,pi-codegraph,pi-lmstudio" in result.stdout
+        assert "skills      : build-tdd,verify-work" in result.stdout
+        assert "role models :" in result.stdout
+        assert "builder=qwen3.6-35b" in result.stdout
+        assert "notes       : config detail smoke" in result.stdout
+
+    def test_config_filters_configs_and_compare_views(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        for task_id in ["task-a", "task-b"]:
+            _write_task_yaml(tmp_path, task_id, batch="smoke")
+
+        common = {"auto": True, "aux_skills_summary": "none"}
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-a",
+                score="pass",
+                score_numeric=1.0,
+                tokens={"total": 100},
+                elapsed_seconds=10.0,
+                task_meta={"batch": "smoke"},
+                run_meta={**common, "model": "lmstudio/qwen3.6-35b-long-name", "orchestra": True, "pi_extensions_summary": "orchestra,pi-codegraph,pi-lmstudio", "pi_packages_summary": "pi-codegraph,pi-lmstudio", "pi_enabled_plugins_summary": "orchestra,pi-codegraph,pi-lmstudio"},
+            ),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-b",
+                run_id="run-b",
+                score="fail",
+                score_numeric=0.0,
+                tokens={"total": 50},
+                elapsed_seconds=8.0,
+                task_meta={"batch": "smoke"},
+                run_meta={**common, "model": "lmstudio/qwen3.6-35b-long-name", "orchestra": False, "pi_extensions_summary": "orchestra,pi-codegraph,pi-lmstudio", "pi_packages_summary": "pi-codegraph,pi-lmstudio", "pi_enabled_plugins_summary": "pi-codegraph,pi-lmstudio"},
+            ),
+        )
+
+        configs = __import__("subprocess").run(
+            ["bash", str(script), "configs", "--model", "35b"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert configs.returncode == 0, configs.stderr
+        assert "=== configs ===" in configs.stdout
+        assert "C01" in configs.stdout
+        assert "qwen3.6-35b" in configs.stdout
+
+        substring = __import__("subprocess").run(
+            ["bash", str(script), "runs", "--plugins", "codegraph"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert substring.returncode == 0, substring.stderr
+        assert "run-a" in substring.stdout
+        assert "run-b" in substring.stdout
+
+        normalized_substring = __import__("subprocess").run(
+            ["bash", str(script), "runs", "--plugins", "picode"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert normalized_substring.returncode == 0, normalized_substring.stderr
+        assert "run-a" in normalized_substring.stdout
+        assert "run-b" in normalized_substring.stdout
+
+        filtered = __import__("subprocess").run(
+            ["bash", str(script), "runs", "--plugins", "pi-codegraph,not:orchestra"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert filtered.returncode == 0, filtered.stderr
+        assert "run-a" not in filtered.stdout
+        assert "run-b" in filtered.stdout
+
+        without_plugin = __import__("subprocess").run(
+            ["bash", str(script), "runs", "--without-plugins", "orchestra"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert without_plugin.returncode == 0, without_plugin.stderr
+        assert "run-a" not in without_plugin.stdout
+        assert "run-b" in without_plugin.stdout
+
+        hint = __import__("subprocess").run(
+            ["bash", str(script), "dashboard", "--plugins", "codegraph,-orchestra"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert hint.returncode == 0, hint.stderr
+        assert "graded runs : 1" in hint.stdout
+
+        no_orch = __import__("subprocess").run(
+            ["bash", str(script), "runs", "--no-orchestra"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert no_orch.returncode == 0, no_orch.stderr
+        assert "run-b" in no_orch.stdout
+        assert "run-a" not in no_orch.stdout
+
+        compare = __import__("subprocess").run(
+            ["bash", str(script), "compare", "--suite", "smoke", "--group-by", "model,orchestra,plugins", "--per-task"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert compare.returncode == 0, compare.stderr
+        assert "=== compare ===" in compare.stdout
+        assert "orch:used" in compare.stdout
+        assert "orch:none" in compare.stdout
+        assert "per task:" in compare.stdout
+
     def test_notes_view_lists_distinct_notes(self, tmp_path):
         script = _install_results_script(tmp_path)
         _write_task_yaml(tmp_path, "task-a", batch="smoke")
@@ -665,7 +878,7 @@ class TestDashboardReporting:
         assert "pass=1/2" in result.stdout
         assert "runs=1" in result.stdout and "notes=Batch2 beta" in result.stdout
 
-    def test_delete_requires_notes_filter(self, tmp_path):
+    def test_delete_requires_at_least_one_filter(self, tmp_path):
         script = _install_results_script(tmp_path)
         _write_task_yaml(tmp_path, "task-a", batch="smoke")
         _write_result_json(
@@ -682,8 +895,37 @@ class TestDashboardReporting:
         )
 
         assert result.returncode == 2
-        assert "refusing to delete without --notes" in result.stderr
+        assert "refusing to delete without at least one filter" in result.stderr
         assert (tmp_path / "results" / "run-a-task-a").exists()
+
+    def test_delete_model_filter_is_dry_run_by_default(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+        _write_task_yaml(tmp_path, "task-b", batch="smoke")
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-a", run_id="run-a", score="pass", run_meta={"model": "lmstudio/qwen3.8-27b"}),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(task_id="task-b", run_id="run-b", score="pass", run_meta={"model": "lmstudio/qwen3.6-35b"}),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "delete", "--model", "3.8-27b"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "mode        : dry-run" in result.stdout
+        assert "model filter: 3.8-27b" in result.stdout
+        assert "WOULD DELETE results/run-a-task-a" in result.stdout
+        assert "run-b-task-b" not in result.stdout
+        assert (tmp_path / "results" / "run-a-task-a").exists()
+        assert (tmp_path / "results" / "run-b-task-b").exists()
 
     def test_delete_notes_filter_is_dry_run_by_default(self, tmp_path):
         script = _install_results_script(tmp_path)
@@ -740,7 +982,7 @@ class TestDashboardReporting:
         assert not (tmp_path / "results" / "run-a-task-a").exists()
         assert (tmp_path / "results" / "run-b-task-b").exists()
 
-    def test_set_notes_requires_notes_filter_and_new_notes(self, tmp_path):
+    def test_set_notes_requires_filter_and_new_notes(self, tmp_path):
         script = _install_results_script(tmp_path)
         _write_task_yaml(tmp_path, "task-a", batch="smoke")
         _write_result_json(
@@ -764,7 +1006,7 @@ class TestDashboardReporting:
         )
 
         assert no_filter.returncode == 2
-        assert "refusing to rewrite notes without --notes" in no_filter.stderr
+        assert "refusing to rewrite notes without at least one filter" in no_filter.stderr
         assert no_new_notes.returncode == 2
         assert "refusing to rewrite notes without --set-notes" in no_new_notes.stderr
 
@@ -1077,6 +1319,95 @@ class TestRunDetailReporting:
         assert "elapsed " in result.stdout
         assert "current=32.0" in result.stdout
 
+    def test_debug_view_prints_captured_trace_artifacts(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a")
+        _write_result_json(tmp_path, TaskResult(task_id="task-a", run_id="run-debug", score="fail"))
+        run_dir = tmp_path / "results" / "run-debug-task-a"
+        debug_dir = run_dir / "artifacts" / "orchestra-debug" / "debug"
+        debug_dir.mkdir(parents=True)
+        (debug_dir / "session-debug.md").write_text("# Orchestra debug session\nruns: 1\nworker failed\n")
+        session_dir = run_dir / "artifacts" / "pi-sessions"
+        session_dir.mkdir(parents=True)
+        (session_dir / "session.jsonl").write_text(
+            json.dumps({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "final failure summary"}]}}) + "\n"
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "debug", "run-debug", "--limit", "5"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "orchestra debug trace:" in result.stdout
+        assert "worker failed" in result.stdout
+        assert "pi session trace: not printed separately; included in orchestra debug trace" in result.stdout
+        assert "final failure summary" not in result.stdout
+
+    def test_debug_view_falls_back_to_full_pi_trace_when_orchestra_debug_failed(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a")
+        _write_result_json(tmp_path, TaskResult(task_id="task-a", run_id="run-debug-fallback", score="fail"))
+        run_dir = tmp_path / "results" / "run-debug-fallback-task-a"
+        debug_dir = run_dir / "artifacts" / "orchestra-debug" / "debug"
+        debug_dir.mkdir(parents=True)
+        (debug_dir / "session-debug.md").write_text("error: role 'builder' requires 'skills' to be a non-empty list of strings\n")
+        session_dir = run_dir / "artifacts" / "pi-sessions"
+        session_dir.mkdir(parents=True)
+        long_text = "x" * 1200
+        (session_dir / "session.jsonl").write_text(
+            json.dumps({"type": "session", "id": "sess", "cwd": "/workspace/run-debug-fallback-task-a"}) + "\n" +
+            json.dumps({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "first event"}]}}) + "\n" +
+            json.dumps({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": long_text}]}}) + "\n"
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "debug", "run-debug-fallback"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "orchestra debug trace is missing or incomplete" in result.stdout
+        assert "first event" in result.stdout
+        assert long_text in result.stdout
+        assert "earlier events omitted" not in result.stdout
+
+    def test_run_detail_colors_boolean_checks_when_forced(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a")
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="run-color",
+                score="fail",
+                checks={"ok_check": True, "bad_check": False},
+                orchestration_checks={"timeouts": 1, "worker_completed": True},
+            ),
+        )
+        env = os.environ.copy()
+        env["FORCE_COLOR"] = "1"
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "run", "run-color"],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "\x1b[32mTrue\x1b[0m" in result.stdout
+        assert "\x1b[31mFalse\x1b[0m" in result.stdout
+        assert "bad_check:" in result.stdout
+
     def test_dispatch_without_orchestra_logs_preserves_numeric_score(self, tmp_path):
         from eval_harness import ingest_artifacts
 
@@ -1298,3 +1629,45 @@ class TestRunDetailReporting:
         assert "fail" in result.stdout
         assert "no rubric score" in result.stdout
 
+
+
+class TestOrchestraArtifactCollection:
+    def test_copy_orchestra_db_preserves_nonempty_capture_when_runtime_db_empty(self, tmp_path, monkeypatch):
+        import eval_harness
+
+        existing = tmp_path / "orchestra.db"
+        empty_source = tmp_path / "empty-source.db"
+
+        for path in (existing, empty_source):
+            con = sqlite3.connect(path)
+            con.execute("create table runs (run_id text)")
+            con.commit()
+            con.close()
+
+        con = sqlite3.connect(existing)
+        con.execute("insert into runs values ('run-a')")
+        con.commit()
+        con.close()
+
+        def fake_copy(_container_path, host_path):
+            host_path.write_bytes(empty_source.read_bytes())
+            return True
+
+        monkeypatch.setattr(eval_harness, "_copy_from_container", fake_copy)
+        warnings: list[object] = []
+
+        assert eval_harness._copy_orchestra_db_preserving_nonempty("/state/orchestra.db", existing, warnings)
+
+        con = sqlite3.connect(existing)
+        try:
+            assert con.execute("select count(*) from runs").fetchone()[0] == 1
+        finally:
+            con.close()
+        assert warnings == ["kept earlier non-empty Orchestra state DB; current runtime DB was empty"]
+
+    def test_orchestra_debug_run_count_parses_top_level_runs(self):
+        import eval_harness
+
+        assert eval_harness._orchestra_debug_run_count("# Orchestra debug session\n\nruns: 3\n") == 3
+        assert eval_harness._orchestra_debug_run_count("# Orchestra debug session\n\nruns: 0\n") == 0
+        assert eval_harness._orchestra_debug_run_count("# no count\n") is None

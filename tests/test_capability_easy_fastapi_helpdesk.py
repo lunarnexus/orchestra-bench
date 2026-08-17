@@ -260,6 +260,23 @@ class TestCapabilityNormalFastapiHelpdeskTask:
         assert result["checks"]["review_present"] is False
         assert result["checks"]["appsec_present"] is False
 
+    def test_non_template_no_blockers_review_is_relevant(self, tmp_path):
+        _copy_tree(_TASK_DIR / "evaluate" / "solved", tmp_path)
+        (tmp_path / "REVIEW.md").write_text(
+            """# REVIEW — FastAPI Helpdesk App
+
+The review covered app.py structure, Pydantic validation, SQLite helpers, GET / HTML behavior, public ticket intake, and the admin routes protected by X-Admin-Token. The implemented status handling, audit log writes, and pagination match the requirements, and no blocking issues were found.
+
+Trade-offs remain: each request opens a SQLite connection, the admin token is hardcoded for this exercise, and production logging would be useful. Those are acceptable for this capability task and should be follow-up hardening rather than functional blockers.
+"""
+        )
+
+        code, result = _run_evaluator(tmp_path)
+
+        assert code == 0
+        assert result["score"] == "pass"
+        assert result["checks"]["review_relevant"] is True
+
     def test_in_memory_ticket_store_fails_persistence_requirement(self, tmp_path):
         _copy_tree(_TASK_DIR / "evaluate" / "solved", tmp_path)
         (tmp_path / "app.py").write_text(_IN_MEMORY_APP)

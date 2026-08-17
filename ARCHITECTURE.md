@@ -235,6 +235,8 @@ When dogfooding a run, verify:
 - `artifacts/pi-sessions.json` contains at least one Pi session id for actual Pi runs
 - `artifacts/orchestra-debug/debug/` contains `orchestra debug` output; `runs: 0` is valid when Orchestra was not used
 - `scripts/05-results` and `scripts/05-results run <run-id>` display the run without counting test junk or invalid no-session runs as ordinary benchmark results
+- `scripts/05-results configs` groups runs by captured model, `/orch on` status, plugins/extensions, and auxiliary skills
+- `scripts/05-results compare --group-by model,orchestra,plugins --per-task` can compare configurations without relying on free-form notes
 
 ### Test hygiene
 Tests and ad hoc checks must not leave fake benchmark history in `results/`. If a test intentionally creates result directories, it must use a temporary results directory or clean up any generated `results/<run-id>-<task-id>/` folders before finishing.

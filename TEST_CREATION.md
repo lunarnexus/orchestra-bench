@@ -396,6 +396,9 @@ Good hidden checks:
 
 Bad hidden checks:
 - arbitrary wording expectations unrelated to correctness
+- exact labels or headings that were not requested, such as `Finding:`, `Risk:`, `Command:`, `Result:`, `Source:`, `Decision:`, `Tradeoff:`, `Threat:`, or `Mitigation:`
+- code-symbol requirements that are not visible in the task and are not necessary for the product behavior
+- scoring weights for evidence details the prompt never asked for, such as changed-file mentions, unless the requirement is surfaced in `Prompt.md`/`PRD.md`
 
 ### 8.4 Don’t overfit to one exact implementation
 Allow multiple valid implementations when behavior is equivalent.
@@ -425,10 +428,65 @@ These should be treated as **secondary evidence**:
 
 They should not become the main source of truth for whether the app works.
 
+### 9.1 Workflow evidence must not become hidden template compliance
+
+If a prompt only asks for “relevant content,” the evaluator must not require a hidden prose template. Do not require exact labels, headings, command formatting, or phrase choices unless those exact requirements are visible in `Prompt.md` or `PRD.md`.
+
+Valid review/security/verification evidence can be written in many styles:
+- A review that finds **no blocking issues** is still relevant when it explains what was reviewed, which requirements were checked, and any residual risks or trade-offs.
+- Verification can be relevant without literal `Command:` / `Result:` labels if it clearly states what was run or checked and what passed.
+- Research can be relevant without `Source:` / `Decision:` / `Tradeoff:` labels if it cites task materials or fixture facts and explains design choices.
+- AppSec can be relevant without `Threat:` / `Mitigation:` labels if it discusses the actual security boundaries, inputs, persistence, auth, or injection/XSS/file risks in the task.
+
+The evaluator may reward clear structure, but it must not fail otherwise-substantive evidence only because the model chose different section names.
+
+### 9.2 What workflow scoring should check
+
+Workflow scoring should be a **junk filter plus coarse task-specific evidence check**, not a writing-format exam.
+
+Good workflow evidence checks:
+- artifact exists when requested
+- enough substantive prose to distinguish evidence from a placeholder
+- mentions task-visible concepts: routes, commands, files, persistence, auth, validation, state transitions, tests, or user workflows
+- for verification, describes real checks, commands, or observed behavior
+- for review/security, discusses requirements, trade-offs, no-blocker findings, risks, or residual concerns
+
+Bad workflow evidence checks:
+- exact hidden headings or labels
+- exact endpoint-template spelling when a natural equivalent is fine
+- exact implementation symbol names unless they are visible or behaviorally required
+- “must mention changed files” scoring unless the prompt explicitly asks for it
+- requiring review/security to find an issue; “no blocking issues found” is valid when substantiated
+
+### 9.3 Anti-padding still matters
+
+Do reject:
+- missing files
+- one-line placeholders
+- keyword lists / token salad
+- generic filler that could apply to any task
+- benchmark-gaming prose such as “these terms are listed here” without real evidence
+- artifacts that name workflow roles but do not connect to the actual app behavior
+
+The goal is to prevent nonsense from getting credit while allowing honest, concise, non-template evidence.
+
+### 9.4 Scoring decisions from the workflow-evidence audit
+
+Lessons from the cap-easy and cap-normal workflow-evidence fixes:
+- Functional behavior remains dominant; workflow evidence changes numeric score, not functional pass/fail.
+- Workflow prompts should ask for “substantive, task-specific evidence; do not use keyword lists or filler” when artifact quality is scored.
+- Hidden label requirements should not appear in evaluators.
+- Hidden changed-file mention scoring should not affect numeric rubrics unless the prompt asks for it; changed-file coverage can remain diagnostic.
+- Required-term coverage should not be all-or-nothing, but the default should not be so loose that one generic anchor passes. Use a meaningful default and override explicitly only when justified.
+- Task-specific evidence terms must come from visible task requirements or direct fixture facts, not solved-reference prose style.
+- Solved references are examples, not hidden contracts.
+- Batch-result rescoring is sufficient when only evaluator scoring changes and old workspaces/artifacts still exist; rerun the benchmark only when implementation behavior or runtime collection changed.
+
 When designing future tasks:
 - require workflow evidence only when it helps explain process quality
 - do not let superficial artifact stuffing dominate scores
 - prefer graded quality/coverage over brittle existence-only checks
+- make every scored workflow requirement either visible in the prompt/PRD or broad enough to be naturally implied by the task
 
 ---
 
@@ -466,6 +524,9 @@ Can use:
 - compactions
 - redundancy / churn
 - whether orchestration helped or merely added overhead
+- presence and usefulness of requested workflow evidence
+
+Process scoring should distinguish useful coordination from ceremony. Five workflow files full of generic text should not beat task-specific artifacts plus working code, and a no-issues review should not be penalized merely because no issue was found.
 
 Do not require each check to belong to exactly one category.
 
@@ -535,6 +596,9 @@ Before merging a new capability task, confirm:
 - [ ] At least one security-sensitive behavior is tested
 - [ ] At least one edge case / failure mode is tested
 - [ ] Hidden checks test invariants, not arbitrary phrasing
+- [ ] Every scored workflow requirement is visible in `Prompt.md`/`PRD.md` or naturally implied by the task
+- [ ] Workflow evidence scoring rejects placeholders/filler without requiring hidden labels or exact prose templates
+- [ ] Review/security evidence can pass when it finds no blocking issues but explains what was checked and why residual risk is acceptable
 - [ ] Multiple valid implementations are possible
 - [ ] The evaluator starts/runs the app or command and measures runtime behavior end-to-end
 - [ ] The task can plausibly benefit from planning/research/review/verify/appsec

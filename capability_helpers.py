@@ -134,16 +134,6 @@ def _score_one_artifact(
         if check_changed_files and changed_files
         else 0.0
     )
-    relevant = (
-        bool(text)
-        and word_count >= min_words
-        and len(substantive_lines) >= min_substantive_lines
-        and len(matched_keywords) >= min_keywords
-        and len(matched_evidence_terms) >= min_evidence_terms
-        and len(matched_required_terms) == len(required_terms)
-        and len(matched_required_patterns) == len(required_patterns)
-        and (not check_changed_files or not changed_files or changed_file_coverage >= min_changed_file_coverage)
-    )
     mentions_changed_files = changed_file_coverage > 0 if check_changed_files else None
 
     quality_components: list[float] = []
@@ -167,6 +157,23 @@ def _score_one_artifact(
     quality = round(
         (sum(quality_components) / len(quality_components)) if quality_components else 0.0,
         6,
+    )
+    required_total = len(required_terms) + len(required_patterns)
+    required_matches = len(matched_required_terms) + len(matched_required_patterns)
+    required_coverage = (required_matches / required_total) if required_total else 1.0
+    min_required_coverage = float(spec.get("min_required_coverage", 0.6) or 0.0)
+    relevance_quality_threshold = float(spec.get("relevance_quality_threshold", 0.6) or 0.0)
+    low_value_filler = _looks_like_low_value_filler(text)
+    relevant = (
+        bool(text)
+        and not low_value_filler
+        and word_count >= min_words
+        and len(substantive_lines) >= min_substantive_lines
+        and len(matched_keywords) >= min_keywords
+        and len(matched_evidence_terms) >= min_evidence_terms
+        and (not required_total or required_coverage >= min_required_coverage)
+        and quality >= relevance_quality_threshold
+        and (not check_changed_files or not changed_files or changed_file_coverage >= min_changed_file_coverage)
     )
 
     score = 0.0
@@ -211,6 +218,10 @@ def _score_one_artifact(
         "missing_required_terms": [term for term in required_terms if term not in matched_required_terms],
         "matched_required_patterns": matched_required_patterns,
         "missing_required_patterns": [pattern for pattern in required_patterns if pattern not in matched_required_patterns],
+        "required_coverage": round(required_coverage, 6),
+        "min_required_coverage": min_required_coverage,
+        "relevance_quality_threshold": relevance_quality_threshold,
+        "low_value_filler": low_value_filler,
         "mentioned_changed_files": mentioned_changed_files,
         "missing_changed_files": [p for p in changed_files if p not in mentioned_changed_files],
         "changed_file_coverage": round(changed_file_coverage, 6),
@@ -261,6 +272,24 @@ def _substantive_lines(text: str) -> list[str]:
         if len(words) >= 6 and has_prose_term and has_punctuation:
             lines.append(line)
     return lines
+
+
+def _looks_like_low_value_filler(text: str) -> bool:
+    """Detect obvious meta-filler that names rubric terms without evidence.
+
+    This intentionally targets phrases used by benchmark-gaming stubs such as
+    "terms are listed here" or "notes are repeated". It should not penalize a
+    normal artifact that merely has a section called "Notes" or says one thing
+    was noted during review.
+    """
+    substantive = _substantive_lines(text)
+    if len(substantive) < 2:
+        return False
+    filler_lines = [
+        line for line in substantive
+        if re.search(r"\b(?:listed|noted|repeated)\s+(?:here|again)\b", line, re.IGNORECASE)
+    ]
+    return len(filler_lines) / len(substantive) >= 0.5
 
 
 def _mentioned_changed_files(text: str, changed_files: list[str]) -> list[str]:

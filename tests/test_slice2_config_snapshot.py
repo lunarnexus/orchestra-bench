@@ -7,6 +7,64 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestSlice2ConfigSnapshot:
+    def test_parse_pi_settings_enabled_plugins_distinguishes_installed_from_enabled(self):
+        from eval_harness import _parse_pi_settings_enabled_plugins
+
+        settings = {
+            "packages": [
+                "http://git.example/pi-lmstudio",
+                {"source": "http://git.example/pi-codegraph", "extensions": ["-index.ts"]},
+            ],
+            "extensions": ["+extensions/orchestra/index.ts", "-extensions/disabled/index.ts"],
+        }
+
+        assert _parse_pi_settings_enabled_plugins(settings) == ["orchestra", "pi-lmstudio"]
+
+    def test_runtime_snapshot_counts_local_extensions_as_enabled_plugins(self, monkeypatch):
+        import subprocess as sp
+        import eval_harness
+
+        def fake_exec(*args, env=None):
+            command = " ".join(args)
+            if "pi list" in command:
+                return sp.CompletedProcess(args, 0, stdout="http://git.example/pi-lmstudio\n", stderr="")
+            if "find /root/.pi/agent/extensions" in command:
+                return sp.CompletedProcess(args, 0, stdout="orchestra\n", stderr="")
+            if "settings.json" in command:
+                return sp.CompletedProcess(args, 0, stdout='{"packages":["http://git.example/pi-lmstudio"]}\n', stderr="")
+            return sp.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(eval_harness, "_docker_ok", lambda: True)
+        monkeypatch.setattr(eval_harness, "_docker_exec", fake_exec)
+
+        snapshot = eval_harness.collect_container_runtime_snapshot()
+
+        assert snapshot["pi_enabled_plugins"] == ["orchestra", "pi-lmstudio"]
+        assert snapshot["pi_enabled_plugins_summary"] == "orchestra,pi-lmstudio"
+
+    def test_runtime_snapshot_respects_disabled_local_extensions(self, monkeypatch):
+        import subprocess as sp
+        import eval_harness
+
+        def fake_exec(*args, env=None):
+            command = " ".join(args)
+            if "pi list" in command:
+                return sp.CompletedProcess(args, 0, stdout="http://git.example/pi-lmstudio\n", stderr="")
+            if "find /root/.pi/agent/extensions" in command:
+                return sp.CompletedProcess(args, 0, stdout="orchestra\n", stderr="")
+            if "settings.json" in command:
+                return sp.CompletedProcess(args, 0, stdout='{"packages":["http://git.example/pi-lmstudio"],"extensions":["-extensions/orchestra/index.ts"]}\n', stderr="")
+            return sp.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(eval_harness, "_docker_ok", lambda: True)
+        monkeypatch.setattr(eval_harness, "_docker_exec", fake_exec)
+
+        snapshot = eval_harness.collect_container_runtime_snapshot()
+
+        assert snapshot["pi_enabled_plugins"] == ["pi-lmstudio"]
+        assert snapshot["pi_enabled_plugins_summary"] == "pi-lmstudio"
+        assert snapshot["pi_extensions_summary"] == "orchestra,pi-lmstudio"
+
     def test_benchmark_local_orchestra_config_files_exist(self):
         config_dir = REPO_ROOT / "config" / "orchestra"
         pi_dir = REPO_ROOT / "config" / "pi"

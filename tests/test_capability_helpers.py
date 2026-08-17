@@ -100,6 +100,69 @@ class TestCapabilityWorkflowEvidenceRelevance:
         assert result["checks"]["review_present"] is False
         assert result["checks"]["appsec_present"] is False
 
+    def test_one_missing_required_pattern_does_not_make_strong_artifact_irrelevant(self, tmp_path):
+        _write(
+            tmp_path / "PLAN.md",
+            "\n".join(
+                [
+                    "# Plan for reports app",
+                    "1. Implement manage.py Django routes for GET /, POST /events, GET /reports/summary, and GET /reports/history.",
+                    "2. Add Event and ReportRun persistence backed by SQLite plus tests/test_reports.py coverage.",
+                    "Run focused tests and verify CSV history behavior.",
+                ]
+            ),
+        )
+
+        result = evaluate_workflow_evidence(
+            tmp_path,
+            artifact_specs={
+                "plan": {
+                    "min_words": 20,
+                    "min_substantive_lines": 2,
+                    "evidence_terms": ["manage.py", "tests/test_reports.py", "django", "sqlite", "reports/history", "csv", "homepage"],
+                    "min_evidence_terms": 2,
+                    "required_terms": ["GET /", "POST /events", "GET /reports/summary", "GET /reports/history", "manage.py", "tests/test_reports.py", "Event"],
+                    "required_patterns": [
+                        r"(?mi)^\s*(?:[-*]\s*)?(?:1\.\s|step\s*1\b|step:\s)",
+                        r"(?mi)^\s*(?:[-*]\s*)?(?:2\.\s|step\s*2\b)",
+                        r"(?i)\b(?:ReportRun|ReportHistory)\b",
+                        r"(?i)\b(?:ensure_schema|_ensure_tables)\b",
+                    ],
+                }
+            },
+        )
+
+        assert result["checks"]["plan_relevant"] is True
+        assert result["details"]["plan"]["missing_required_patterns"] == [r"(?i)\b(?:ensure_schema|_ensure_tables)\b"]
+
+    def test_nonsense_padding_with_no_task_specific_requirement_still_fails(self, tmp_path):
+        _write(
+            tmp_path / "PLAN.md",
+            "\n".join(
+                [
+                    "Plan steps tests files app.py sqlite triage audit pagination.",
+                    "More generic process words with enough length but no required endpoint or command evidence.",
+                    "Another substantive-looking line that should not satisfy task relevance by itself.",
+                ]
+            ),
+        )
+
+        result = evaluate_workflow_evidence(
+            tmp_path,
+            artifact_specs={
+                "plan": {
+                    "min_words": 20,
+                    "min_substantive_lines": 2,
+                    "evidence_terms": ["app.py", "sqlite", "triage"],
+                    "min_evidence_terms": 2,
+                    "required_terms": ["POST /tickets", "GET /admin/tickets", "pytest -q tests/test_api.py"],
+                    "required_patterns": [r"(?mi)^\s*(?:[-*]\s*)?(?:1\.\s|step\s*1\b|step:\s)"],
+                }
+            },
+        )
+
+        assert result["checks"]["plan_relevant"] is False
+
 
 class TestCapabilityWorkflowEvidenceConfiguration:
     def test_supports_task_local_artifact_names_and_keywords(self, tmp_path):

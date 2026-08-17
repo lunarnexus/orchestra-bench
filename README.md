@@ -148,7 +148,7 @@ Lists tasks with `--list`, grouped by suite and role. Use `config` to open Pi's 
 
 ### `03-collect-results [task-id]`
 
-With no task id, grades every prepared/ungraded run under `results/` and captures run artifacts. Already-graded runs are skipped so repeated collection is safe. With a task id, grades the latest prepared run for that task. Use `--force` to re-grade, `--splits` for dev/holdout summary, or `--compare` for provenance grouping (role/model/catalog hash/path/orchestra). Use `scripts/05-results` explicitly for dashboards and reporting.
+With no task id, grades every prepared/ungraded run under `results/` and captures run artifacts. Already-graded runs are skipped so repeated collection is safe. With a task id, grades the latest prepared run for that task. Use `--force` to re-grade or `--splits` for dev/holdout summary. Use `scripts/05-results` explicitly for dashboards, filtering, and comparison reporting.
 
 For each graded run, the result folder contains:
 - `result.json` — score, checks, metadata, token totals, Pi session ids
@@ -165,26 +165,51 @@ Runs every task in a suite through `scripts/02-open-pi <task-id> --auto`, grades
 
 ### `05-results [view]`
 
-Read-only historical reporting. Default `dashboard` shows overview, recent runs, task breakdown, and token summary. Other views:
-- `scripts/05-results runs --limit 50`
-- `scripts/05-results run <run-id-or-run-folder>`
-- `scripts/05-results tasks`
-- `scripts/05-results timeline [--task <task-id>]`
-- `scripts/05-results tokens`
-- `scripts/05-results timing`
+Read-only historical reporting. Default `dashboard` shows overview, per-suite breakdown, per-test breakdown, token/time metrics, and orchestration behavior summaries. Common views:
+
+- `scripts/05-results runs --limit 50` — recent graded runs
+- `scripts/05-results run <run-id-or-run-folder>` — one run detail
+- `scripts/05-results debug <run-id-or-run-folder>` — one run detail plus captured Orchestra debug markdown and recent Pi session trace events
+- `scripts/05-results tasks` — per-test aggregate breakdown
+- `scripts/05-results timeline [--task <task-id>]` — run history
+- `scripts/05-results tokens` — token usage
+- `scripts/05-results timing` — elapsed time
+- `scripts/05-results configs` — discovered result configurations, assigned ids like `C01`
+- `scripts/05-results compare --group-by model,orchestra,plugins,skills` — compare grouped configurations
+
+Filters are composable and mostly substring/list based:
+
+```bash
+scripts/05-results runs --suite smoke --model 35b
+scripts/05-results runs --plugins pi-codegraph
+scripts/05-results runs --plugins pi-codegraph,!orchestra
+scripts/05-results runs --skills research-first,!build-tdd
+scripts/05-results runs --no-orchestra
+scripts/05-results compare --suite smoke --group-by model,orchestra,plugins --per-task
+scripts/05-results compare --configs C01,C02 --per-task
+```
+
+Notes remain available via `--notes <substring>`, but they are free-form operator notes, not the primary way to identify configuration. Prefer metadata filters/config ids for comparisons.
+
+Filter semantics:
+- `--model <text>` matches the actual parent run model by substring, so long model names can be shortened. It does not match other role-specific model entries from the catalog.
+- `--plugins <list>` filters Pi plugins/extensions/packages captured in run metadata. Separate by comma or space. Prefix a term with `!` or `-` to exclude it, e.g. `--plugins pi-codegraph,!orchestra`.
+- `--skills <list>` filters auxiliary, non-Orchestra skills. Prefix with `!` or `-` to exclude.
+- `--no-orchestra` filters runs with no actual Orchestra dispatch/activity. Use `--group-by orch_on,orchestra,plugins` to distinguish `/orch on` intent from opportunistic tool use when the plugin is enabled.
 
 ### Run metadata capture
 
 Every run persists:
 - **role** — parent Pi role/model selector, normally `builder`
 - **target_role** — role-focused task target when applicable; the parent session should dispatch this role through Orchestra when enabled
-- **model** — catalog-derived model used for the run
-- **catalog_path** / **catalog_sha256** — source catalog path and snapshot hash
-- **orchestra** — optional metadata field; use Pi's `/config` inside the session for runtime toggles
-- **extra_skills** — list of additional skills loaded for this run
-- **notes** — free-form operator notes about config, catalog version, etc.
+- **model** / **role_models_summary** — catalog-derived parent model and role-model summary; role models may differ
+- **catalog_path** / **catalog_sha256** — source catalog path and snapshot hash, kept for provenance but not normally needed as a report filter
+- **orchestra** — whether the run used the automatic `/orch on` preflight; this is harness intent, not proof of actual dispatch
+- **pi_enabled_plugins** / **pi_enabled_plugins_summary** — actually enabled Pi plugins, used by `05-results --plugins`; installed extensions/packages are captured separately for provenance
+- **extra_skills** / **aux_skills_summary** — additional non-Orchestra skills, used by `05-results --skills`
+- **notes** — free-form operator notes; useful for human labels, but config comparison should prefer metadata filters/config ids
 
-These fields are stored in `.bench_run.json` when a task run is opened and merged into `result.run_meta` during evaluation, so results can be compared across runs later.
+These fields are stored in `.bench_run.json` when a task run is opened and merged into `result.run_meta` during evaluation, so results can be compared across runs later without depending on brittle notes strings.
 
 ## Testing changes
 

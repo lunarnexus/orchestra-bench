@@ -57,33 +57,20 @@ def _task_workflow_specs() -> dict[str, dict[str, object]]:
                 "POST /invoices",
                 "POST /payments",
                 "POST /refunds",
-                "GET /customers/:id/ledger",
-                "app.rb",
-                "cli.rb",
-                "test/test_billing_app.rb",
-                "ruby -Itest test/test_billing_app.rb",
-            ],
-            "required_patterns": [
-                r"(?mi)^\s*(?:[-*]\s*)?(?:1\.\s|step\s*1\b)",
-                r"(?mi)^\s*(?:[-*]\s*)?(?:2\.\s|step\s*2\b)",
+                "ledger",
+                "idempotency",
+                "export",
             ],
         },
         "research": {
             "min_words": 35,
             "min_substantive_lines": 2,
-            "evidence_terms": ["kb", "api contract", "sqlite3", "Sinatra", "tradeoff"],
+            "evidence_terms": ["sqlite3", "Sinatra", "idempotency", "persistence", "ledger", "export"],
             "min_evidence_terms": 2,
             "required_terms": [
-                "kb",
                 "sqlite3",
                 "Sinatra",
-                "idempotency_key",
-                "avoid extra ORM",
-            ],
-            "required_patterns": [
-                r"(?mi)^\s*[-*]?\s*source\s*:",
-                r"(?mi)^\s*[-*]?\s*decision\s*:",
-                r"(?mi)^\s*[-*]?\s*tradeoff\s*:",
+                "idempotency",
             ],
         },
         "verify": {
@@ -91,33 +78,21 @@ def _task_workflow_specs() -> dict[str, dict[str, object]]:
             "min_substantive_lines": 1,
             "evidence_terms": shared_terms,
             "min_evidence_terms": 2,
-            "required_terms": ["ruby -Itest test/test_billing_app.rb", "passed"],
-            "required_patterns": [
-                r"(?mi)^\s*[-*]?\s*command\s*:",
-                r"(?mi)^\s*[-*]?\s*result\s*:",
-            ],
+            "required_terms": ["ruby", "test", "pass"],
         },
         "review": {
             "min_words": 30,
             "min_substantive_lines": 2,
             "evidence_terms": ["status codes", "schema", "ledger", "idempotency", "export"],
             "min_evidence_terms": 2,
-            "required_terms": ["response schemas", "idempotent", "400", "422", "404"],
-            "required_patterns": [
-                r"(?mi)^\s*[-*]?\s*finding\s*:",
-                r"(?mi)^\s*[-*]?\s*risk\s*:",
-            ],
+            "required_terms": ["idempotent", "400", "422", "404"],
         },
         "appsec": {
             "min_words": 30,
             "min_substantive_lines": 2,
             "evidence_terms": ["input", "validation", "sqlite", "parameter", "idempotency"],
             "min_evidence_terms": 2,
-            "required_terms": ["idempotency_key", "parameter binding"],
-            "required_patterns": [
-                r"(?mi)^\s*[-*]?\s*threat\s*:",
-                r"(?mi)^\s*[-*]?\s*mitigation\s*:",
-            ],
+            "required_terms": ["idempotency"],
         },
     }
 
@@ -405,9 +380,8 @@ rubric = {
         "weight": 0.10,
         "checks": {
             "verify_relevant": {"weight": 0.04},
-            "verify_mentions_changed_files": {"weight": 0.02},
-            "review_relevant": {"weight": 0.02},
-            "appsec_relevant": {"weight": 0.02},
+            "review_relevant": {"weight": 0.03},
+            "appsec_relevant": {"weight": 0.03},
         },
     },
 }

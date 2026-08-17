@@ -10,7 +10,7 @@ Requirements:
 - mention `X-Admin-Token` and public sanitization / security notes on the homepage or KB-aligned UX copy
 - support public submission, admin approval/rejection, public visibility rules, audit history, pagination/filtering, and attachment handling
 - block path traversal and keep public rendering XSS-safe
-- create `PLAN.md`, `RESEARCH.md`, `VERIFY.md`, `REVIEW.md`, and `APPSEC.md` with relevant content
+- create `PLAN.md`, `RESEARCH.md`, `VERIFY.md`, `REVIEW.md`, and `APPSEC.md` with substantive, task-specific evidence; do not use keyword lists or filler
 - keep the workspace runnable without evaluator-only files
 
 ## Operational cleanup requirement

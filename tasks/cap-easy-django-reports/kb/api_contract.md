@@ -64,6 +64,10 @@ JSON shape:
 }
 ```
 
+Validation notes:
+- `start_date` and `end_date` must be ISO dates when present.
+- If both are present and `start_date > end_date`, respond with HTTP `400` and do not persist a report-history row.
+
 CSV header:
 ```text
 date,category,sales_total,refund_total,net_total,event_count

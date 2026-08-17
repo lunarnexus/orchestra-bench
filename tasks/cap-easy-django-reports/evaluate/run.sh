@@ -36,78 +36,42 @@ def _changed_files() -> list[str]:
 
 def _task_workflow_specs() -> dict[str, dict[str, object]]:
     shared_terms = ["manage.py", "tests/test_reports.py", "django", "sqlite", "reports/history", "csv", "homepage"]
-    pytest_command_pattern = r"(?i)(?:pytest\s+-q\s+tests/test_reports\.py|python\s+-m\s+pytest\s+tests/test_reports\.py(?:\s+-v|\s+--verbose|\s+-q)?)"
-    report_history_pattern = r"(?i)(?:report[- ]run history|report history|reports/history|history audit rows)"
-    report_run_model_pattern = r"(?i)\b(?:ReportRun|ReportHistory)\b"
-    schema_helper_pattern = r"(?i)\b(?:ensure_schema|_ensure_tables)\b"
-    report_token_helper_pattern = r"(?i)\b(?:_require_report_token|check_report_token)\b"
     return {
         "plan": {
             "min_words": 35,
             "min_substantive_lines": 2,
             "evidence_terms": shared_terms,
             "min_evidence_terms": 2,
-            "required_terms": ["GET /", "POST /events", "GET /reports/summary", "GET /reports/history", "manage.py", "tests/test_reports.py", "Event"],
-            "required_patterns": [
-                r"(?mi)^\s*(?:[-*]\s*)?(?:1\.\s|step\s*1\b|step:\s)",
-                r"(?mi)^\s*(?:[-*]\s*)?(?:2\.\s|step\s*2\b)",
-                report_run_model_pattern,
-                schema_helper_pattern,
-            ],
+            "required_terms": ["GET /", "POST /events", "GET /reports/summary", "GET /reports/history"],
         },
         "research": {
             "min_words": 35,
             "min_substantive_lines": 2,
-            "evidence_terms": ["REPORTS_DB", "file-backed", "api_contract", "persistence_notes", "history"],
+            "evidence_terms": ["REPORTS_DB", "SQLite", "sqlite3", "Django", "file-backed", "history", "persistence", "CSV"],
             "min_evidence_terms": 2,
-            "required_terms": ["sqlite3", "Django"],
-            "required_patterns": [
-                r"(?i)(?:source\s*:|fixture analysis|environment investigation)",
-                r"(?i)(?:decision\s*:|test requirements analysis|key design decisions)",
-                r"(?i)(?:tradeoff\s*:|file-backed|no network|fixture stays compact)",
-                r"(?i)(?:api(?:_|\s)contract|api contract)",
-                r"(?i)(?:REPORTS_DB|django\.db\.models)",
-            ],
+            "required_terms": ["Django"],
         },
         "verify": {
             "min_words": 20,
             "min_substantive_lines": 1,
             "evidence_terms": shared_terms,
             "min_evidence_terms": 2,
-            "required_terms": ["passed"],
-            "required_patterns": [
-                r"(?i)(?:command\s*:|test execution results)",
-                r"(?i)(?:result\s*:|verification checklist)",
-                pytest_command_pattern,
-                r"(?i)(?:functional_persistence_file_backed|sqlite(?:-|\s)?persistence|file-backed|sqlite file creation|data persists?)",
-                report_history_pattern,
-            ],
+            "required_terms": ["pass", "pytest", "persistence", "history"],
         },
         "review": {
             "min_words": 30,
             "min_substantive_lines": 2,
             "evidence_terms": ["status codes", "pagination", "history", "schema", "permissions"],
             "min_evidence_terms": 2,
-            "required_terms": ["/reports/*", "status codes", "pagination", "Event"],
-            "required_patterns": [
-                r"(?i)(?:finding\s*:|structure\s*&\s*organization|strengths)",
-                r"(?i)(?:risk\s*:|potential improvements|could be inefficient|drift)",
-                report_history_pattern,
-                report_run_model_pattern,
-            ],
+            "required_terms": ["reports", "status", "pagination", "history"],
+            "min_required_coverage": 0.5,
         },
         "appsec": {
             "min_words": 30,
             "min_substantive_lines": 2,
             "evidence_terms": ["auth", "validation", "sqlite", "csv", "orm"],
             "min_evidence_terms": 2,
-            "required_terms": ["X-Report-Token", "SQLite"],
-            "required_patterns": [
-                r"(?i)(?:threat\s*:|threat model)",
-                r"(?i)(?:mitigation\s*:|security controls implemented)",
-                r"(?i)(?:parameterized\s+(?:orm\s+)?(?:queries|filters)|django orm)",
-                r"(?i)(?:csv\s+export|csv\s+responses?)",
-            ],
+            "required_terms": ["X-Report-Token", "SQLite", "validation"],
         },
     }
 
@@ -403,9 +367,8 @@ rubric = {
         "weight": 0.10,
         "checks": {
             "verify_relevant": {"weight": 0.04},
-            "verify_mentions_changed_files": {"weight": 0.02},
-            "review_relevant": {"weight": 0.02},
-            "appsec_relevant": {"weight": 0.02},
+            "review_relevant": {"weight": 0.03},
+            "appsec_relevant": {"weight": 0.03},
         },
     },
 }

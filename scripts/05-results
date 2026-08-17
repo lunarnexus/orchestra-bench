@@ -12,23 +12,38 @@ Views:
   dashboard        Default: overview, per-suite breakdown, per-test breakdown
   runs             List historical graded runs
   run <id|dir>     Show one run in detail
+  debug <id|dir>   Show one run detail plus captured debug/session traces
   tasks            Task pass/fail breakdown
   timeline         Results over time
   tokens           Token usage across runs/tasks
   timing           Elapsed time across tasks/roles
   notes            List distinct run notes (sort/uniq style)
-  delete           Delete graded result directories matching filters (requires --notes; dry-run unless --yes)
-  set-notes        Rewrite notes for graded results matching filters (requires --notes and --set-notes; dry-run unless --yes)
+  configs          List discovered result configurations
+  compare          Compare grouped configurations
+  delete           Delete graded result directories matching filters (requires at least one filter; dry-run unless --yes)
+  set-notes        Rewrite notes for graded results matching filters (requires at least one filter and --set-notes; dry-run unless --yes)
 
 Options:
   --task <id>         Filter to one task
   --suite <name>      Filter to one suite/batch/family
   --notes <text>      Filter runs by notes substring match
+  --model <text>      Filter by model substring/pattern text
+  --plugins <list>    Filter by enabled run plugin substrings; negate with !name, -name, or not:name
+  --without-plugins <list>
+                     Exclude enabled run plugin substrings without shell-sensitive ! syntax
+  --skills <list>     Filter by auxiliary skill name substrings; negate with !name, -name, or not:name
+  --without-skills <list>
+                     Exclude auxiliary skill substrings without shell-sensitive ! syntax
+  --orchestra         Filter to runs with actual Orchestra dispatch/activity
+  --no-orchestra      Filter to runs with no actual Orchestra dispatch/activity
   --detail <1|2|3>    Dashboard detail level (default: 3)
   --rubric [names]    Show only rubric breakdowns; optional comma-separated names
   --checks [names]    Show only check breakdowns; optional comma-separated names
   --behaviors [names] Show only behavior breakdowns; optional comma-separated names
   --limit <n>         Limit rows for runs/timeline (default: 20)
+  --group-by <list>   Compare grouping fields: model,plugins,orchestra,skills,suite,task
+  --configs <ids>     Compare only config ids from the configs view, e.g. C01,C02
+  --per-task          In compare view, also show per-task rows
   --set-notes <text>  New notes text for the set-notes view
   --yes               Apply delete/set-notes changes (default is dry-run)
 
@@ -41,8 +56,8 @@ Examples:
   scripts/05-results timeline --task smoke-dependent-setup-chain
   scripts/05-results tokens
   scripts/05-results timing
-  scripts/05-results delete --notes "Batch1"       # dry-run preview
-  scripts/05-results delete --notes "Batch1" --yes # delete matched run dirs
+  scripts/05-results delete --model "3.8-27b"       # dry-run preview
+  scripts/05-results delete --model "3.8-27b" --yes # delete matched run dirs
   scripts/05-results set-notes --notes "Batch1" --set-notes "Batch1 qwen3.6-35b"       # dry-run
   scripts/05-results set-notes --notes "Batch1" --set-notes "Batch1 qwen3.6-35b" --yes # rewrite notes
 EOF
@@ -52,7 +67,7 @@ view="dashboard"
 if [ $# -gt 0 ]; then
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    dashboard|runs|run|tasks|timeline|tokens|timing|notes|delete|set-notes) view="$1"; shift ;;
+    dashboard|runs|run|debug|tasks|timeline|tokens|timing|notes|configs|compare|delete|set-notes) view="$1"; shift ;;
   esac
 fi
 
@@ -60,6 +75,14 @@ run_query=""
 task_filter=""
 suite_filter=""
 notes_filter=""
+model_filter=""
+plugins_filter=""
+skills_filter=""
+orchestra_filter="false"
+no_orchestra_filter="false"
+group_by="model,orchestra,plugins,skills"
+configs_filter=""
+per_task="false"
 detail_level="3"
 rubric_filter=""
 checks_filter=""
@@ -68,7 +91,7 @@ limit="20"
 yes_delete="false"
 new_notes=""
 
-if [ "$view" = "run" ]; then
+if [ "$view" = "run" ] || [ "$view" = "debug" ]; then
   run_query="${1:-}"
   [ -n "$run_query" ] || { usage; exit 1; }
   shift || true
@@ -79,6 +102,16 @@ while [ $# -gt 0 ]; do
     --task) task_filter="$2"; shift 2 ;;
     --suite) suite_filter="$2"; shift 2 ;;
     --notes) notes_filter="$2"; shift 2 ;;
+    --model) model_filter="$2"; shift 2 ;;
+    --plugins) plugins_filter="$2"; shift 2 ;;
+    --without-plugins) plugins_filter="${plugins_filter:+$plugins_filter }not:$2"; shift 2 ;;
+    --skills) skills_filter="$2"; shift 2 ;;
+    --without-skills) skills_filter="${skills_filter:+$skills_filter }not:$2"; shift 2 ;;
+    --orchestra) orchestra_filter="true"; shift ;;
+    --no-orchestra) no_orchestra_filter="true"; shift ;;
+    --group-by) group_by="$2"; shift 2 ;;
+    --configs) configs_filter="$2"; shift 2 ;;
+    --per-task) per_task="true"; shift ;;
     --detail) detail_level="$2"; shift 2 ;;
     --rubric)
       if [ $# -gt 1 ] && [[ "$2" != --* ]]; then rubric_filter="$2"; shift 2
@@ -100,7 +133,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_filter" "$detail_level" "$rubric_filter" "$checks_filter" "$behaviors_filter" "$limit" "$yes_delete" "$new_notes" <<'PY'
+python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_filter" "$model_filter" "$plugins_filter" "$skills_filter" "$orchestra_filter" "$no_orchestra_filter" "$group_by" "$configs_filter" "$per_task" "$detail_level" "$rubric_filter" "$checks_filter" "$behaviors_filter" "$limit" "$yes_delete" "$new_notes" <<'PY'
 from __future__ import annotations
 
 import json
@@ -108,6 +141,7 @@ import os
 import shutil
 import statistics
 import sys
+import textwrap
 from collections import defaultdict
 from pathlib import Path
 
@@ -116,7 +150,7 @@ ANSI = {
     "green": "\033[32m",
     "reset": "\033[0m",
 }
-COLOR_ENABLED = sys.stdout.isatty() and not bool(os.environ.get("NO_COLOR"))
+COLOR_ENABLED = (sys.stdout.isatty() or bool(os.environ.get("FORCE_COLOR"))) and not bool(os.environ.get("NO_COLOR"))
 
 root = Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(root))
@@ -128,21 +162,33 @@ run_query = sys.argv[3]
 task_filter = sys.argv[4]
 suite_filter = sys.argv[5].strip().lower()
 notes_filter = sys.argv[6].strip().lower()
+model_filter = sys.argv[7].strip().lower()
+plugins_filter = sys.argv[8].strip()
+skills_filter = sys.argv[9].strip()
+orchestra_filter = sys.argv[10].strip().lower() == "true"
+no_orchestra_filter = sys.argv[11].strip().lower() == "true"
+group_by_raw = sys.argv[12].strip()
+configs_filter = sys.argv[13].strip()
+per_task = sys.argv[14].strip().lower() == "true"
 try:
-    detail_level = int(sys.argv[7])
+    detail_level = int(sys.argv[15])
 except Exception:
     detail_level = 3
 if detail_level not in (1, 2, 3):
     detail_level = 3
-rubric_filter = sys.argv[8].strip()
-checks_filter = sys.argv[9].strip()
-behaviors_filter = sys.argv[10].strip()
+rubric_filter = sys.argv[16].strip()
+checks_filter = sys.argv[17].strip()
+behaviors_filter = sys.argv[18].strip()
 try:
-    limit = int(sys.argv[11])
+    limit = int(sys.argv[19])
 except Exception:
     limit = 20
-yes_delete = sys.argv[12].strip().lower() == "true"
-new_notes = sys.argv[13]
+# Debug traces should be complete by default. Use --limit N to tail the raw Pi
+# fallback trace when a bounded view is explicitly desired.
+if view == "debug" and limit == 20:
+    limit = 0
+yes_delete = sys.argv[20].strip().lower() == "true"
+new_notes = sys.argv[21]
 
 results_dir = root / "results"
 tasks_dir = root / "tasks"
@@ -156,6 +202,139 @@ for y in tasks_dir.glob("*/task.yaml"):
             task_id = s.split(":", 1)[1].strip().strip('"')
             break
     current_tasks.add(task_id)
+
+
+def _split_filter_terms(raw):
+    terms = []
+    for chunk in str(raw or "").replace(",", " ").split():
+        term = chunk.strip()
+        if term:
+            terms.append(term)
+    return terms
+
+
+def _split_positive_negative(raw):
+    include = []
+    exclude = []
+    for term in _split_filter_terms(raw):
+        lower = term.lower()
+        if lower.startswith("not:") and len(term) > 4:
+            exclude.append(lower[4:])
+        elif term.startswith("!") and len(term) > 1:
+            exclude.append(term[1:].lower())
+        elif term.startswith("-") and len(term) > 1:
+            exclude.append(term[1:].lower())
+        else:
+            include.append(lower)
+    return include, exclude
+
+
+def _normalize_filter_text(value):
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _contains_term(values, term):
+    term = str(term or "").lower()
+    if not term:
+        return True
+    value_texts = [str(value or "").lower() for value in values]
+    combined = ",".join(value_texts)
+    if term in combined or any(term in value for value in value_texts):
+        return True
+    normalized_term = _normalize_filter_text(term)
+    normalized_values = [_normalize_filter_text(value) for value in value_texts]
+    normalized_combined = _normalize_filter_text(combined)
+    return bool(normalized_term) and (
+        normalized_term in normalized_combined
+        or any(normalized_term in value for value in normalized_values)
+    )
+
+
+def _model_text(meta):
+    return str(meta.get("model", "") or "")
+
+
+def _skill_values(meta):
+    values = []
+    raw = meta.get("extra_skills")
+    if isinstance(raw, list):
+        values.extend(str(v).strip() for v in raw if str(v).strip())
+    for key in ("aux_skill_names",):
+        raw = meta.get(key)
+        if isinstance(raw, list):
+            values.extend(str(v).strip() for v in raw if str(v).strip())
+    summary = str(meta.get("aux_skills_summary", "") or "")
+    if summary and summary != "none":
+        values.extend(part.strip() for part in summary.split(",") if part.strip())
+    return sorted(set(values))
+
+
+def _plugin_values(meta):
+    values = []
+    raw = meta.get("pi_enabled_plugins")
+    if isinstance(raw, list):
+        values.extend(str(v).strip() for v in raw if str(v).strip())
+    summary = str(meta.get("pi_enabled_plugins_summary", "") or "")
+    if summary and summary != "none":
+        values.extend(part.strip() for part in summary.split(",") if part.strip())
+
+    # Backward-compatible fallback for older result JSONs that predate enabled
+    # plugin capture. This is less precise: it means installed/loaded extension.
+    if not values:
+        raw = meta.get("pi_extensions")
+        if isinstance(raw, list):
+            values.extend(str(v).strip() for v in raw if str(v).strip())
+        summary = str(meta.get("pi_extensions_summary", "") or "")
+        if summary and summary != "none":
+            values.extend(part.strip() for part in summary.split(",") if part.strip())
+    return sorted(set(values))
+
+
+def _list_filter_matches(values, raw):
+    include, exclude = _split_positive_negative(raw)
+    if include and not all(_contains_term(values, term) for term in include):
+        return False
+    if exclude and any(_contains_term(values, term) for term in exclude):
+        return False
+    return True
+
+
+def _plugins_filter_excludes_orchestra():
+    _include, exclude = _split_positive_negative(plugins_filter)
+    return any(_contains_term(["orchestra"], term) for term in exclude)
+
+
+def _orchestra_used(r):
+    checks = r.get("orchestration_checks") or {}
+    dispatch_count = checks.get("dispatch_count")
+    if isinstance(dispatch_count, (int, float)) and dispatch_count > 0:
+        return True
+    if checks.get("no_orchestration") is False:
+        return True
+    if checks.get("no_orchestration") is True:
+        return False
+    # Older results may not have orchestration_checks; fall back to harness intent.
+    meta = r.get("run_meta") or {}
+    return meta.get("orchestra") is True
+
+
+def _orchestra_activity_label(r):
+    return "used" if _orchestra_used(r) else "none"
+
+
+def meta_matches_filters(r):
+    meta = r.get("run_meta") or {}
+    if model_filter and model_filter not in _model_text(meta).lower():
+        return False
+    if orchestra_filter and not _orchestra_used(r):
+        return False
+    if no_orchestra_filter and _orchestra_used(r):
+        return False
+    if plugins_filter and not _list_filter_matches(_plugin_values(meta), plugins_filter):
+        return False
+    if skills_filter and not _list_filter_matches(_skill_values(meta), skills_filter):
+        return False
+    return True
 
 
 def prepared_only_runs():
@@ -178,6 +357,8 @@ def prepared_only_runs():
                 continue
             notes = str(d.get("notes", "") or "")
             if notes_filter and notes_filter not in notes.lower():
+                continue
+            if not meta_matches_filters({"run_meta": d, "task_meta": {"batch": suite}}):
                 continue
             d["_dir"] = str(p.parent.relative_to(root))
             out.append(d)
@@ -203,6 +384,8 @@ def load_results():
             continue
         notes = str(((d.get("run_meta") or {}).get("notes", "")) or "")
         if notes_filter and notes_filter not in notes.lower():
+            continue
+        if not meta_matches_filters(d):
             continue
         d["_dir"] = str(p.parent.relative_to(root))
         d["_path"] = str(p.relative_to(root))
@@ -231,6 +414,12 @@ def token_parts(r):
     }
 
 
+def main_context_input(r):
+    t = r.get("tokens") or {}
+    v = t.get("main_session_context_input_tokens")
+    return int(v) if isinstance(v, (int, float)) else 0
+
+
 def elapsed(r):
     v = r.get("elapsed_seconds")
     return float(v) if isinstance(v, (int, float)) else 0.0
@@ -255,6 +444,14 @@ def colorize(text, color):
 
 def color_pass_fail(text, passed):
     return colorize(text, "green" if passed else "red")
+
+
+def color_bool_value(value):
+    if value is True:
+        return colorize("True", "green")
+    if value is False:
+        return colorize("False", "red")
+    return str(value)
 
 
 def color_for_rate(text, numerator, denominator):
@@ -352,18 +549,6 @@ def numeric_scores(rows):
     vals = []
     for r in rows:
         v = r.get("score_numeric")
-        if isinstance(v, (int, float)):
-            vals.append(float(v))
-    return vals
-
-
-def category_score_values(rows, name):
-    vals = []
-    for r in rows:
-        cats = r.get("category_scores") or {}
-        if not isinstance(cats, dict):
-            continue
-        v = cats.get(name)
         if isinstance(v, (int, float)):
             vals.append(float(v))
     return vals
@@ -527,16 +712,6 @@ def print_score_breakdown(rows, indent="  "):
         pct = (avg_score / avg_max * 100.0) if avg_max else 0.0
         print(f"{indent}rubric       : avg={avg_score:.4f}/{avg_max:.4f} ({pct:.0f}%) n={len(rubric_totals)}")
 
-    category_blocks = []
-    for name in ("intelligence", "speed", "efficiency", "process"):
-        vals = category_score_values(rows, name)
-        if vals:
-            category_blocks.append((name, statistics.mean(vals), statistics.median(vals), max(vals), min(vals), len(vals)))
-    if category_blocks and detail_level >= 2:
-        print(f"{indent}categories:")
-        for name, avg_v, med_v, high_v, low_v, count in category_blocks:
-            print(f"{indent}  - {name}: avg={avg_v:.4f} median={med_v:.4f} high={high_v:.4f} low={low_v:.4f} n={count}")
-
     bool_checks = aggregate_bool_checks(rows) if check_names is None else [item for item in aggregate_bool_checks(rows) if _name_selected(item[0], check_names)]
     if check_names is not None and bool_checks:
         print(f"{indent}checks:")
@@ -597,6 +772,8 @@ def print_section_metrics(rows, indent=""):
         print(f"{indent}pass rate   : n/a")
     toks = [token_total(r) for r in rows if token_total(r)]
     print_metric_line(f"{indent}tokens", toks, integer=True)
+    context_tokens = [main_context_input(r) for r in rows if main_context_input(r)]
+    print_metric_line(f"{indent}main_ctx", context_tokens, integer=True)
     times = [elapsed(r) for r in rows if elapsed(r)]
     print_metric_line(f"{indent}elapsed", times, formatter=fmt_seconds)
     if detail_level >= 2 or section_only_mode:
@@ -665,6 +842,31 @@ def render_extensions(meta):
     return ",".join(names) if names else "(none)"
 
 
+def render_role_models_compact(meta):
+    raw = meta.get("role_models")
+    pairs = []
+    if isinstance(raw, dict):
+        pairs = [(str(role).strip(), str(model).strip()) for role, model in raw.items() if str(role).strip() and str(model).strip()]
+    if not pairs:
+        summary = str(meta.get("role_models_summary", "") or "").strip()
+        for part in [p.strip() for p in summary.split(",") if p.strip() and "=" in p]:
+            role, model = part.split("=", 1)
+            role = role.strip()
+            model = model.strip()
+            if role and model:
+                pairs.append((role, model))
+    if not pairs:
+        return ""
+    grouped = defaultdict(list)
+    for role, model in pairs:
+        grouped[model.replace("lmstudio/", "")].append(role)
+    chunks = []
+    for model in sorted(grouped, key=lambda m: (-len(grouped[m]), m)):
+        roles = ",".join(sorted(grouped[model]))
+        chunks.append(f"{roles}={model}")
+    return "; ".join(chunks)
+
+
 def unique_command_args(rows):
     values = []
     seen = set()
@@ -687,6 +889,16 @@ def print_overview(rows):
         print(f"suite filter: {suite_filter}")
     if notes_filter:
         print(f"notes filter: {notes_filter}")
+    if model_filter:
+        print(f"model filter: {model_filter}")
+    if plugins_filter:
+        print(f"plugins     : {plugins_filter}")
+    if skills_filter:
+        print(f"skills filt : {skills_filter}")
+    if orchestra_filter:
+        print("orchestra   : used")
+    if no_orchestra_filter:
+        print("orchestra   : not used")
     print(f"detail level: {detail_level}")
     if rubric_names is not None:
         print(f"rubric view : {'all' if rubric_names == [] else ', '.join(rubric_names)}")
@@ -695,6 +907,8 @@ def print_overview(rows):
     if behavior_names is not None:
         print(f"behaviors   : {'all' if behavior_names == [] else ', '.join(behavior_names)}")
     print(f"graded runs : {len(rows)}")
+    if not rows and _plugins_filter_excludes_orchestra() and not no_orchestra_filter:
+        print("hint        : --plugins -orchestra excludes runs with the Orchestra plugin enabled; use --no-orchestra to see only /orch-off runs")
     arg_vals = unique_command_args(rows)
     ext_vals = []
     seen_exts = set()
@@ -714,7 +928,15 @@ def print_overview(rows):
             seen_config_roots.add(config_root)
             config_root_vals.append(config_root)
     print(f"args        : {' | '.join(arg_vals)}")
+    plugin_vals = []
+    seen_plugins = set()
+    for r in rows:
+        plugin_text = ",".join(_plugin_values(r.get("run_meta") or {})) or "none"
+        if plugin_text not in seen_plugins:
+            seen_plugins.add(plugin_text)
+            plugin_vals.append(plugin_text)
     print(f"extensions  : {' | '.join(ext_vals)}")
+    print(f"plugins     : {' | '.join(plugin_vals)}")
     print(f"skills      : {' | '.join(skill_vals)}")
     print(f"config      : {' | '.join(config_root_vals)}")
     print(f"passed      : {colorize(str(passed), 'green') if passed else passed}")
@@ -730,12 +952,43 @@ def print_overview(rows):
             print(f"              {r.get('run_id',''):<18} {r.get('task_id','')}")
 
 
+def _print_wrapped_kv(label, value, *, indent="      ", width=118):
+    value = str(value or "(none)").strip() or "(none)"
+    prefix = f"{indent}{label:<12}: "
+    available = max(40, width - len(prefix))
+    lines = textwrap.wrap(value, width=available, break_long_words=False, break_on_hyphens=False) or ["(none)"]
+    print(prefix + lines[0])
+    continuation = " " * len(prefix)
+    for line in lines[1:]:
+        print(continuation + line)
+
+
 def print_runs(rows, n=20):
     print("\n=== recent runs ===")
     for r in rows[-n:][::-1]:
+        meta = r.get("run_meta") or {}
         parts = token_parts(r)
-        sid = ",".join((r.get("run_meta") or {}).get("pi_session_ids", [])[:1])
+        sid = ",".join(meta.get("pi_session_ids", [])[:1])
         print(f"{status(r):4s}  {r.get('run_id',''):<18} {r.get('task_id',''):<36} time={fmt_seconds(elapsed(r)):<6} tokens={parts['total']:<8} session={sid}")
+        if detail_level >= 2:
+            _print_wrapped_kv("model", _short_model(meta))
+        if detail_level >= 3:
+            catalog_path = str(meta.get("catalog_path", "") or "")
+            config_root = str(Path(catalog_path).parent if catalog_path else "").strip() or "(none)"
+            catalog_name = Path(catalog_path).name if catalog_path else "(none)"
+            enabled_roles = meta.get("enabled_roles_summary") or ",".join(meta.get("enabled_roles") or []) or "(none)"
+            notes = str(meta.get("notes", "") or "").strip()
+            _print_wrapped_kv("run config", f"orchestra={_orchestra_activity_label(r)}; orch_on={_orchestra_label(meta)}; args={render_command_args(meta)}")
+            _print_wrapped_kv("catalog", f"{config_root}/{catalog_name}" if catalog_path else "(none)")
+            _print_wrapped_kv("roles", enabled_roles)
+            _print_wrapped_kv("extensions", render_extensions(meta))
+            _print_wrapped_kv("plugins", ",".join(_plugin_values(meta)) or "none")
+            _print_wrapped_kv("skills", meta.get("aux_skills_summary", "") or "none")
+            role_models = render_role_models_compact(meta)
+            if role_models:
+                _print_wrapped_kv("role models", role_models)
+            if notes:
+                _print_wrapped_kv("notes", notes)
 
 
 def print_tasks(rows):
@@ -761,6 +1014,10 @@ def print_tokens(rows):
     print(f"total_tokens    : {sum(totals):,}")
     print(f"avg_tokens      : {int(statistics.mean(totals)):,}")
     print(f"median_tokens   : {int(statistics.median(totals)):,}")
+    context_vals = [main_context_input(r) for r in rows if main_context_input(r)]
+    if context_vals:
+        print(f"avg_main_context: {int(statistics.mean(context_vals)):,}")
+        print(f"max_main_context: {max(context_vals):,}")
     print("\nby task:")
     by = defaultdict(list)
     for r in rows:
@@ -821,16 +1078,48 @@ def print_notes(rows):
         print(f"runs={len(rs):<3} pass={passed}/{len(rs):<3} notes={note}")
 
 
+def _has_any_selection_filter():
+    return any([
+        bool(task_filter),
+        bool(suite_filter),
+        bool(notes_filter),
+        bool(model_filter),
+        bool(plugins_filter),
+        bool(skills_filter),
+        bool(orchestra_filter),
+        bool(no_orchestra_filter),
+    ])
+
+
+def _print_active_filters():
+    if task_filter:
+        print(f"task filter : {task_filter}")
+    if suite_filter:
+        print(f"suite filter: {suite_filter}")
+    if notes_filter:
+        print(f"notes filter: {notes_filter}")
+    if model_filter:
+        print(f"model filter: {model_filter}")
+    if plugins_filter:
+        print(f"plugins     : {plugins_filter}")
+    if skills_filter:
+        print(f"skills      : {skills_filter}")
+    if orchestra_filter:
+        print("orchestra   : enabled")
+    if no_orchestra_filter:
+        print("orchestra   : disabled")
+
+
 def delete_filtered_results(rows):
     print("\n=== delete results ===")
-    if not notes_filter:
-        print("[bench] refusing to delete without --notes <substring>", file=sys.stderr)
+    if not _has_any_selection_filter():
+        print("[bench] refusing to delete without at least one filter", file=sys.stderr)
         raise SystemExit(2)
     if not rows:
-        print(f"no graded result directories match notes filter: {notes_filter}")
+        print("no graded result directories match the active filters")
         return
 
-    print(f"notes filter: {notes_filter}")
+    _print_active_filters()
     print(f"matches     : {len(rows)} graded result director{'y' if len(rows) == 1 else 'ies'}")
     if not yes_delete:
         print("mode        : dry-run (add --yes to delete)")
@@ -864,19 +1153,153 @@ def _safe_result_dir(rel_dir):
     return target
 
 
+def _orchestra_label(meta):
+    return "off" if meta.get("orchestra") is False else "on" if meta.get("orchestra") is True else "unknown"
+
+
+def _short_model(meta):
+    text = _model_text(meta)
+    if not text:
+        return "(none)"
+    first = text.split("|")[0].strip()
+    return first.replace("lmstudio/", "")
+
+
+def _config_record(rows):
+    sample = rows[0]
+    meta = sample.get("run_meta") or {}
+    return {
+        "model": _short_model(meta),
+        "orchestra": _orchestra_activity_label(sample),
+        "plugins": ",".join(_plugin_values(meta)) or "none",
+        "skills": ",".join(_skill_values(meta)) or "none",
+        "role_models": str(meta.get("role_models_summary", "") or ""),
+    }
+
+
+def _config_key(r):
+    meta = r.get("run_meta") or {}
+    return (
+        _short_model(meta),
+        _orchestra_activity_label(r),
+        tuple(_plugin_values(meta)),
+        tuple(_skill_values(meta)),
+        str(meta.get("role_models_summary", "") or ""),
+    )
+
+
+def _config_groups(rows):
+    grouped = defaultdict(list)
+    for r in rows:
+        grouped[_config_key(r)].append(r)
+    ordered = sorted(grouped.items(), key=lambda kv: (-len(kv[1]), str(kv[0])))
+    return [(f"C{i:02d}", key, rs) for i, (key, rs) in enumerate(ordered, 1)]
+
+
+def _selected_config_ids():
+    return {part.strip().upper() for part in configs_filter.replace(",", " ").split() if part.strip()}
+
+
+def print_configs(rows):
+    print("\n=== configs ===")
+    groups = _config_groups(rows)
+    if not groups:
+        print("no matching graded runs")
+        return
+    print(f"{'ID':<4} {'runs':<5} {'pass':<7} {'model':<42} {'orch':<7} {'plugins':<34} {'skills'}")
+    for cid, _key, rs in groups:
+        rec = _config_record(rs)
+        passed = sum(1 for r in rs if r.get("score") == "pass")
+        print(f"{cid:<4} {len(rs):<5} {passed}/{len(rs):<5} {rec['model'][:42]:<42} {rec['orchestra']:<7} {rec['plugins'][:34]:<34} {rec['skills']}")
+
+
+def _group_value(r, field):
+    field = str(field or "").strip().lower()
+    meta = r.get("run_meta") or {}
+    if field == "model":
+        return _short_model(meta)
+    if field in {"orchestra", "orch"}:
+        return f"orch:{_orchestra_activity_label(r)}"
+    if field in {"orch_on", "orchestra_on"}:
+        return f"orch_on:{_orchestra_label(meta)}"
+    if field in {"plugins", "plugin"}:
+        return "plugins:" + (",".join(_plugin_values(meta)) or "none")
+    if field in {"skills", "skill"}:
+        return "skills:" + (",".join(_skill_values(meta)) or "none")
+    if field == "suite":
+        return suite_name(r)
+    if field in {"task", "task_id"}:
+        return str(r.get("task_id", ""))
+    if field == "notes":
+        return str(meta.get("notes", "") or "") or "none"
+    return f"{field}:?"
+
+
+def _compare_groups(rows):
+    selected_ids = _selected_config_ids()
+    if selected_ids:
+        allowed_rows = []
+        for cid, _key, rs in _config_groups(rows):
+            if cid.upper() in selected_ids:
+                allowed_rows.extend(rs)
+        rows = allowed_rows
+    fields = [f.strip() for f in group_by_raw.replace(",", " ").split() if f.strip()] or ["model", "orchestra", "plugins", "skills"]
+    grouped = defaultdict(list)
+    for r in rows:
+        grouped[" | ".join(_group_value(r, f) for f in fields)].append(r)
+    return sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+
+
+def _avg_or_none(values):
+    return statistics.mean(values) if values else None
+
+
+def print_compare(rows):
+    print("\n=== compare ===")
+    if configs_filter:
+        print(f"configs : {configs_filter}")
+    print(f"group by: {group_by_raw or 'model,orchestra,plugins,skills'}")
+    groups = _compare_groups(rows)
+    if not groups:
+        print("no matching graded runs")
+        return
+    print(f"{'group':<72} {'runs':<5} {'pass':<7} {'score':<8} {'tokens':<11} {'elapsed'}")
+    for label, rs in groups:
+        passed = sum(1 for r in rs if r.get("score") == "pass")
+        scores = numeric_scores(rs)
+        toks = [token_total(r) for r in rs if token_total(r)]
+        times = [elapsed(r) for r in rs if elapsed(r)]
+        score_text = f"{statistics.mean(scores):.4f}" if scores else "-"
+        tok_text = f"{int(statistics.mean(toks)):,}" if toks else "-"
+        time_text = fmt_seconds(statistics.mean(times)) if times else "-"
+        print(f"{label[:72]:<72} {len(rs):<5} {passed}/{len(rs):<5} {score_text:<8} {tok_text:<11} {time_text}")
+    if per_task:
+        print("\nper task:")
+        by_task = defaultdict(list)
+        for label, rs in groups:
+            for r in rs:
+                by_task[str(r.get("task_id", ""))].append((label, r))
+        for task_id in sorted(by_task):
+            print(f"\n{task_id}")
+            for label, r in sorted(by_task[task_id], key=lambda item: item[0]):
+                score_num = r.get("score_numeric")
+                score_text = f"{score_num:.4f}" if isinstance(score_num, (int, float)) else str(r.get("score", ""))
+                print(f"  {label[:58]:<58} {status(r):<4} score={score_text:<8} tokens={token_total(r):<9} time={fmt_seconds(elapsed(r))}")
+
+
 def set_notes_for_filtered_results(rows):
     print("\n=== set result notes ===")
-    if not notes_filter:
-        print("[bench] refusing to rewrite notes without --notes <substring>", file=sys.stderr)
+    if not _has_any_selection_filter():
+        print("[bench] refusing to rewrite notes without at least one filter", file=sys.stderr)
         raise SystemExit(2)
     if new_notes == "":
         print("[bench] refusing to rewrite notes without --set-notes <text>", file=sys.stderr)
         raise SystemExit(2)
     if not rows:
-        print(f"no graded result directories match notes filter: {notes_filter}")
+        print("no graded result directories match the active filters")
         return
 
-    print(f"notes filter: {notes_filter}")
+    _print_active_filters()
     print(f"new notes   : {new_notes}")
     print(f"matches     : {len(rows)} graded result director{'y' if len(rows) == 1 else 'ies'}")
     print(f"mode        : {'apply' if yes_delete else 'dry-run (add --yes to rewrite)'}")
@@ -912,6 +1335,116 @@ def set_notes_for_filtered_results(rows):
                 bench_run_path.write_text(json.dumps(bench_data, indent=2) + "\n")
 
 
+def _clip_text(text, max_chars=600):
+    text = str(text or "").replace("\r", "")
+    return text if len(text) <= max_chars else text[:max_chars] + "…"
+
+
+def _content_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            typ = item.get("type")
+            if typ == "text":
+                parts.append(str(item.get("text", "")))
+            elif typ == "toolCall":
+                parts.append(f"[toolCall {item.get('name','')}] {item.get('arguments','')}")
+            elif typ == "toolResult":
+                parts.append(f"[toolResult {item.get('toolName','')}] {item.get('content','')}")
+            elif typ == "thinking":
+                text = str(item.get("thinking", "") or "").strip()
+                if text:
+                    parts.append(f"[thinking] {text}")
+        return "\n".join(part for part in parts if part)
+    return str(content or "")
+
+
+def _print_pi_session_trace(run_dir, max_events=0):
+    session_dir = run_dir / "artifacts" / "pi-sessions"
+    files = sorted(session_dir.glob("*.jsonl")) if session_dir.is_dir() else []
+    if not files:
+        print("\npi session trace: none captured")
+        return False
+    print("\npi session trace:")
+    for path in files:
+        events = []
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except Exception:
+                events.append(line)
+                continue
+            typ = event.get("type", "")
+            msg = event.get("message") if isinstance(event.get("message"), dict) else {}
+            if typ == "message" and msg:
+                role = msg.get("role", "")
+                content = _content_text(msg.get("content")).strip()
+                if content:
+                    events.append(f"{role}: {content}")
+            elif typ in {"session", "toolCall", "toolResult", "compaction"}:
+                events.append(json.dumps(event, ensure_ascii=False))
+        print(f"\n-- {path.name} --")
+        if not events:
+            print("  (no printable events)")
+            continue
+        selected = events if max_events <= 0 else events[-max_events:]
+        if max_events > 0 and len(events) > len(selected):
+            print(f"  ... ({len(events) - len(selected)} earlier events omitted; use --limit 0 for full trace)")
+        for event in selected:
+            for line in event.splitlines():
+                print(f"  {line}")
+    return True
+
+
+def _debug_text_looks_complete(text):
+    stripped = str(text or "").strip().lower()
+    if not stripped:
+        return False
+    if stripped.startswith("error:") or "requires 'skills'" in stripped or "unknown option" in stripped:
+        return False
+    return True
+
+
+def _print_orchestra_debug_trace(run_dir):
+    debug_dir = run_dir / "artifacts" / "orchestra-debug" / "debug"
+    files = sorted(debug_dir.glob("*.md")) if debug_dir.is_dir() else []
+    if not files:
+        print("\norchestra debug trace: none captured")
+        return False
+    print("\norchestra debug trace:")
+    complete = False
+    for path in files:
+        print(f"\n-- {path.relative_to(run_dir)} --")
+        text = path.read_text(errors="replace")
+        print(text, end="" if text.endswith("\n") else "\n")
+        complete = complete or _debug_text_looks_complete(text)
+    return complete
+
+
+def print_debug_detail(rows, q):
+    r = find_run(rows, q)
+    if not r:
+        print(f"[bench] run not found or ambiguous: {q}", file=sys.stderr)
+        raise SystemExit(1)
+    print_run_detail(rows, q)
+    run_dir = (root / str(r.get("_dir", ""))).resolve()
+    try:
+        run_dir.relative_to(results_dir.resolve())
+    except ValueError:
+        print("\ndebug trace: unsafe result path")
+        return
+    orchestra_complete = _print_orchestra_debug_trace(run_dir)
+    if orchestra_complete:
+        print("\npi session trace: not printed separately; included in orchestra debug trace")
+    else:
+        print("\n[bench] orchestra debug trace is missing or incomplete; showing raw Pi session fallback")
+        _print_pi_session_trace(run_dir, limit)
+
+
 def print_run_detail(rows, q):
     r = find_run(rows, q)
     if not r:
@@ -944,13 +1477,6 @@ def print_run_detail(rows, q):
     parts = token_parts(r)
     print(f"elapsed      : {fmt_seconds(elapsed(r))}")
     print(f"tokens       : total={parts['total']:,} input={parts['input']:,} output={parts['output']:,} reasoning={parts['reasoning']:,}")
-    category_scores = r.get("category_scores") or {}
-    if isinstance(category_scores, dict) and category_scores:
-        print("categories:")
-        for name in ("intelligence", "speed", "efficiency", "process"):
-            value = category_scores.get(name)
-            print(f"  {name}: {value:.4f}" if isinstance(value, (int, float)) else f"  {name}: n/a")
-
     efficiency_lines = format_efficiency_summary(TaskResult.from_json(root / r.get('_path', '')), results_dir)
     if efficiency_lines:
         print("\nefficiency:")
@@ -961,7 +1487,8 @@ def print_run_detail(rows, q):
     print("\nchecks:")
     if checks:
         for k, v in checks.items():
-            print(f"  {k}: {v}")
+            value = color_bool_value(v) if isinstance(v, bool) else v
+            print(f"  {k}: {value}")
     else:
         print("  none")
 
@@ -969,7 +1496,13 @@ def print_run_detail(rows, q):
     if orch_checks:
         print("\norchestration:")
         for key in sorted(orch_checks):
-            print(f"  {key}: {orch_checks[key]}")
+            value = orch_checks[key]
+            if isinstance(value, bool):
+                text = "True" if value else "False"
+                value = color_for_behavior_rate(key, text, 1 if value else 0, 1)
+            elif isinstance(value, (int, float)):
+                value = color_for_behavior_count(key, str(value), int(value))
+            print(f"  {key}: {value}")
     warnings = orchestration_warnings(orch_checks)
     if warnings:
         print("\norchestration warnings:")
@@ -989,6 +1522,8 @@ elif view == "runs":
     print_runs(rows, limit)
 elif view == "run":
     print_run_detail(rows, run_query)
+elif view == "debug":
+    print_debug_detail(rows, run_query)
 elif view == "tasks":
     print_tasks(rows)
 elif view == "timeline":
@@ -999,6 +1534,10 @@ elif view == "timing":
     print_timing(rows)
 elif view == "notes":
     print_notes(rows)
+elif view == "configs":
+    print_configs(rows)
+elif view == "compare":
+    print_compare(rows)
 elif view == "delete":
     delete_filtered_results(rows)
 elif view == "set-notes":
