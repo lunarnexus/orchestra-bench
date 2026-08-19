@@ -114,7 +114,7 @@ Task definitions are not mounted during agent runs. `02-open-pi` automatically c
 scripts/01-start start
 
 # 2. Optional: adjust Pi package/resource config inside the container
-# Longer term, prefer scripted plugin profiles over Dockerfile hand-edits.
+# (plugin installs are toggled via commented pi install lines in docker/Dockerfile)
 scripts/02-open-pi config
 
 # 3. List tasks, then open Pi for one task
@@ -145,7 +145,7 @@ scripts/05-results timing
 
 ### `02-open-pi <task-id>`
 
-Lists tasks with `--list`, grouped by suite and role. Use `config` to open Pi's package/resource config TUI inside the benchmark container. For a task run, it prepares an isolated per-run workdir inside the container, copies only agent-visible task materials into it, resolves the parent model from `config/orchestra/agent-catalog.yaml`, and writes `.bench_run.json` in `results/<run_id>-<task_id>/`. By default it prints `Prompt.md` and starts Pi interactively. With `--auto`, the intended runner is Pi RPC mode: enable `/orch on` when requested, send `Prompt.md`, keep the host process alive across Pi `agent_settled` events while Orchestra workers are still active, then grade only after expected workers/reports are terminal. With `--auto --no-orchestra`, it skips only that automatic `/orch on` preflight and sends `Prompt.md` as-is; if Orchestra tools are available, the model may still dispatch when the task prompt asks it to. Role-focused dispatch instructions belong in the task's `Prompt.md`; the harness records `target_role` separately for diagnostics instead of injecting prompt text or running Pi as that worker role. Evaluator files are not mounted during this session. After interactive use, exit normally (Ctrl+D).
+Lists tasks with `--list`, grouped by suite and role. Use `config` to open Pi's package/resource config TUI inside the benchmark container. For a task run, it prepares an isolated per-run workdir inside the container, copies only agent-visible task materials into it, resolves the parent model from `config/orchestra/agent-catalog.yaml`, and writes `.bench_run.json` in `results/<run_id>-<task_id>/`. By default it prints `Prompt.md` and starts Pi interactively. With `--auto`, the default runner (`--auto-runner rpc`; use `print` for the legacy one-shot path) runs Pi in RPC mode: it enables `/orch on` when requested, sends `Prompt.md`, keeps the host process alive across Pi `agent_settled` events while Orchestra workers are still active (settle gate), and grades only after expected workers/reports are terminal. Raw RPC events are saved under `results/<run>/artifacts/pi-rpc/events.jsonl`. With `--auto --no-orchestra`, it skips only that automatic `/orch on` preflight and sends `Prompt.md` as-is; if Orchestra tools are available, the model may still dispatch when the task prompt asks it to. Role-focused dispatch instructions belong in the task's `Prompt.md`; the harness records `target_role` separately for diagnostics instead of injecting prompt text or running Pi as that worker role. Evaluator files are not mounted during this session. After interactive use, exit normally (Ctrl+D).
 
 ### `03-collect-results [task-id]`
 

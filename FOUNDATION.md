@@ -40,7 +40,7 @@ The LM Studio runtime config should also live in the project config area, but se
 - do **not** rebuild/recreate the container for every tiny test
 - task workspaces inside the container must still reset between runs
 - explicit rebuild/recreate/reset operations are acceptable and expected when needed for cleanliness or runtime changes
-- plugin enablement/profile changes should be scriptable runtime state, not Dockerfile hand-edits; commenting plugin installs in the Dockerfile is a symptom that the harness needs first-class plugin profiles
+- Pi plugin selection stays as commented `pi install` lines in `docker/Dockerfile`; simple and sufficient (operator decision — no profile machinery)
 
 ### 5. Simple operator flow
 The operator flow should stay simple and scripts-first.
@@ -53,7 +53,7 @@ Target flow:
 3. grade as part of auto/suite execution, with `03-collect-results` still available for regrade/backfill
 4. inspect results and traces through `05-results`
 
-The current flow works but is too clunky: rebuild container, hand-copy prompt/catalog files, manually toggle Pi plugins or edit the Dockerfile, run suites, then dig through debug traces. The refactor should reduce this to explicit config/profile commands and better result/debug navigation, without hiding provenance.
+The old flow was clunky (rebuild container, hand-copy prompt/catalog files, manual plugin toggles, digging through raw traces). The 2026-08-19 refactor removed the pain: installed Orchestra owns `config.yaml`/`prompts.yaml`, runtime init overlays only the local catalog/skills, `--auto` is RPC-backed with an Orchestra settle gate instead of one-shot `pi -p`, and `05-results debug` gives guided trace navigation. Plugin selection remains Dockerfile comment lines.
 
 ### 6. Outcome first, orchestration second
 The benchmark should measure whether Orchestra helps deliver strong end results.

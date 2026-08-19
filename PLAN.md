@@ -51,10 +51,10 @@ Add/extend modules incrementally; do not perform a giant rewrite first.
 
 ```text
 bench/
-  run_paths.py          # RunDirectory / artifact paths
-  runtime_sync.py       # catalog/skills sync; Orchestra config/prompts come from installed Orchestra
-  pi_rpc_runner.py      # JSONL RPC client, settle loop, event artifacts
-  orchestration_gate.py # active run/report detection wrappers
+  run_paths.py          # RunDirectory / artifact paths (built)
+  pi_rpc_runner.py      # JSONL RPC client, settle loop, event artifacts (built)
+  orchestration_gate.py # active-run detection around RPC settle (built)
+  auto_run.py           # --auto driver: preflight, prompt, settle gate; used by 02-open-pi (built)
   results_cli.py        # future extraction target for scripts/05-results
   debug_views.py        # future trace summarization helpers
 
@@ -213,9 +213,9 @@ Focused unit checks as slices land:
 pytest -q tests/test_operator_flow.py tests/test_reporting.py tests/test_orchestration_extraction.py --tb=short
 ```
 
-Add new focused tests as files exist:
+Focused tests for the built modules:
 ```bash
-pytest -q tests/test_runtime_sync.py tests/test_pi_rpc_runner.py --tb=short
+pytest -q tests/test_run_paths.py tests/test_pi_rpc_runner.py tests/test_orchestration_gate.py tests/test_auto_run.py --tb=short
 ```
 
 Runtime dogfood after wiring:

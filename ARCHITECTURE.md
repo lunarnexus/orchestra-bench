@@ -19,8 +19,7 @@ config/orchestra/
 
 config/pi/
   lmstudio.json
-  settings.json
-  plugin-profiles/         # desired enabled/disabled Pi plugin sets, not Dockerfile edits
+  settings.json            # merged into container Pi settings before plugin install
 
 config/skills/
   # benchmark-local Pi skills copied/synced into the container runtime
@@ -40,8 +39,8 @@ The shared container must contain:
 - Node 22+
 - Pi coding agent
 - Orchestra installed from source
-- LM Studio Pi plugin installed via official Pi plugin install flow
-- CodeGraph Pi plugin installed via official Pi plugin install flow
+- LM Studio Pi plugin installed via official Pi plugin install flow (Orchestra's own extension arrives from `orchestra init pi`)
+- optional plugins (CodeGraph, web tools) enabled by uncommenting their `pi install` lines in the Dockerfile
 - benchmark-local skills from `config/skills/` copied into `~/.pi/agent/skills/`
 - initialized Pi/Orchestra runtime under `~/.pi/agent/`
 - workspace root for per-run task workdirs
@@ -70,16 +69,15 @@ On runtime init:
 1. run `orchestra init pi --copy --force` so Orchestra installs its own current prompt defaults
 2. keep `agent-catalog.yaml` benchmark-local and hand-editable
 3. copy benchmark-local `agent-catalog.yaml` into Pi's Orchestra runtime dir without requiring benchmark `config.yaml` or `prompts.yaml`
-4. sync benchmark-local auxiliary skills from `config/skills/` into Pi's runtime skills dir
-5. apply a selected Pi plugin profile/settings overlay
-6. ensure final runtime config is inspectable under Pi's live config path and captured in run metadata
+4. sync benchmark-local auxiliary skills from `config/skills/` into Pi's runtime skills dir (copy-only overlay)
+5. ensure final runtime config is inspectable under Pi's live config path and captured in run metadata
 
 This copy step is deliberate: benchmark runs should use explicit source files from this repo/source checkout, but the running Pi/Orchestra environment should consume copied runtime config inside the container. The operator should not have to manually copy `config.yaml` or `prompts.yaml` from `~/workspace/orchestra` after every pull; absence of those benchmark files means use the installed Orchestra defaults.
 
 Pi runtime config is stored under benchmark-local Pi config, not Orchestra config:
 - `config/pi/lmstudio.json` is copied into `~/.pi/agent/lmstudio.json` during runtime init.
 - `config/pi/settings.json` is merged into `~/.pi/agent/settings.json` before plugin install, so benchmark-owned settings such as `enableInstallTelemetry: false` take effect without clobbering unrelated Pi defaults.
-- plugin enablement should be represented as selectable settings/profile overlays instead of editing `docker/Dockerfile` to comment plugin installs in or out.
+- Pi plugin selection stays as commented `pi install` lines in `docker/Dockerfile` (operator's chosen mechanism); there is no separate profile system.
 - `config/skills/` is synced into `~/.pi/agent/skills/` during runtime init/build so benchmark-local skills can be versioned with the benchmark and loaded by Pi inside the container.
 
 ## Model resolution
@@ -104,8 +102,8 @@ Keep the operator surface simple, but with clear semantics:
 - `scripts/01-start start` builds the image and recreates the benchmark container so mounts/config are fresh
 - `scripts/01-start stop` removes the benchmark container cleanly
 - task isolation comes from a fresh per-run workdir created by `scripts/02-open-pi <task-id>`
-- `scripts/02-open-pi <task-id> --auto` uses the same prep path, then should run Pi through an RPC-backed auto runner so the benchmark process remains alive until asynchronous Orchestra workers finish and reports are delivered
-- `scripts/02-open-pi <task-id> --auto --no-orchestra` skips only the automatic `/orch on` preflight and sends `Prompt.md` unchanged; it may still use the RPC runner so auto/no-auto lifecycle semantics are consistent
+- `scripts/02-open-pi <task-id> --auto` uses the same prep path, then runs Pi through the RPC-backed auto runner (default) so the benchmark process remains alive until asynchronous Orchestra workers finish and reports are terminal; `--auto-runner print` keeps the legacy one-shot `pi -p` path
+- `scripts/02-open-pi <task-id> --auto --no-orchestra` skips only the automatic `/orch on` preflight and sends `Prompt.md` unchanged; it uses the same RPC runner so auto/no-auto lifecycle semantics are consistent
 - all role/workflow/artifact requirements live in `Prompt.md`; the harness records metadata such as `target_role` for diagnostics but does not inject prompt text
 - `scripts/03-collect-results` grades all prepared/ungraded runs idempotently
 - `scripts/04-run-suite <suite>` runs each suite task through `02-open-pi --auto`, then grades it; `--no-orchestra` passes through for baseline/no-Orchestra suite runs
@@ -135,7 +133,7 @@ start/recreate container
 -> inspect historical results/tokens/traces
 ```
 
-The flow should stay thin. It is not a separate orchestration system, but it should own benchmark ergonomics: syncing config inputs, selecting plugin profiles, running suites through the correct auto runner, grading, and surfacing result/debug evidence.
+The flow should stay thin. It is not a separate orchestration system, but it should own benchmark ergonomics: syncing runtime inputs, running suites through the RPC auto runner, grading, and surfacing result/debug evidence.
 
 ## Task artifact shape
 
@@ -251,12 +249,12 @@ scripts/03-collect-results
 scripts/05-results run <run-id>
 ```
 
-`--auto` must use the same preparation path as interactive runs. The desired implementation uses Pi RPC mode rather than one-shot `pi -p`, because benchmark automation must keep the host process alive while asynchronous Orchestra workers finish. `--no-orchestra` skips only the automatic `/orch on` preflight; it does not rewrite or weaken the task prompt, and Orchestra tools may still be used if available and requested by `Prompt.md`. This proves the operator flow, orchestrator-skill loading, Pi session capture, grading, token capture, timing, and result display against the actual benchmark path.
+`--auto` uses the same preparation path as interactive runs and, by default, Pi RPC mode via `bench/auto_run.py` (with an Orchestra active-run settle gate) rather than one-shot `pi -p`; `--auto-runner print` remains for the legacy path. Benchmark automation must keep the host process alive while asynchronous Orchestra workers finish. `--no-orchestra` skips only the automatic `/orch on` preflight; it does not rewrite or weaken the task prompt, and Orchestra tools may still be used if available and requested by `Prompt.md`. This proves the operator flow, orchestrator-skill loading, Pi session capture, grading, token capture, timing, and result display against the actual benchmark path.
 
 ## Debug and trace navigation
 
 `05-results` is the primary operator surface after runs complete. It should make the common debug path obvious:
-- show run outcome, model/catalog/plugin/profile/version provenance, token/context metrics, and orchestration lifecycle checks first
+- show run outcome, model/catalog/plugins/Orchestra-version provenance, token/context metrics, and orchestration lifecycle checks first
 - link or print the most relevant trace artifacts without forcing the operator to remember path layout
 - summarize Pi RPC events, Pi session JSONL, Orchestra debug markdown, Orchestra logs, and state DB presence
 - distinguish missing traces from intentionally empty traces
