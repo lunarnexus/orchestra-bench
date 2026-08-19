@@ -10,9 +10,10 @@ BENCH_WORKSPACE="${BENCH_WORKSPACE:-/workspace}"
 RUN_ID="${BENCH_RUN_ID:-$(date +%Y%m%dT%H%M%S)}"
 BENCH_ORCHESTRA_CONFIG_SRC="${BENCH_ORCHESTRA_CONFIG_SRC:-/bench/orchestra-config}"
 BENCH_LMSTUDIO_CONFIG_SRC="${BENCH_LMSTUDIO_CONFIG_SRC:-/bench/pi/lmstudio.json}"
+BENCH_PI_SKILLS_SRC="${BENCH_PI_SKILLS_SRC:-/bench/pi-skills}"
 PI_ORCHESTRA_RUNTIME_DIR="${PI_ORCHESTRA_RUNTIME_DIR:-/root/.pi/agent/orchestra}"
 PI_LMSTUDIO_RUNTIME_FILE="${PI_LMSTUDIO_RUNTIME_FILE:-/root/.pi/agent/lmstudio.json}"
-REQUIRED_ORCHESTRA_CONFIG_FILES="config.yaml prompts.yaml agent-catalog.yaml"
+REQUIRED_ORCHESTRA_CONFIG_FILES="agent-catalog.yaml"
 
 require_orchestra_config_source() {
   if [ ! -d "$BENCH_ORCHESTRA_CONFIG_SRC" ]; then
@@ -39,8 +40,8 @@ sync_orchestra_config() {
   require_orchestra_config_source
 
   # The container's default startup path and scripts/01-start init-runtime can
-  # both try to sync config at nearly the same time. Serialize the destructive
-  # rm/copy sequence so concurrent startup cannot interleave two cp operations.
+  # both try to sync config at nearly the same time. Serialize copies so
+  # concurrent startup cannot interleave runtime updates.
   lock_parent="$(dirname "$PI_ORCHESTRA_RUNTIME_DIR")"
   lock_dir="$lock_parent/.orchestra-config-sync.lock"
   mkdir -p "$lock_parent"
@@ -55,9 +56,11 @@ sync_orchestra_config() {
   done
   trap 'rmdir "$lock_dir" 2>/dev/null || true' RETURN
 
-  rm -rf "$PI_ORCHESTRA_RUNTIME_DIR"
   mkdir -p "$PI_ORCHESTRA_RUNTIME_DIR"
-  cp -R "$BENCH_ORCHESTRA_CONFIG_SRC"/. "$PI_ORCHESTRA_RUNTIME_DIR"/
+  for config_file in "$BENCH_ORCHESTRA_CONFIG_SRC"/*.yaml; do
+    [ -e "$config_file" ] || continue
+    cp -f "$config_file" "$PI_ORCHESTRA_RUNTIME_DIR"/
+  done
 
   rmdir "$lock_dir" 2>/dev/null || true
   trap - RETURN
@@ -69,12 +72,22 @@ sync_lmstudio_config() {
   cp -f "$BENCH_LMSTUDIO_CONFIG_SRC" "$PI_LMSTUDIO_RUNTIME_FILE"
 }
 
+# Overlay benchmark-local Pi skills onto the runtime. Copy-only: never removes
+# container-side skills, so image-baked and Orchestra-provided skills survive.
+sync_pi_skills() {
+  [ -d "$BENCH_PI_SKILLS_SRC" ] || return 0
+  mkdir -p /root/.pi/agent/skills
+  cp -a "$BENCH_PI_SKILLS_SRC"/. /root/.pi/agent/skills/ 2>/dev/null || true
+}
+
 init_runtime() {
-  sync_orchestra_config
-  sync_lmstudio_config
+  # Let the installed Orchestra version provide its own runtime defaults
+  # (including config.yaml and prompts.yaml). Then apply benchmark-local
+  # overrides that are present, normally only agent-catalog.yaml.
   orchestra init pi --copy --force
   sync_orchestra_config
   sync_lmstudio_config
+  sync_pi_skills
 }
 
 # Ensure dirs exist

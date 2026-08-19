@@ -12,3 +12,6 @@ results/
 
 # Local env files
 .env
+
+# Editor swap files
+*.swp

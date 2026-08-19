@@ -13,6 +13,7 @@ CONTAINER_NAME="orchestra-bench-runner"
 RESULTS_DIR="$ROOT/results"
 ARTIFACTS_DIR="$ROOT/artifacts"
 CONFIG_DIR="$ROOT/config/orchestra"
+SKILLS_DIR="$ROOT/config/skills"
 LMSTUDIO_CONFIG_FILE="$ROOT/config/pi/lmstudio.json"
 
 usage() {
@@ -61,11 +62,14 @@ ensure_image() {
 start_fresh_container() {
   mkdir -p "$RESULTS_DIR" "$ARTIFACTS_DIR" "$CONFIG_DIR"
 
+  mkdir -p "$SKILLS_DIR"
+
   docker run -d \
     --name "$CONTAINER_NAME" \
     -v "$RESULTS_DIR:/bench/results" \
     -v "$ARTIFACTS_DIR:/bench/artifacts" \
     -v "$CONFIG_DIR:/bench/orchestra-config:ro" \
+    -v "$SKILLS_DIR:/bench/pi-skills:ro" \
     -v "$LMSTUDIO_CONFIG_FILE:/bench/pi/lmstudio.json:ro" \
     -v "$ROOT/docker/entrypoint.sh:/usr/local/bin/bench-entrypoint:ro" \
     "$IMAGE_NAME" >/dev/null

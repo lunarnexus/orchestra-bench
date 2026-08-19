@@ -2,140 +2,219 @@
 
 ## Goal
 
-Replace the current one-shot `pi -p` auto runner with an RPC-backed Pi auto runner so benchmark automation stays alive while asynchronous Orchestra workers finish and return reports. Preserve interactive Pi behavior and keep `--no-orchestra` baseline runs comparable.
+Refactor the benchmark harness around the actual operator workflow, then implement the Pi RPC auto runner. The outcome should be a less clunky, more reproducible loop for overnight Orchestra experiments:
+
+```text
+runtime sync -> run suite --auto -> integrated grade -> inspect with 05-results/debug
+```
+
+The refactor should remove benchmark ownership of Orchestra `config.yaml`/`prompts.yaml`, reduce Dockerfile/plugin hand-edits, preserve local editable experiment inputs, and fix one-shot Pi premature grading by using RPC lifecycle control.
 
 ## Acceptance Criteria
 
-- `scripts/02-open-pi <task-id> --auto` can run through a Pi RPC client instead of exiting after the first `agent_settled`.
-- In Orchestra-enabled auto runs, grading does not begin until:
-  - Pi has emitted `agent_settled`,
-  - no tracked Orchestra runs for the parent session are active,
-  - and no pending Orchestra session report remains undelivered when detectable.
-- Real Orchestra worker reports are delivered back into the parent session; no fake repeated "wait" prompts are injected.
-- `--auto --no-orchestra` still works and exits after normal Pi settle.
-- Artifacts include the RPC event stream and enough lifecycle evidence to debug settle/worker timing.
-- Batch runs no longer produce `worker_running_without_exit=true` merely because one-shot Pi exited before async workers finished.
-- Focused tests cover RPC runner command construction, event parsing, settle/active-run wait logic, and `02-open-pi` integration without requiring real model calls.
+### Runtime/config ergonomics
+- `config/orchestra/config.yaml` and `config/orchestra/prompts.yaml` are not required by the benchmark; runtime setup uses the installed Orchestra defaults for both.
+- `agent-catalog.yaml` remains benchmark-local and hand-editable.
+- auxiliary skills under `config/skills/` are synced into the container runtime predictably.
+- Pi plugin selection stays as commented install lines in `docker/Dockerfile` (operator's chosen mechanism); no extra profile machinery.
+- run metadata captures enough provenance to know which prompt source, catalog, skills, Orchestra version/rev, and enabled plugins were used.
+
+### RPC auto runner
+- `scripts/02-open-pi <task-id> --auto` uses a Pi RPC runner or has a controlled rollout flag for it.
+- Auto grading does not begin until Pi is settled and tracked Orchestra workers/reports are terminal or explicitly failed/abandoned.
+- `--auto --no-orchestra` remains comparable and exits on normal Pi settle.
+- Raw RPC events are saved as artifacts.
+- Batch runs no longer fail with `worker_running_without_exit=true` solely because one-shot Pi exited early.
+
+### Debug/results ergonomics
+- `05-results` remains the bread-and-butter interface.
+- `05-results debug <run>` becomes a guided trace navigator: result summary, lifecycle warnings, relevant artifact paths, Pi session snippets, RPC events, Orchestra logs/debug/state summaries.
+- Missing/empty traces are called out explicitly rather than silently looking like no activity.
+
+### Refactor quality
+- Core path/artifact/result logic moves toward importable Python modules instead of growing `eval_harness.py`, `02-open-pi`, and `05-results` further.
+- Focused tests cover modules directly without needing large subprocess/script copies for every behavior.
+- Existing operator commands remain available.
 
 ## Context / Assumptions
 
-- Current failing Batch07/Batch08 behavior is caused by one-shot Pi exiting after model settle while Orchestra worker processes are still running.
-- This is mostly a benchmark automation problem because interactive Pi sessions remain alive and can receive asynchronous auto-return reports.
-- Nested worker dispatch is currently disabled/unused, so the top-level parent session is the main lifecycle owner in the benchmark.
-- Pi RPC mode keeps the host process alive under benchmark control and emits `agent_settled` events.
-- Pi docs define `agent_settled` as the point where Pi will not continue through retry, compaction retry, or queued follow-up messages by itself.
-- Orchestra already has CLI/state primitives for run/session report waiting, but the exact most reliable command mix should be validated in a tracer-bullet slice.
+- The benchmark currently works, but the operator has to perform too many manual steps: rebuild/start, hand-copy prompt/catalog files, adjust plugins through Pi config or Dockerfile comments, run suites, then manually dig through traces.
+- `config.yaml` and `prompts.yaml` are Orchestra-owned in practice; the simplest fix is to stop carrying them in benchmark config and let the installed Orchestra version provide them.
+- `agent-catalog.yaml` and `config/skills/` are experiment-owned and should stay local/editable.
+- Batch07/Batch08 proved that one-shot `pi -p` is not a valid Orchestra async lifecycle runner for benchmark auto mode.
+- Pi RPC mode gives the benchmark a process that can stay alive across `agent_settled` and wait for Orchestra workers/reports.
+- The user is willing to let a small model work overnight, so slices must be explicit, bounded, and testable.
 
-## Files to Change
+## Target Architecture
 
+Add/extend modules incrementally; do not perform a giant rewrite first.
+
+```text
+bench/
+  run_paths.py          # RunDirectory / artifact paths
+  runtime_sync.py       # catalog/skills sync; Orchestra config/prompts come from installed Orchestra
+  pi_rpc_runner.py      # JSONL RPC client, settle loop, event artifacts
+  orchestration_gate.py # active run/report detection wrappers
+  results_cli.py        # future extraction target for scripts/05-results
+  debug_views.py        # future trace summarization helpers
+
+scripts/
+  01-start              # calls runtime sync during start/init
+  02-open-pi            # thin operator wrapper; auto path delegates to Python runner
+  04-run-suite          # unchanged UX; benefits from 02-open-pi
+  05-results            # keep UX, gradually move internals to modules
+```
+
+Keep public script names stable.
+
+## Files Likely to Change
+
+- `FOUNDATION.md`, `ARCHITECTURE.md`, `README.md`, `RESEARCH.md`, `PLAN.md`
+- `scripts/01-start`
 - `scripts/02-open-pi`
-- New helper, likely `scripts/pi-rpc-runner` or `scripts/_pi-rpc-runner`
-- `scripts/04-run-suite` only if option/help text needs to expose runner mode
-- `eval_harness.py` only if artifact collection/manifest needs RPC event metadata
-- `scripts/05-results` only if new RPC artifact summaries should be displayed
-- Tests:
-  - `tests/test_operator_flow.py`
-  - new or existing RPC runner tests, e.g. `tests/test_pi_rpc_runner.py`
-  - `tests/test_orchestration_extraction.py` if manifest fields change
-- Docs:
-  - `README.md`
-  - `ARCHITECTURE.md`
-  - `RESEARCH.md`
+- `scripts/04-run-suite` if runner flags are exposed
+- `scripts/05-results`
+- `eval_harness.py` only as needed; prefer moving new code into modules
+- new `bench/` package modules
+- `docker/entrypoint.sh` for runtime sync hooks if needed
+- `config/pi/settings.json` only as needed
+- tests under `tests/`, ideally with shared helpers/fixtures
 
 ## Design Notes
 
-- Keep the parent Pi session in RPC mode for auto runs:
-  1. start `pi --mode rpc --model "$BENCH_MODEL"` in the task workdir,
-  2. send `/orch on` when Orchestra is enabled,
-  3. wait for `/orch on` `agent_settled`,
-  4. send the task prompt,
-  5. listen for `agent_settled`, `turn_*`, tool, and message events,
-  6. after each settle, query Orchestra activity for the parent session,
-  7. exit only when Pi is settled and Orchestra has no active/pending work for that session.
-- Store raw RPC JSONL under `results/<run>-<task>/artifacts/pi-rpc/events.jsonl` or equivalent before grading.
-- Avoid fake follow-up keepalive prompts. They consume extra model turns and can loop.
-- Prefer using real auto-return delivery from the Orchestra Pi extension. If RPC does not deliver reports reliably, add a narrow benchmark-side resume strategy as a fallback, not as the primary design.
-- `--no-orchestra` can still use RPC for consistency, but its completion condition is only Pi `agent_settled` because there are no expected Orchestra workers.
-- Keep one-shot `pi -p` available only as a legacy/debug path if useful, not the default for benchmark auto runs.
+### Runtime sync
+- Treat Orchestra `config.yaml` and `prompts.yaml` as Orchestra-owned. Remove benchmark requirements for both and let `orchestra init pi --copy --force` install the matching defaults.
+- Keep the catalog local. Do not overwrite `config/orchestra/agent-catalog.yaml` during sync unless explicitly requested.
+- Sync `config/skills/` into runtime on start/init so auxiliary skill edits are applied without image rebuild when possible.
+- Pi plugin selection stays as commented install lines in `docker/Dockerfile`. No profile mechanism.
+
+### RPC runner
+- Start Pi with `--mode rpc --model "$BENCH_MODEL"` in the task workdir.
+- Send `/orch on` first when enabled; wait for `agent_settled`.
+- Send task prompt; watch RPC events.
+- On settle, query Orchestra state for the parent session/run ids.
+- Keep process alive if active expected workers/reports remain.
+- Exit only when settled + no active expected descendants/pending reports.
+- Save all RPC lines to `artifacts/pi-rpc/events.jsonl`.
+- Do not use fake repeated wait prompts.
+
+### Debug views
+- Prefer concise summaries first, with paths/commands to inspect deeper.
+- Show lifecycle chain: dispatch -> worker started -> worker exited/done -> report delivered/consumed.
+- Show mismatches: worker running at grade time, missing worker session JSONL, empty debug output, no role tokens despite dispatch, pending report not delivered.
+- Keep raw artifacts; do not duplicate large logs into result JSON.
 
 ## Task Breakdown
 
-- [ ] Slice 1 — sequential — RPC tracer bullet
-  Scope: create a minimal local/container RPC client helper that starts Pi RPC, sends one prompt, logs events, and exits on `agent_settled` for a no-Orchestra prompt.
-  Stop when: a test or dry-run demonstrates event parsing and clean shutdown without real benchmark grading.
-  Verify: focused unit tests for JSONL event parsing plus one harmless container smoke if available.
-  Risk: P1 — changes auto-run execution path.
+- [ ] Slice 1 — sequential — Extract `RunDirectory` path helper
+  Scope: add `bench/run_paths.py` and replace a small set of repeated run/artifact path constructions in tests or non-risky code.
+  Stop when: tests can use `RunDirectory` for result/artifact paths.
+  Verify: focused path/helper tests.
+  Risk: P2 — foundation for later refactor.
 
-- [ ] Slice 2 — sequential — Orchestra-aware settle gate
-  Scope: add logic that maps the Pi session id to Orchestra session id, detects dispatched run ids, polls Orchestra status/report state after `agent_settled`, and keeps RPC alive until descendants are terminal.
-  Stop when: synthetic tests cover active worker -> no exit, terminal worker -> exit.
-  Verify: unit tests with mocked RPC events and mocked Orchestra CLI outputs.
-  Risk: P1 — lifecycle correctness.
+- [ ] Slice 2 — sequential — Simplify runtime config sync
+  Scope: stop requiring/copying benchmark `config.yaml` and `prompts.yaml`; preserve local `agent-catalog.yaml`; sync `config/skills/`; keep runtime config/prompts from installed Orchestra defaults.
+  Stop when: `config/orchestra/config.yaml` and `config/orchestra/prompts.yaml` can both be absent and `scripts/01-start start` / runtime init still succeeds without overwriting the local catalog.
+  Verify: unit tests or script tests with temp config/runtime dirs plus a container init smoke.
+  Risk: P1 — config provenance and accidental overwrite risk.
 
-- [ ] Slice 3 — sequential — Wire `02-open-pi --auto`
-  Scope: replace the current `pi -p` auto path with the RPC runner; keep existing preparation, notes, metadata, cleanup, artifact collection, and grading behavior.
-  Stop when: `02-open-pi --auto --no-orchestra` and Orchestra-enabled command construction are covered by tests.
-  Verify: `pytest -q tests/test_operator_flow.py ...` focused tests.
-  Risk: P1 — operator workflow.
+- [x] Slice 3 — dropped — Plugin profiles
+  Decision (operator): keep commented `pi install` lines in `docker/Dockerfile` as the plugin selection mechanism. Simple and sufficient; no profile machinery.
 
-- [ ] Slice 4 — sequential — Artifact and result diagnostics
-  Scope: persist RPC event logs and manifest pointers; optionally extract settle/active-worker timing into existing diagnostics if straightforward.
-  Stop when: `result.json`/manifest points to RPC artifacts and `05-results debug` can lead operators to them or existing debug paths remain sufficient.
-  Verify: artifact collection tests and a `scripts/05-results debug <run>` smoke on a synthetic result.
-  Risk: P2 — debugging/reporting only.
+- [ ] Slice 4 — sequential — RPC runner tracer bullet
+  Scope: implement minimal `bench/pi_rpc_runner.py` that starts Pi RPC, sends one prompt, logs events, and exits on `agent_settled` for no-Orchestra mode.
+  Stop when: mocked process tests pass and a harmless container smoke can run without grading.
+  Verify: `tests/test_pi_rpc_runner.py` for JSONL protocol/event parsing.
+  Risk: P1 — new execution path.
 
-- [ ] Slice 5 — sequential — Container dogfood
-  Scope: run one tiny no-Orchestra auto task and one Orchestra-enabled capability/smoke task through the RPC runner in the real benchmark container.
-  Stop when: grading waits for terminal workers and no longer reports `worker_running_without_exit=true` for a run whose worker completed.
-  Verify: `scripts/05-results run <id>` evidence: worker completed, role sessions captured when worker ran, RPC artifacts present.
-  Risk: P1 — real runtime behavior can differ from unit tests.
+- [ ] Slice 5 — sequential — Orchestra-aware settle gate
+  Scope: add active-run/report detection around RPC settle; use existing Orchestra CLI/state outputs where possible.
+  Stop when: mocked tests cover active worker preventing exit and terminal worker allowing exit.
+  Verify: mocked Orchestra CLI outputs and synthetic RPC events.
+  Risk: P1 — prevents premature grading.
 
-- [ ] Slice 6 — sequential — Review and cleanup
-  Scope: review changed scripts/docs/tests, remove legacy dead code only if safe, and document any fallback flags.
-  Stop when: focused tests and a small operator-flow smoke pass; reviewer signs off.
-  Verify: `pytest -q tests/test_operator_flow.py tests/test_orchestration_extraction.py tests/test_reporting.py --tb=short` plus targeted runner tests.
+- [ ] Slice 6 — sequential — Wire `02-open-pi --auto` to RPC runner
+  Scope: keep existing prep, metadata, cleanup, artifact collection, grading integration; replace one-shot auto path or add temporary `--auto-runner rpc|print` rollout flag.
+  Stop when: operator-flow tests prove command construction and cleanup/grade sequencing.
+  Verify: `pytest -q tests/test_operator_flow.py tests/test_pi_rpc_runner.py --tb=short`.
+  Risk: P1 — public workflow.
+
+- [ ] Slice 7 — sequential — RPC artifacts and debug navigation
+  Scope: save RPC events under run artifacts; extend manifest/debug view to summarize RPC/Pi/Orchestra trace availability and lifecycle chain.
+  Stop when: `scripts/05-results debug <run>` shows useful trace guidance on synthetic fixtures.
+  Verify: reporting/debug tests.
+  Risk: P2 — operator diagnostics.
+
+- [ ] Slice 8 — sequential — Dogfood full auto run
+  Scope: run at least one no-Orchestra and one Orchestra-enabled task in the real container.
+  Stop when: results show correct grading lifecycle and no false `worker_running_without_exit` from one-shot exit.
+  Verify:
+  ```bash
+  scripts/02-open-pi cap-easy-django-reports --auto --notes "RPC runner smoke"
+  scripts/05-results run <run-id>
+  scripts/05-results debug <run-id>
+  ```
+  Risk: P1 — real runtime integration.
+
+- [ ] Slice 9 — parallel-safe after core stabilizes — Start decomposing `05-results`
+  Scope: move pure aggregation/formatting helpers into importable modules without changing CLI output.
+  Stop when: existing reporting tests still pass and new direct module tests cover moved logic.
+  Verify: `pytest -q tests/test_reporting.py --tb=short`.
   Risk: P2.
 
-## Tests to Add or Update
+- [ ] Slice 10 — parallel-safe after core stabilizes — Test fixture cleanup
+  Scope: consolidate repeated result/artifact/session builders into shared test helpers.
+  Stop when: at least RPC/debug/reporting tests use shared helpers and total duplication drops.
+  Verify: focused test suite.
+  Risk: P3.
 
-- RPC JSONL parser handles responses, `agent_settled`, tool events, malformed lines, and process EOF.
-- Runner exits on plain Pi settle when Orchestra is disabled.
-- Runner does not exit on settle while mocked Orchestra active count is nonzero.
-- Runner exits after mocked active count reaches zero and pending report delivery is complete/absent.
-- `scripts/02-open-pi --auto` invokes the RPC runner and still performs cleanup/artifact collection/grading.
-- `scripts/04-run-suite` still passes shared options across suites.
+## Execution Guidance (overnight fork, qwen3.8-27b)
 
-## Verification
+Keep every slice minimal — simple over clever. No security scans. Commit at milestones, do not push.
 
-Focused:
+Order:
+1. Slices 1-4: foundation + RPC tracer bullet with mocked tests.
+2. Slice 5: settle gate with mocked Orchestra outputs.
+3. Slice 6: wire `02-open-pi --auto` behind `--auto-runner {print,rpc}`; dogfood rpc explicitly first, flip default only after a live pass.
+4. Slice 7-8: RPC artifact wiring + debug view + real end-to-end runs (one no-Orchestra, one Orchestra).
+5. Slices 9-10 are deferred until the RPC path has stabilized in real use; do not start them opportunistically.
+
+Constraints:
+- Do not rewrite `05-results` or split all of `eval_harness.py` this pass.
+- Do not overwrite local `agent-catalog.yaml` automatically.
+- Do not remove current script UX (`--auto-runner print` stays as escape hatch).
+- Do not delete existing result artifacts.
+- LM Studio is concurrency==1; live dogfood runs serialize with the operator session — that is acceptable, no special handling.
+
+## Verification Commands
+
+Focused unit checks as slices land:
 ```bash
-pytest -q tests/test_operator_flow.py tests/test_orchestration_extraction.py tests/test_reporting.py --tb=short
+pytest -q tests/test_operator_flow.py tests/test_reporting.py tests/test_orchestration_extraction.py --tb=short
 ```
 
-After implementation adds runner tests, include them explicitly:
+Add new focused tests as files exist:
 ```bash
-pytest -q tests/test_pi_rpc_runner.py tests/test_operator_flow.py --tb=short
+pytest -q tests/test_runtime_sync.py tests/test_pi_rpc_runner.py --tb=short
 ```
 
-Runtime dogfood:
+Runtime dogfood after wiring:
 ```bash
+scripts/01-start start
 scripts/02-open-pi cap-easy-django-reports --auto --notes "RPC runner smoke"
 scripts/05-results run <run-id>
+scripts/05-results debug <run-id>
 ```
-
-Success evidence should include no premature `worker_running_without_exit` when workers complete, and RPC event artifacts present.
 
 ## Risks
 
-- RPC protocol details may require a small Node/Python client rather than shell-only scripting.
-- Mapping Pi session ids to Orchestra session ids must be exact or the settle gate can wait on the wrong scope.
-- If Pi RPC mode does not load extensions or trust resources like print mode, startup flags/settings may need adjustment.
-- If Orchestra auto-return cannot inject into an RPC session, a fallback resume/report-injection path may be needed.
-- Long-running failed workers need timeouts and clear failure artifacts so CI does not hang indefinitely.
+- Accidentally overwriting hand-edited `agent-catalog.yaml`; sync must be safe by default.
+- RPC mode may expose trust/extension loading differences from print/TUI mode.
+- Orchestra session id mapping may be wrong; event artifacts and state queries must make this debuggable.
+- Adding refactor and RPC at once can destabilize the harness; keep slices vertical and small.
 
 ## Open Questions
 
-- Should `--auto` always use RPC once implemented, or should a temporary `--auto-runner rpc|print` flag exist during rollout?
-- Which Orchestra CLI command is most reliable for pending session reports in the bench container: status/history/debug, `_await-session-report`, or a new explicit status command?
-- What timeout should the runner enforce per task/suite, and should it come from task metadata?
-- Should RPC event summaries be elevated into `result.orchestration_checks`, or kept as debug artifacts only at first?
+- None for Orchestra `config.yaml`/`prompts.yaml`: they come from installed Orchestra, not benchmark config.
+- Should `--auto-runner print` remain as an escape hatch after RPC is default?
+- How much RPC event summarization belongs in `result.json` versus artifact-only debug views?
