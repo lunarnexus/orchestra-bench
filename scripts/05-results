@@ -1720,6 +1720,47 @@ def _print_orchestra_debug_trace(run_dir):
     return complete
 
 
+def _print_rpc_trace(run_dir):
+    summary_path = run_dir / ".bench_rpc_run.json"
+    events_path = run_dir / "artifacts" / "pi-rpc" / "events.jsonl"
+    if not summary_path.exists() and not events_path.exists():
+        return  # print-mode or pre-RPC runs have no RPC artifacts
+    print("\npi rpc runner:")
+    if summary_path.exists():
+        try:
+            s = json.loads(summary_path.read_text())
+        except Exception:
+            s = {}
+        print(f"  pi_exit      : {s.get('pi_exit','?')}")
+        print(f"  orch_on_ok   : {s.get('orch_on_ok','?')}")
+        print(f"  session_id   : {s.get('session_id') or 'none captured'}")
+        gate = str(s.get("gate_result", "skipped"))
+        marker = ""
+        if gate == "timeout":
+            marker = "  <-- warning: Orchestra still active when runner gave up waiting"
+        print(f"  orch gate    : {gate}{marker}")
+    else:
+        print("  summary      : missing (.bench_rpc_run.json not written)")
+    if events_path.exists():
+        try:
+            lines = [json.loads(l) for l in events_path.read_text(errors="replace").splitlines() if l.strip()]
+        except Exception as exc:
+            print(f"  events       : unreadable ({exc})")
+            return
+        counts: dict[str, int] = {}
+        for e in lines:
+            t = str(e.get("type", "?"))
+            counts[t] = counts.get(t, 0) + 1
+        settled = counts.get("agent_settled", 0)
+        print(f"  events       : {events_path.relative_to(run_dir)} ({len(lines)} lines)")
+        interesting = [k for k in ("agent_start", "agent_end", "agent_settled", "compaction_end") if counts.get(k)]
+        tool_calls = sum(v for k, v in counts.items() if k == "tool_execution_end")
+        print(f"  lifecycle    : {' '.join(f'{k}={counts[k]}' for k in interesting) or 'no agent events'}"
+              + (f" tools_done={tool_calls}" if tool_calls else ""))
+        if settled == 0:
+            print("  warning      : no agent_settled event; Pi exited before settling (premature grade risk)")
+
+
 def print_debug_detail(rows, q):
     r = find_run(rows, q)
     if not r:
@@ -1738,6 +1779,7 @@ def print_debug_detail(rows, q):
     else:
         print("\n[bench] orchestra debug trace is missing or incomplete; showing raw Pi session fallback")
         _print_pi_session_trace(run_dir, limit)
+    _print_rpc_trace(run_dir)
 
 
 def print_run_detail(rows, q):
