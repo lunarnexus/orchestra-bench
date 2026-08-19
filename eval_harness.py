@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import re
 import shlex
 import shutil
 import sqlite3
@@ -325,11 +326,62 @@ def _parse_pi_settings_enabled_plugins(settings: object) -> list[str]:
     return sorted(enabled)
 
 
+def _collect_container_orchestra_version_snapshot() -> dict[str, object]:
+    """Collect Orchestra package/source version from the live container."""
+    snapshot: dict[str, object] = {}
+    try:
+        proc = _docker_exec(
+            "sh", "-lc",
+            "/opt/orchestra/.venv/bin/python - <<'PY'\n"
+            "import json, subprocess\n"
+            "data = {}\n"
+            "try:\n"
+            "    import orchestra\n"
+            "    data['orchestra_version'] = str(getattr(orchestra, '__version__', '') or '')\n"
+            "    data['orchestra_module_file'] = str(getattr(orchestra, '__file__', '') or '')\n"
+            "except Exception as exc:\n"
+            "    data['orchestra_version_error'] = repr(exc)\n"
+            "try:\n"
+            "    rev = subprocess.run(['git', '-C', '/opt/orchestra', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True)\n"
+            "    if rev.returncode == 0 and rev.stdout.strip():\n"
+            "        data['orchestra_source_rev'] = rev.stdout.strip()\n"
+            "    dirty = subprocess.run(['git', '-C', '/opt/orchestra', 'status', '--porcelain'], capture_output=True, text=True)\n"
+            "    if dirty.returncode == 0:\n"
+            "        data['orchestra_source_dirty'] = bool(dirty.stdout.strip())\n"
+            "except Exception:\n"
+            "    pass\n"
+            "print(json.dumps(data))\n"
+            "PY"
+        )
+        if proc.stdout.strip():
+            data = _json.loads(proc.stdout)
+            if isinstance(data, dict):
+                for key in (
+                    "orchestra_version",
+                    "orchestra_module_file",
+                    "orchestra_source_rev",
+                    "orchestra_source_dirty",
+                    "orchestra_version_error",
+                ):
+                    value = data.get(key)
+                    if value not in (None, ""):
+                        snapshot[key] = value
+                if not snapshot.get("orchestra_source_rev"):
+                    match = re.search(r"\+g([0-9a-fA-F]{7,40})", str(snapshot.get("orchestra_version", "")))
+                    if match:
+                        snapshot["orchestra_source_rev"] = match.group(1)
+    except Exception:
+        pass
+    return snapshot
+
+
 def collect_container_runtime_snapshot() -> dict[str, object]:
     """Collect installed Pi package/extension provenance from the live container."""
     snapshot: dict[str, object] = {}
     if not _docker_ok():
         return snapshot
+
+    snapshot.update(_collect_container_orchestra_version_snapshot())
 
     package_names: list[str] = []
     try:
@@ -557,12 +609,27 @@ def _copy_orchestra_db_preserving_nonempty(container_path: str, host_path: Path,
 
 
 def _parse_pi_session_file(path: Path) -> dict[str, object]:
-    """Extract session id, token totals, and final context usage from one Pi JSONL session file."""
+    """Extract session id, token totals, and final context usage from one Pi JSONL session file.
+
+    Captures all trace-backed buckets: input, output, reasoning, cacheRead,
+    cacheWrite, totalTokens, reported_cost, provider, model.
+    Tracks max per-call input/total for main-session context pressure diagnostics.
+    """
     out: dict[str, object] = {"file": path.name}
-    totals = {"input": 0, "output": 0, "reasoning": 0, "totalTokens": 0}
+    # Legacy + new buckets
+    totals = {
+        "input": 0, "output": 0, "reasoning": 0, "totalTokens": 0,
+        "cacheRead": 0, "cacheWrite": 0, "reported_cost": 0.0,
+    }
     context_usage: dict[str, object] = {"api_call_count": 0}
-    last_usage: dict[str, int] = {}
+    last_usage: dict[str, int | float] = {}
     compaction_count = 0
+    max_input = 0
+    max_total = 0
+    # Provider/model from the most recent usage-bearing message
+    last_provider: str = ""
+    last_model: str = ""
+
     try:
         for line in path.read_text(errors="replace").splitlines():
             if not line.strip():
@@ -576,19 +643,53 @@ def _parse_pi_session_file(path: Path) -> dict[str, object]:
             msg = event.get("message") if isinstance(event, dict) else None
             usage = msg.get("usage") if isinstance(msg, dict) else None
             if isinstance(usage, dict):
-                call_usage: dict[str, int] = {}
+                call_usage: dict[str, int | float] = {}
                 for key in totals:
-                    value = usage.get(key)
-                    if isinstance(value, (int, float)):
-                        int_value = int(value)
-                        totals[key] += int_value
-                        call_usage[key] = int_value
+                    raw_value = usage.get(key)
+                    if isinstance(raw_value, (int, float)):
+                        val = int(raw_value) if key != "reported_cost" else float(raw_value)
+                        totals[key] += val
+                        call_usage[key] = val
+                # Also capture cost from nested cost object
+                cost_obj = usage.get("cost")
+                if isinstance(cost_obj, dict):
+                    total_cost = cost_obj.get("total")
+                    if isinstance(total_cost, (int, float)):
+                        totals["reported_cost"] += float(total_cost)
+                        call_usage["reported_cost"] = float(total_cost)
+
+                # Track provider and model from event level (not inside message dict)
+                prov = event.get("provider") or msg.get("provider")
+                mdl = event.get("model") or msg.get("model")
+                if prov: last_provider = str(prov)
+                if mdl: last_model = str(mdl)
+
+                # Track max context pressure (input and total per call)
+                call_input = usage.get("input", 0)
+                call_total = usage.get("totalTokens", 0)
+                if isinstance(call_input, (int, float)):
+                    int_call_input = int(call_input)
+                    if int_call_input > max_input:
+                        max_input = int_call_input
+                if isinstance(call_total, (int, float)):
+                    int_call_total = int(call_total)
+                    if int_call_total > max_total:
+                        max_total = int_call_total
+
+                call_usage["input"] = call_usage.get("input", 0)
+                call_usage["totalTokens"] = call_usage.get("totalTokens", 0)
+
                 if call_usage:
                     context_usage["api_call_count"] = int(context_usage["api_call_count"]) + 1
                     last_usage = call_usage
     except Exception as exc:
         out["parse_error"] = str(exc)
     out["usage"] = totals
+    if max_input > 0 or max_total > 0 or compaction_count > 0:
+        context_usage.update({
+            "max_input_tokens": max_input,
+            "max_total_tokens": max_total,
+        })
     if last_usage:
         context_usage.update({
             "last_input_tokens": last_usage.get("input", 0),
@@ -596,7 +697,494 @@ def _parse_pi_session_file(path: Path) -> dict[str, object]:
             "compaction_count": compaction_count,
         })
         out["context_usage"] = context_usage
+    if last_provider:
+        out["provider"] = last_provider
+    if last_model:
+        out["model"] = last_model
     return out
+
+
+_SESSION_TEST_COMMAND_PATTERNS = (
+    r"^(?:npm|pnpm|yarn|bun)\s+test(?:\s|$)",
+    r"^(?:npm|pnpm|yarn|bun)\s+run\s+test(?:\s|$)",
+    r"^pytest(?:\s|$)",
+    r"^python(?:\d+(?:\.\d+)?)?\s+-m\s+pytest(?:\s|$)",
+    r"^py\s+-m\s+pytest(?:\s|$)",
+    r"^python(?:\d+(?:\.\d+)?)?\s+-m\s+unittest(?:\s|$)",
+    r"^go\s+test(?:\s|$)",
+    r"^cargo\s+test(?:\s|$)",
+    r"^bundle\s+exec\s+rspec(?:\s|$)",
+    r"^rspec(?:\s|$)",
+    r"^jest(?:\s|$)",
+    r"^vitest(?:\s|$)",
+    r"^mocha(?:\s|$)",
+    r"^ava(?:\s|$)",
+    r"^bun\s+test(?:\s|$)",
+    r"^phpunit(?:\s|$)",
+)
+
+
+def _pi_session_activity_trace(path: Path) -> dict[str, object]:
+    """Return a compact event trace for one Pi session JSONL file."""
+    trace: dict[str, object] = {
+        "file": path.name,
+        "session_id": "",
+        "cwd": "",
+        "usage_events": [],
+        "tool_calls": [],
+    }
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except Exception:
+        return trace
+
+    usage_events = trace["usage_events"]
+    tool_calls = trace["tool_calls"]
+    assert isinstance(usage_events, list)
+    assert isinstance(tool_calls, list)
+
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = _json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+
+        timestamp = str(event.get("timestamp", "") or "")
+        if event.get("type") == "session":
+            if event.get("id"):
+                trace["session_id"] = str(event.get("id"))
+            if event.get("cwd"):
+                trace["cwd"] = str(event.get("cwd"))
+
+        msg = event.get("message")
+        if not isinstance(msg, dict):
+            continue
+        usage = msg.get("usage")
+        if isinstance(usage, dict):
+            usage_events.append({"timestamp": timestamp, "usage": usage})
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "toolCall":
+                tool_calls.append({
+                    "timestamp": timestamp,
+                    "role": str(msg.get("role", "") or ""),
+                    "name": str(item.get("name", "") or ""),
+                    "arguments": item.get("arguments"),
+                })
+
+    return trace
+
+
+def _extract_tool_call_command(arguments: object) -> str:
+    if isinstance(arguments, str):
+        return arguments.strip()
+    if isinstance(arguments, list):
+        parts = [str(part).strip() for part in arguments if str(part).strip()]
+        return " ".join(parts)
+    if not isinstance(arguments, dict):
+        return ""
+    for key in ("command", "cmd", "script", "text", "value", "args"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _normalize_test_command(command: str) -> str:
+    text = " ".join(str(command or "").split()).strip()
+    if not text:
+        return ""
+
+    # Strip leading shell wrappers that commonly precede the actual test command.
+    for prefix in ("env ", "npx ", "bunx ", "npm exec ", "pnpm exec ", "yarn dlx "):
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+
+    if text.startswith("timeout "):
+        parts = text.split(None, 2)
+        if len(parts) == 3 and re.fullmatch(r"\d+[smhd]?(?:\d+[smhd]?)*", parts[1]):
+            text = parts[2].strip()
+
+    segments = [segment.strip() for segment in re.split(r"\s*(?:&&|\|\||;)\s*", text) if segment.strip()]
+    if not segments:
+        segments = [text]
+
+    for segment in segments:
+        if segment.startswith(("cd ", "pushd ", "popd ", "source ", ". ")):
+            continue
+        cleaned = segment
+        while True:
+            cleaned_parts = cleaned.split()
+            if not cleaned_parts:
+                break
+            first = cleaned_parts[0]
+            if first == "env" or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", first):
+                cleaned = " ".join(cleaned_parts[1:]).strip()
+                continue
+            break
+        cleaned = " ".join(cleaned.split()).strip()
+        if not cleaned:
+            continue
+        if re.match(r"^(?:npm|pnpm|yarn|bun)\s+run\s+test(?:\s|$)", cleaned, re.I):
+            return re.sub(r"^(npm|pnpm|yarn|bun)\s+run\s+test", r"\1 test", cleaned, flags=re.I)
+        for pattern in _SESSION_TEST_COMMAND_PATTERNS:
+            if re.match(pattern, cleaned, re.I):
+                return cleaned
+    return ""
+
+
+def _classify_parent_tool_call(tool_name: str, arguments: object) -> str:
+    if tool_name == "orch_dispatch":
+        return "dispatch"
+    if tool_name in {"bash", "sh", "shell"}:
+        command = _extract_tool_call_command(arguments)
+        if _normalize_test_command(command):
+            return "test"
+    return "other"
+
+
+def _collect_orchestration_efficiency_diagnostics(
+    pi_sessions_dir: Path,
+    orchestra_debug_dir: Path,
+    workdir: str,
+) -> dict[str, dict[str, object]]:
+    """Collect compact diagnostics for orchestration efficiency reporting."""
+    traces: list[dict[str, object]] = []
+    if pi_sessions_dir.is_dir():
+        for jsonl_file in sorted(pi_sessions_dir.glob("*.jsonl")):
+            traces.append(_pi_session_activity_trace(jsonl_file))
+
+    orch_events = _parse_orchestra_logs(orchestra_debug_dir)
+    role_by_session: dict[str, str] = {}
+    for event in orch_events:
+        role = str(event.get("role", "") or "").strip().lower()
+        if not role:
+            continue
+        for key in ("worker_session_id", "session_id", "run_id"):
+            raw_session_id = event.get(key)
+            if raw_session_id:
+                for session_id in _session_id_variants(raw_session_id):
+                    role_by_session[session_id] = role
+
+    main_traces = [
+        trace for trace in traces
+        if str(trace.get("cwd") or "") == workdir
+        and not str(trace.get("session_id") or "").startswith("orchestra-worker-")
+    ]
+    worker_traces = [
+        trace for trace in traces
+        if str(trace.get("session_id") or "").startswith("orchestra-worker-")
+    ]
+
+    first_dispatch_ts: str | None = None
+    for trace in main_traces:
+        tool_calls = trace.get("tool_calls") if isinstance(trace, dict) else None
+        if not isinstance(tool_calls, list):
+            continue
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            if str(call.get("name", "")) != "orch_dispatch":
+                continue
+            ts = str(call.get("timestamp", "") or "")
+            if ts and (first_dispatch_ts is None or ts < first_dispatch_ts):
+                first_dispatch_ts = ts
+
+    worker_terminal_ts: str | None = None
+    for event in orch_events:
+        if str(event.get("event", "")) != "worker.exited":
+            continue
+        ts = str(event.get("timestamp", "") or "")
+        if ts and (worker_terminal_ts is None or ts > worker_terminal_ts):
+            worker_terminal_ts = ts
+    if worker_terminal_ts is None:
+        for trace in worker_traces:
+            for key in ("usage_events", "tool_calls"):
+                items = trace.get(key)
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    ts = str(item.get("timestamp", "") or "")
+                    if ts and (worker_terminal_ts is None or ts > worker_terminal_ts):
+                        worker_terminal_ts = ts
+
+    tokens: dict[str, object] = {}
+    checks: dict[str, object] = {}
+
+    active_usage_events: list[dict[str, object]] = []
+    if first_dispatch_ts and worker_terminal_ts:
+        for trace in main_traces:
+            for usage_event in trace.get("usage_events", []):
+                if not isinstance(usage_event, dict):
+                    continue
+                ts = str(usage_event.get("timestamp", "") or "")
+                if ts and first_dispatch_ts <= ts <= worker_terminal_ts:
+                    active_usage_events.append(usage_event)
+    if active_usage_events:
+        total_tokens = 0
+        for event in active_usage_events:
+            usage = event.get("usage") if isinstance(event, dict) else None
+            if not isinstance(usage, dict):
+                continue
+            value = usage.get("totalTokens")
+            if not isinstance(value, (int, float)):
+                input_tokens = usage.get("input")
+                output_tokens = usage.get("output")
+                reasoning_tokens = usage.get("reasoning")
+                cache_read_tokens = usage.get("cacheRead")
+                cache_write_tokens = usage.get("cacheWrite")
+                value = sum(
+                    int(v)
+                    for v in (input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens)
+                    if isinstance(v, (int, float))
+                )
+            if isinstance(value, (int, float)):
+                total_tokens += int(value)
+        tokens["main_active_worker_tokens"] = total_tokens
+        tokens["main_active_worker_api_calls"] = len(active_usage_events)
+
+    if first_dispatch_ts and worker_terminal_ts:
+        parent_tool_calls: dict[str, int] = {}
+        for trace in main_traces:
+            for call in trace.get("tool_calls", []):
+                if not isinstance(call, dict):
+                    continue
+                ts = str(call.get("timestamp", "") or "")
+                if not ts or not (first_dispatch_ts <= ts <= worker_terminal_ts):
+                    continue
+                category = _classify_parent_tool_call(str(call.get("name", "")), call.get("arguments"))
+                parent_tool_calls[category] = parent_tool_calls.get(category, 0) + 1
+        if parent_tool_calls:
+            checks["parent_tool_calls_while_workers_active"] = {
+                "total": sum(parent_tool_calls.values()),
+                "by_category": parent_tool_calls,
+            }
+
+    test_occurrences: list[dict[str, object]] = []
+    sequence = 0
+    for trace in traces:
+        session_id = str(trace.get("session_id") or "")
+        role = role_by_session.get(session_id)
+        if not role:
+            role = "orchestrator" if not session_id.startswith("orchestra-worker-") else "unknown"
+        for call in trace.get("tool_calls", []):
+            if not isinstance(call, dict):
+                continue
+            command = _normalize_test_command(_extract_tool_call_command(call.get("arguments")))
+            if not command:
+                continue
+            test_occurrences.append({
+                "timestamp": str(call.get("timestamp", "") or ""),
+                "sequence": sequence,
+                "role": role,
+                "command": command,
+            })
+            sequence += 1
+
+    if test_occurrences:
+        test_occurrences.sort(key=lambda item: (str(item.get("timestamp", "")), int(item.get("sequence", 0))))
+        ownership_by_role: dict[str, int] = {}
+        command_counts: dict[str, int] = {}
+        builder_commands: set[str] = set()
+        worker_commands: set[str] = set()
+
+        for occurrence in test_occurrences:
+            role = str(occurrence.get("role", "") or "unknown")
+            command = str(occurrence.get("command", "") or "")
+            if not command:
+                continue
+            ownership_by_role[role] = ownership_by_role.get(role, 0) + 1
+            command_counts[command] = command_counts.get(command, 0) + 1
+            if role == "builder":
+                builder_commands.add(command)
+                worker_commands.add(command)
+            elif role != "orchestrator":
+                worker_commands.add(command)
+
+        verifier_repeated_builder_tests = sum(
+            1
+            for occurrence in test_occurrences
+            if str(occurrence.get("role", "") or "unknown") == "verifier"
+            and str(occurrence.get("command", "") or "") in builder_commands
+        )
+        orchestrator_repeated_worker_tests = sum(
+            1
+            for occurrence in test_occurrences
+            if str(occurrence.get("role", "") or "unknown") == "orchestrator"
+            and str(occurrence.get("command", "") or "") in worker_commands
+        )
+
+        if ownership_by_role:
+            checks["test_command_ownership_by_role"] = ownership_by_role
+        duplicate_counts = {command: count for command, count in command_counts.items() if count > 1}
+        if duplicate_counts:
+            checks["duplicate_normalized_test_command_counts"] = duplicate_counts
+        if verifier_repeated_builder_tests:
+            checks["verifier_repeated_builder_tests"] = verifier_repeated_builder_tests
+        if orchestrator_repeated_worker_tests:
+            checks["orchestrator_repeated_worker_tests"] = orchestrator_repeated_worker_tests
+
+    return {"tokens": tokens, "checks": checks}
+
+
+def _build_tokens_payload(
+    sessions: list[dict[str, object]],
+    workdir: str,
+    main_context_usage: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build the structured tokens.json payload from parsed session data.
+
+    Classifies sessions into main (non-orchestra-worker matching workdir)
+    and role (orchestra-worker-*) groups. Produces flat all-session summary
+    fields plus authoritative classified sections: main_session, role_sessions,
+    all_sessions, expensive_main_session_tokens, cheap_role_tokens.
+
+    total_tokens means ALL sessions as a convenience scalar; structured sections
+    are authoritative for reporting and efficiency comparisons.
+    """
+    if main_context_usage is None:
+        main_context_usage = {}
+
+    # --- Classify sessions ---
+    main_buckets: dict[str, int | float] = {
+        "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
+        "cached_input_read_tokens": 0, "cache_write_tokens": 0,
+        "total_tokens": 0, "reported_cost": 0.0,
+    }
+    role_buckets: dict[str, int | float] = {
+        "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
+        "cached_input_read_tokens": 0, "cache_write_tokens": 0,
+        "total_tokens": 0, "reported_cost": 0.0,
+    }
+
+    _TOKEN_KEYS = ("input", "output", "reasoning", "cacheRead",
+                   "cacheWrite", "totalTokens")
+    _KEY_MAP = {
+        "input": "input_tokens", "output": "output_tokens",
+        "reasoning": "reasoning_tokens",
+        "cacheRead": "cached_input_read_tokens",
+        "cacheWrite": "cache_write_tokens",
+        "totalTokens": "total_tokens",
+    }
+
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        usage = session.get("usage")
+        if not isinstance(usage, dict):
+            continue
+
+        is_role = str(session.get("session_id", "")) or ""
+        target_buckets: dict[str, int | float]
+        # Role sessions identified by orchestra-worker- prefix
+        if str(session.get("session_id", "")).startswith("orchestra-worker-"):
+            target_buckets = role_buckets
+        else:
+            target_buckets = main_buckets
+
+        for raw_key in _TOKEN_KEYS:
+            value = usage.get(raw_key)
+            mapped_key = _KEY_MAP[raw_key]
+            if isinstance(value, (int, float)) and mapped_key:
+                target_buckets[mapped_key] += int(value)
+
+        # Cost from flat reported_cost field or nested cost object
+        cost_val = usage.get("reported_cost")
+        if isinstance(cost_val, (int, float)):
+            target_buckets["reported_cost"] += float(cost_val)
+
+    # --- Flat convenience totals (ALL sessions) ---
+    all_totals_input = main_buckets["input_tokens"] + role_buckets["input_tokens"]
+    all_totals_output = main_buckets["output_tokens"] + role_buckets["output_tokens"]
+    all_totals_reasoning = main_buckets["reasoning_tokens"] + role_buckets["reasoning_tokens"]
+    all_totals_total = main_buckets["total_tokens"] + role_buckets["total_tokens"]
+
+    token_payload: dict[str, object] = {
+        # Flat all-session convenience fields
+        "input_tokens": int(all_totals_input),
+        "output_tokens": int(all_totals_output),
+        "reasoning_tokens": int(all_totals_reasoning),
+        "total_tokens": int(all_totals_total),
+
+        # Structured sections
+        "main_session": {
+            "session_id": main_context_usage.get("session_id", ""),
+            "file": main_context_usage.get("file", ""),
+            **{k: v for k, v in main_buckets.items()},
+            "provider": str(main_context_usage.get("provider", "")),
+            "model": str(main_context_usage.get("model", "")),
+        },
+        "role_sessions": {
+            **{k: v for k, v in role_buckets.items()},
+        },
+        "all_sessions": {
+            "input_tokens": int(all_totals_input),
+            "output_tokens": int(all_totals_output),
+            "reasoning_tokens": int(all_totals_reasoning),
+            "cached_input_read_tokens": int(
+                main_buckets["cached_input_read_tokens"] + role_buckets["cached_input_read_tokens"]
+            ),
+            "cache_write_tokens": int(
+                main_buckets["cache_write_tokens"] + role_buckets["cache_write_tokens"]
+            ),
+            "total_tokens": int(all_totals_total),
+            "reported_cost": round(float(
+                main_buckets["reported_cost"] + role_buckets["reported_cost"]
+            ), 6),
+        },
+    }
+
+    # --- Expensive/cheap aliases for efficiency comparisons ---
+    token_payload["expensive_main_session_tokens"] = {
+        "input_tokens": int(main_buckets["input_tokens"]),
+        "output_tokens": int(main_buckets["output_tokens"]),
+        "reasoning_tokens": int(main_buckets["reasoning_tokens"]),
+        "cached_input_read_tokens": int(main_buckets["cached_input_read_tokens"]),
+        "cache_write_tokens": int(main_buckets["cache_write_tokens"]),
+        "total_tokens": int(main_buckets["total_tokens"]),
+        "reported_cost": round(float(main_buckets["reported_cost"]), 6),
+    }
+    token_payload["cheap_role_tokens"] = {
+        "input_tokens": int(role_buckets["input_tokens"]),
+        "output_tokens": int(role_buckets["output_tokens"]),
+        "reasoning_tokens": int(role_buckets["reasoning_tokens"]),
+        "cached_input_read_tokens": int(role_buckets["cached_input_read_tokens"]),
+        "cache_write_tokens": int(role_buckets["cache_write_tokens"]),
+        "total_tokens": int(role_buckets["total_tokens"]),
+        "reported_cost": round(float(role_buckets["reported_cost"]), 6),
+    }
+
+    # --- Main context diagnostics (final + max) ---
+    last_input = main_context_usage.get("last_input_tokens")
+    last_total = main_context_usage.get("last_total_tokens")
+    api_calls = main_context_usage.get("api_call_count")
+    max_input = main_context_usage.get("max_input_tokens")
+    max_total = main_context_usage.get("max_total_tokens")
+    compaction_count = main_context_usage.get("compaction_count")
+
+    if isinstance(last_input, (int, float)):
+        token_payload["main_session_context_input_tokens"] = int(last_input)
+    if isinstance(last_total, (int, float)):
+        token_payload["main_session_context_total_tokens"] = int(last_total)
+    if isinstance(api_calls, (int, float)):
+        token_payload["main_session_api_call_count"] = int(api_calls)
+    if isinstance(max_input, (int, float)):
+        token_payload["main_session_max_input_tokens"] = int(max_input)
+    if isinstance(max_total, (int, float)):
+        token_payload["main_session_max_total_tokens"] = int(max_total)
+    if isinstance(compaction_count, (int, float)) and compaction_count > 0:
+        token_payload["compaction_count"] = int(compaction_count)
+
+    return token_payload
 
 
 def collect_run_artifacts(task_id: str, run_id: str) -> Path:
@@ -771,24 +1359,21 @@ def collect_run_artifacts(task_id: str, run_id: str) -> Path:
                 "file": main_session.get("file", ""),
                 **context_usage,
             }
+            # Include provider/model from the session parse output
+            if main_session.get("provider"):
+                main_context_usage["provider"] = str(main_session["provider"])
+            if main_session.get("model"):
+                main_context_usage["model"] = str(main_session["model"])
             manifest["main_session_context_usage"] = main_context_usage
 
-    token_payload = {
-        "input_tokens": totals["input"],
-        "output_tokens": totals["output"],
-        "reasoning_tokens": totals["reasoning"],
-        "total_tokens": totals["totalTokens"],
-    }
-    if main_context_usage:
-        last_input = main_context_usage.get("last_input_tokens")
-        last_total = main_context_usage.get("last_total_tokens")
-        api_calls = main_context_usage.get("api_call_count")
-        if isinstance(last_input, (int, float)):
-            token_payload["main_session_context_input_tokens"] = int(last_input)
-        if isinstance(last_total, (int, float)):
-            token_payload["main_session_context_total_tokens"] = int(last_total)
-        if isinstance(api_calls, (int, float)):
-            token_payload["main_session_api_call_count"] = int(api_calls)
+    token_payload = _build_tokens_payload(
+        list(manifest["pi_sessions"]),  # type: ignore[arg-type]
+        workdir,
+        main_context_usage,
+    )
+    efficiency_payload = _collect_orchestration_efficiency_diagnostics(pi_dir, orch_dir, workdir)
+    if isinstance(efficiency_payload.get("tokens"), dict):
+        token_payload.update(efficiency_payload["tokens"])
     (artifacts_dir / "tokens.json").write_text(_json.dumps(token_payload, indent=2) + "\n")
     (artifacts_dir / "pi-sessions.json").write_text(_json.dumps({"session_ids": session_ids, "sessions": manifest["pi_sessions"]}, indent=2) + "\n")
     (artifacts_dir / "manifest.json").write_text(_json.dumps(manifest, indent=2) + "\n")
@@ -979,6 +1564,12 @@ def grade(
 
     # Enrich with operator run metadata (.bench_run.json) if present
     _enrich_result_with_bench_run(task_result)
+    # Also capture live Orchestra version at grading time when possible. This
+    # makes reruns comparable even if the run was prepared before version
+    # capture existed; keep existing metadata authoritative when already set.
+    for key, value in collect_container_runtime_snapshot().items():
+        if key.startswith("orchestra_") and value not in (None, ""):
+            task_result.run_meta.setdefault(key, value)
 
     run_meta = task_result.run_meta if isinstance(task_result.run_meta, dict) else {}
     started_epoch = run_meta.get("started_epoch")
@@ -1051,8 +1642,21 @@ _ARTIFACT_TOKEN_KEYS = (
     "total_tokens", "prompt_tokens", "completion_tokens",
     "input_tokens", "output_tokens", "reasoning_tokens",
     "parent_tokens", "worker_tokens",
+    "cached_input_read_tokens", "cache_write_tokens",
     "main_session_context_input_tokens", "main_session_context_total_tokens",
     "main_session_api_call_count",
+    "main_session_max_input_tokens", "main_session_max_total_tokens",
+    "main_active_worker_tokens", "main_active_worker_api_calls",
+    "compaction_count",
+)
+
+# Nested dict keys in tokens.json that should be ingested as-is into result.tokens
+_ARTIFACT_NESTED_TOKEN_KEYS = (
+    "main_session",
+    "role_sessions",
+    "all_sessions",
+    "expensive_main_session_tokens",
+    "cheap_role_tokens",
 )
 
 
@@ -1086,16 +1690,10 @@ def ingest_artifacts(
                     if value > 0 or not isinstance(existing_value, (int, float)) or existing_value <= 0:
                         tokens[key] = value
 
-            # Also map to a simple 'total' if not already present
-            existing_total = existing_tokens.get("total")
-            if "total" in data and isinstance(data["total"], (int, float)):
-                value = data["total"]
-                if value > 0 or not isinstance(existing_total, (int, float)) or existing_total <= 0:
-                    tokens["total"] = int(value)
-            elif "total_tokens" in tokens:
-                value = tokens["total_tokens"]
-                if value > 0 or not isinstance(existing_total, (int, float)) or existing_total <= 0:
-                    tokens["total"] = int(value)
+            # Ingest nested classified token dicts.
+            for key in _ARTIFACT_NESTED_TOKEN_KEYS:
+                if key in data and isinstance(data[key], dict):
+                    tokens[key] = data[key]
 
             result.tokens = {**result.tokens, **tokens}
         except Exception as exc:
@@ -1500,6 +2098,7 @@ def extract_orchestration_checks(
       - premature_completion (bool): dispatched but result suggests no integration
       - missing_expected_role (bool): target role expected but not found anywhere
     """
+    workdir = result.workdir or f"/workspace/{result.run_id}-{result.task_id}"
     base = Path(base_dir or (_REPO_ROOT / RESULTS_DIR)).resolve()
     run_dir = base / f"{result.run_id}-{result.task_id}"
     if not run_dir.is_dir():
@@ -1612,6 +2211,14 @@ def extract_orchestration_checks(
         and has_orchestra_log_evidence
     )
     checks["premature_completion"] = bool(dispatches) and has_answer_check and not has_answer
+
+    efficiency_payload = _collect_orchestration_efficiency_diagnostics(
+        pi_sessions_dir,
+        orchestra_debug_dir,
+        workdir,
+    )
+    if isinstance(efficiency_payload.get("checks"), dict):
+        checks.update(efficiency_payload["checks"])
 
     return checks
 
@@ -1784,12 +2391,15 @@ def aggregate_repeated_trials(
         ]
 
         # Token totals across trials
-        token_totals: dict[str, int | float] = {}
+        token_total = 0
         has_tokens = False
         for r in runs:
-            for k, v in r.tokens.items():
-                if isinstance(v, (int, float)):
-                    token_totals[k] = token_totals.get(k, 0) + v
+            t = r.tokens or {}
+            all_sessions = t.get("all_sessions")
+            if isinstance(all_sessions, dict):
+                value = all_sessions.get("total_tokens")
+                if isinstance(value, (int, float)):
+                    token_total += int(value)
                     has_tokens = True
 
         entry: dict[str, object] = {
@@ -1814,11 +2424,7 @@ def aggregate_repeated_trials(
 
         # Token summary
         if has_tokens:
-            entry["tokens_total"] = token_totals.get("total", 0)
-            if "parent_tokens" in token_totals:
-                entry["parent_tokens"] = int(token_totals["parent_tokens"])
-            if "worker_tokens" in token_totals:
-                entry["worker_tokens"] = int(token_totals["worker_tokens"])
+            entry["tokens_total"] = token_total
 
         # Split label (use most common, or first non-empty)
         splits = [r.split for r in runs if r.split]
@@ -1910,6 +2516,8 @@ _PROVENANCE_FIELDS = (
     "runtime_version",
     "pi_version",
     "orchestra_version",
+    "orchestra_source_rev",
+    "orchestra_source_dirty",
 )
 
 
@@ -2107,18 +2715,14 @@ def compare_runs(
 
         token_total = 0
         has_tokens = False
-        parent_sum = 0
-        worker_sum = 0
         for r in runs:
             t = r.tokens or {}
-            if "total" in t and isinstance(t["total"], (int, float)):
-                token_total += int(t["total"])
-                has_tokens = True
-            elif "total_tokens" in t and isinstance(t["total_tokens"], (int, float)):
-                token_total += int(t["total_tokens"])
-                has_tokens = True
-            parent_sum += t.get("parent_tokens", 0) if isinstance(t.get("parent_tokens"), (int, float)) else 0
-            worker_sum += t.get("worker_tokens", 0) if isinstance(t.get("worker_tokens"), (int, float)) else 0
+            all_sessions = t.get("all_sessions")
+            if isinstance(all_sessions, dict):
+                value = all_sessions.get("total_tokens")
+                if isinstance(value, (int, float)):
+                    token_total += int(value)
+                    has_tokens = True
 
         entry: dict[str, object] = {
             "group": _provenance_label(provenance),
@@ -2188,28 +2792,28 @@ def print_comparison(
             print(f"    splits: {splits_info}")
 
         if g.get("tokens_total"):
-            print(f"    tokens: total={g['tokens_total']}", end="")
-            if "parent_tokens" in g or "worker_tokens" in g:
-                parent_val = g.get("parent_tokens", 0)
-                worker_val = g.get("worker_tokens", 0)
-                print(f" | parent={parent_val} worker={worker_val}", end="")
-            print()
+            print(f"    tokens: total={g['tokens_total']}")
 
     return comparison
 
 
 # ── Historical efficiency helpers ─────────────────────────────────
 def _get_total_tokens(tokens: dict[str, object] | None) -> int | None:
-    """Extract total token count from a tokens dict.
+    """Extract the authoritative main-session token count from a tokens dict.
 
-    Prefers 'total', falls back to 'total_tokens'. Returns None if absent.
+    Prefers structured main-session sections. Flat totals are not used as a
+    fallback because current structured fields are authoritative.
+    Returns None if no structured main-session total is present.
     """
     if not tokens or not isinstance(tokens, dict):
         return None
-    for key in ("total", "total_tokens"):
-        val = tokens.get(key)
-        if isinstance(val, (int, float)) and val > 0:
-            return int(val)
+
+    for key in ("expensive_main_session_tokens", "main_session"):
+        section = tokens.get(key)
+        if isinstance(section, dict):
+            val = section.get("total_tokens")
+            if isinstance(val, (int, float)) and val > 0:
+                return int(val)
     return None
 
 

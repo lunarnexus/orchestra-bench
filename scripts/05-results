@@ -397,19 +397,30 @@ def load_results():
 
 def token_total(r):
     t = r.get("tokens") or {}
-    for k in ("total", "total_tokens"):
-        v = t.get(k)
+    all_sessions = t.get("all_sessions")
+    if isinstance(all_sessions, dict):
+        v = all_sessions.get("total_tokens")
         if isinstance(v, (int, float)):
             return int(v)
     return 0
 
 
+def _safe_int(value):
+    """Extract a safe integer from a value, defaulting to 0."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    return 0
+
+
 def token_parts(r):
     t = r.get("tokens") or {}
+    all_sessions = t.get("all_sessions") if isinstance(t.get("all_sessions"), dict) else {}
     return {
-        "input": int(t.get("input_tokens", t.get("prompt_tokens", 0)) or 0),
-        "output": int(t.get("output_tokens", t.get("completion_tokens", 0)) or 0),
-        "reasoning": int(t.get("reasoning_tokens", 0) or 0),
+        "input": _safe_int(all_sessions.get("input_tokens")),
+        "output": _safe_int(all_sessions.get("output_tokens")),
+        "reasoning": _safe_int(all_sessions.get("reasoning_tokens")),
+        "cached_read": _safe_int(all_sessions.get("cached_input_read_tokens")),
+        "cache_write": _safe_int(all_sessions.get("cache_write_tokens")),
         "total": token_total(r),
     }
 
@@ -418,6 +429,100 @@ def main_context_input(r):
     t = r.get("tokens") or {}
     v = t.get("main_session_context_input_tokens")
     return int(v) if isinstance(v, (int, float)) else 0
+
+
+def main_context_max_input(r):
+    t = r.get("tokens") or {}
+    v = t.get("main_session_max_input_tokens", t.get("main_session_max_total_tokens"))
+    return int(v) if isinstance(v, (int, float)) else 0
+
+
+def main_api_call_count(r):
+    t = r.get("tokens") or {}
+    v = t.get("main_session_api_call_count")
+    return int(v) if isinstance(v, (int, float)) else 0
+
+
+def main_active_worker_tokens(r):
+    t = r.get("tokens") or {}
+    v = t.get("main_active_worker_tokens")
+    return int(v) if isinstance(v, (int, float)) else 0
+
+
+def main_active_worker_api_calls(r):
+    t = r.get("tokens") or {}
+    v = t.get("main_active_worker_api_calls")
+    return int(v) if isinstance(v, (int, float)) else 0
+
+
+def _format_count_mapping(mapping):
+    if not isinstance(mapping, dict) or not mapping:
+        return ""
+    parts = []
+    for key in sorted(mapping):
+        value = mapping.get(key)
+        if isinstance(value, (int, float)):
+            parts.append(f"{key}={int(value):,}")
+    return ", ".join(parts)
+
+
+def compaction_count(r):
+    """Get compaction count from tokens dict (ingested from artifacts)."""
+    t = r.get("tokens") or {}
+    v = t.get("compaction_count")
+    return int(v) if isinstance(v, (int, float)) else 0
+
+
+def _get_exp_main_tokens(r):
+    """Extract expensive main session total tokens dict."""
+    t = r.get("tokens") or {}
+    exp = t.get("expensive_main_session_tokens")
+    if isinstance(exp, dict) and exp:
+        return exp
+    main = t.get("main_session")
+    if isinstance(main, dict) and main:
+        return main
+    return {}
+
+
+def _get_cheap_role_tokens(r):
+    """Extract cheap role tokens dict."""
+    t = r.get("tokens") or {}
+    cheap = t.get("cheap_role_tokens")
+    if isinstance(cheap, dict) and cheap:
+        return cheap
+    return {}
+
+
+def exp_main_total(r):
+    """Total tokens for expensive main session."""
+    exp = _get_exp_main_tokens(r)
+    v = exp.get("total_tokens")
+    if isinstance(v, (int, float)) and v > 0:
+        return int(v)
+    return 0
+
+
+def cheap_role_total(r):
+    """Total tokens for cheap role sessions."""
+    cheap = _get_cheap_role_tokens(r)
+    v = cheap.get("total_tokens")
+    if isinstance(v, (int, float)) and v > 0:
+        return int(v)
+    return 0
+
+
+def has_classified_tokens(r):
+    """Check if result has classified token data."""
+    t = r.get("tokens") or {}
+    return bool(t.get("expensive_main_session_tokens") or t.get("cheap_role_tokens"))
+
+
+def _fmt_token_line(label, value):
+    """Format a single token metric line with commas for large numbers."""
+    if not value:
+        return f"{label:<20}: -"
+    return f"{label:<20}: {value:,}"
 
 
 def elapsed(r):
@@ -670,7 +775,7 @@ def aggregate_orchestration(rows):
     return metrics
 
 
-def print_metric_line(label, values, *, integer=False, formatter=None):
+def print_metric_line(label, values, *, integer=False, formatter=None, total=False):
     if not values:
         print(f"{label:<12}: none captured yet")
         return
@@ -683,9 +788,16 @@ def print_metric_line(label, values, *, integer=False, formatter=None):
             formatter = lambda v: f"{int(v):,}"
         else:
             formatter = lambda v: str(v)
-    print(
-        f"{label:<12}: avg={formatter(avg)} median={formatter(median)} high={formatter(high)} low={formatter(low)}"
-    )
+    parts = []
+    if total:
+        parts.append(f"total={formatter(sum(values))}")
+    parts.extend([
+        f"avg={formatter(avg)}",
+        f"median={formatter(median)}",
+        f"high={formatter(high)}",
+        f"low={formatter(low)}",
+    ])
+    print(f"{label:<12}: {' '.join(parts)}")
 
 
 def print_score_breakdown(rows, indent="  "):
@@ -771,11 +883,94 @@ def print_section_metrics(rows, indent=""):
     else:
         print(f"{indent}pass rate   : n/a")
     toks = [token_total(r) for r in rows if token_total(r)]
-    print_metric_line(f"{indent}tokens", toks, integer=True)
+    print_metric_line(f"{indent}tokens", toks, integer=True, total=True)
+
+    # Main session tokens when classified data available
+    exp_toks = [exp_main_total(r) for r in rows if exp_main_total(r)]
+    if exp_toks:
+        print_metric_line(f"{indent}main_tokens", exp_toks, integer=True, total=True)
+
+    # Role tokens when classified data available
+    role_toks = [cheap_role_total(r) for r in rows if cheap_role_total(r)]
+    if role_toks:
+        print_metric_line(f"{indent}role_tokens", role_toks, integer=True, total=True)
+
     context_tokens = [main_context_input(r) for r in rows if main_context_input(r)]
-    print_metric_line(f"{indent}main_ctx", context_tokens, integer=True)
+    print_metric_line(f"{indent}main_ctx_final", context_tokens, integer=True)
+
+    # Max context when available and different from final
+    ctx_max_vals = [max(main_context_input(r), main_context_max_input(r)) for r in rows
+                    if main_context_input(r) or main_context_max_input(r)]
+    print_metric_line(f"{indent}main_ctx_max", ctx_max_vals, integer=True)
+
+    # API call count and compactions when available
+    api_count = [main_api_call_count(r) for r in rows if main_api_call_count(r)]
+    print_metric_line(f"{indent}api_calls", api_count, integer=True)
+
+    active_worker_tokens = [main_active_worker_tokens(r) for r in rows if main_active_worker_tokens(r)]
+    if active_worker_tokens:
+        print_metric_line(f"{indent}main_active_worker_tokens", active_worker_tokens, integer=True, total=True)
+    active_worker_api_calls = [main_active_worker_api_calls(r) for r in rows if main_active_worker_api_calls(r)]
+    if active_worker_api_calls:
+        print_metric_line(f"{indent}main_active_worker_api_calls", active_worker_api_calls, integer=True, total=True)
+
+    parent_tool_totals = []
+    parent_tool_categories = defaultdict(int)
+    ownership_by_role = defaultdict(int)
+    duplicate_counts = defaultdict(int)
+    repeated_builder_tests = []
+    repeated_worker_tests = []
+    for r in rows:
+        checks = r.get("orchestration_checks") or {}
+        if not isinstance(checks, dict):
+            continue
+        parent_tools = checks.get("parent_tool_calls_while_workers_active")
+        if isinstance(parent_tools, dict):
+            total = parent_tools.get("total")
+            if isinstance(total, (int, float)):
+                parent_tool_totals.append(int(total))
+            by_category = parent_tools.get("by_category")
+            if isinstance(by_category, dict):
+                for key, value in by_category.items():
+                    if isinstance(value, (int, float)):
+                        parent_tool_categories[str(key)] += int(value)
+        ownership = checks.get("test_command_ownership_by_role")
+        if isinstance(ownership, dict):
+            for key, value in ownership.items():
+                if isinstance(value, (int, float)):
+                    ownership_by_role[str(key)] += int(value)
+        duplicates = checks.get("duplicate_normalized_test_command_counts")
+        if isinstance(duplicates, dict):
+            for key, value in duplicates.items():
+                if isinstance(value, (int, float)):
+                    duplicate_counts[str(key)] += int(value)
+        repeated = checks.get("verifier_repeated_builder_tests")
+        if isinstance(repeated, (int, float)):
+            repeated_builder_tests.append(int(repeated))
+        repeated = checks.get("orchestrator_repeated_worker_tests")
+        if isinstance(repeated, (int, float)):
+            repeated_worker_tests.append(int(repeated))
+
+    if parent_tool_totals:
+        print_metric_line(f"{indent}parent_tool_calls_while_workers_active", parent_tool_totals, integer=True, total=True)
+        category_text = _format_count_mapping(parent_tool_categories)
+        if category_text:
+            print(f"{indent}  categories  : {category_text}")
+    if ownership_by_role:
+        print(f"{indent}test_command_ownership_by_role: {_format_count_mapping(ownership_by_role)}")
+    if duplicate_counts:
+        print(f"{indent}duplicate_normalized_test_command_counts: {_format_count_mapping(duplicate_counts)}")
+    if repeated_builder_tests:
+        print_metric_line(f"{indent}verifier_repeated_builder_tests", repeated_builder_tests, integer=True, total=True)
+    if repeated_worker_tests:
+        print_metric_line(f"{indent}orchestrator_repeated_worker_tests", repeated_worker_tests, integer=True, total=True)
+
+    compacations = [compaction_count(r) for r in rows if compaction_count(r)]
+    if compacations:
+        print(f"{indent}compactions   : total={int(sum(compacations)):,} avg={statistics.mean(compacations):.1f}")
+
     times = [elapsed(r) for r in rows if elapsed(r)]
-    print_metric_line(f"{indent}elapsed", times, formatter=fmt_seconds)
+    print_metric_line(f"{indent}elapsed", times, formatter=fmt_seconds, total=True)
     if detail_level >= 2 or section_only_mode:
         print_score_breakdown(rows, indent + "  ")
 
@@ -840,6 +1035,24 @@ def render_extensions(meta):
                 names.append(part)
 
     return ",".join(names) if names else "(none)"
+
+
+def render_orchestra_version(meta):
+    version = str(meta.get("orchestra_version", "") or "").strip()
+    rev = str(meta.get("orchestra_source_rev", "") or "").strip()
+    dirty = meta.get("orchestra_source_dirty")
+    if not version and not rev:
+        return ""
+    parts = []
+    if version:
+        parts.append(version)
+    if rev and rev not in version:
+        parts.append(f"rev={rev}")
+    if dirty is True:
+        parts.append("dirty")
+    elif dirty is False and rev:
+        parts.append("clean")
+    return " ".join(parts)
 
 
 def render_role_models_compact(meta):
@@ -943,9 +1156,18 @@ def print_overview(rows):
     print(f"failed      : {colorize(str(failed), 'red') if failed else failed}")
     print(f"pass rate   : {color_for_rate(f'{passed}/{len(rows)}', passed, len(rows))}" if rows else "pass rate   : n/a")
     toks = [token_total(r) for r in rows if token_total(r)]
-    print_metric_line("tokens", toks, integer=True)
+    print_metric_line("tokens", toks, integer=True, total=True)
+
+    # Show classified main/role tokens when available in overview
+    exp_toks = [exp_main_total(r) for r in rows if exp_main_total(r)]
+    if exp_toks:
+        print_metric_line("main_tokens", exp_toks, integer=True, total=True)
+    role_toks = [cheap_role_total(r) for r in rows if cheap_role_total(r)]
+    if role_toks:
+        print_metric_line("role_tokens", role_toks, integer=True, total=True)
+
     times = [elapsed(r) for r in rows if elapsed(r)]
-    print_metric_line("elapsed", times, formatter=fmt_seconds)
+    print_metric_line("elapsed", times, formatter=fmt_seconds, total=True)
     if pending:
         print(f"ungraded    : {len(pending)} prepared run(s); grade with scripts/03-collect-results <task-id>")
         for r in pending[-5:][::-1]:
@@ -983,6 +1205,9 @@ def print_runs(rows, n=20):
             _print_wrapped_kv("roles", enabled_roles)
             _print_wrapped_kv("extensions", render_extensions(meta))
             _print_wrapped_kv("plugins", ",".join(_plugin_values(meta)) or "none")
+            orch_version = render_orchestra_version(meta)
+            if orch_version:
+                _print_wrapped_kv("orchestra ver", orch_version)
             _print_wrapped_kv("skills", meta.get("aux_skills_summary", "") or "none")
             role_models = render_role_models_compact(meta)
             if role_models:
@@ -1004,28 +1229,94 @@ def print_tasks(rows):
             print_section_metrics(rs, indent="    ")
 
 
-def print_tokens(rows):
-    print("\n=== token usage ===")
+def _print_token_metrics(rows, prefix=""):
+    """Print aggregate token metrics for a set of rows."""
     totals = [token_total(r) for r in rows if token_total(r)]
     if not totals:
-        print("no token data captured")
+        print(f"{prefix}no token data captured")
         return
-    print(f"runs_with_tokens: {len(totals)}/{len(rows)}")
-    print(f"total_tokens    : {sum(totals):,}")
-    print(f"avg_tokens      : {int(statistics.mean(totals)):,}")
-    print(f"median_tokens   : {int(statistics.median(totals)):,}")
+    print(f"{prefix}runs_with_tokens: {len(totals)}/{len(rows)}")
+    print(f"{prefix}total_tokens    : {sum(totals):,}")
+    print(f"{prefix}avg_tokens      : {int(statistics.mean(totals)):,}")
+    print(f"{prefix}median_tokens   : {int(statistics.median(totals)):,}")
+
+    # Reasoning tokens breakdown
+    reason_vals = [token_parts(r)["reasoning"] for r in rows if token_parts(r).get("reasoning")]
+    if reason_vals:
+        print(f"{prefix}avg_reasoning   : {int(statistics.mean(reason_vals)):,}")
+
+    # Cache tokens breakdown
+    cache_read = [token_parts(r)["cached_read"] for r in rows if token_parts(r).get("cached_read")]
+    cache_write = [token_parts(r)["cache_write"] for r in rows if token_parts(r).get("cache_write")]
+    if cache_read:
+        print(f"{prefix}avg_cache_read  : {int(statistics.mean(cache_read)):,}")
+    if cache_write:
+        print(f"{prefix}avg_cache_write : {int(statistics.mean(cache_write)):,}")
+
+    # Main context metrics
     context_vals = [main_context_input(r) for r in rows if main_context_input(r)]
     if context_vals:
-        print(f"avg_main_context: {int(statistics.mean(context_vals)):,}")
-        print(f"max_main_context: {max(context_vals):,}")
-    print("\nby task:")
+        print(f"{prefix}avg_main_ctx_final: {int(statistics.mean(context_vals)):,}")
+        max_ctx_vals = [max(main_context_input(r), main_context_max_input(r)) for r in rows
+                        if main_context_input(r) or main_context_max_input(r)]
+        if max_ctx_vals:
+            print(f"{prefix}avg_main_ctx_max  : {int(statistics.mean(max_ctx_vals)):,}")
+
+    # Main API call count and compaction
+    api_calls = [main_api_call_count(r) for r in rows if main_api_call_count(r)]
+    if api_calls:
+        print(f"{prefix}avg_api_calls   : {int(statistics.mean(api_calls)):,}")
+    compacations = [compaction_count(r) for r in rows if compaction_count(r)]
+    if compacations:
+        print(f"{prefix}total_compactions: {sum(compacations):,}")
+
+    # Classified token breakdown (main vs roles)
+    has_classified = any(has_classified_tokens(r) for r in rows)
+    if has_classified:
+        exp_totals = [exp_main_total(r) for r in rows if exp_main_total(r)]
+        role_totals = [cheap_role_total(r) for r in rows if cheap_role_total(r)]
+
+        print(f"\n{prefix}--- classified tokens ---")
+        if exp_totals:
+            print(f"{prefix}avg_main_tokens   : {int(statistics.mean(exp_totals)):,}")
+        if role_totals:
+            print(f"{prefix}avg_role_tokens   : {int(statistics.mean(role_totals)):,}")
+
+
+def _print_by_task(rows, prefix=""):
+    """Print per-task token breakdown."""
     by = defaultdict(list)
     for r in rows:
         if token_total(r):
             by[r.get("task_id", "")].append(token_total(r))
-    for task_id in sorted(by):
-        vals = by[task_id]
-        print(f"{task_id:<38} runs={len(vals):<3} total={sum(vals):<10,} avg={int(statistics.mean(vals)):,}")
+    if not by:
+        return
+    print(f"\n{prefix}by task:")
+    has_classified = any(has_classified_tokens(r) for r in rows)
+    header_fmt = f"{{:<38}} {{:6}}"
+    row_fmt = f"{{:<38}} {{:5d}} total={{:<10,}} avg={{:,}}"
+
+    if has_classified:
+        print(f"{prefix}{header_fmt.format('task', 'runs')}{'':>30s}  main     role")
+        for task_id in sorted(by):
+            vals = by[task_id]
+            # Find classified data for this task
+            exp_vals = [exp_main_total(r) for r in rows if r.get("task_id") == task_id and exp_main_total(r)]
+            role_vals = [cheap_role_total(r) for r in rows if r.get("task_id") == task_id and cheap_role_total(r)]
+            main_text = f"{int(statistics.mean(exp_vals)):,}" if exp_vals else "-"
+            role_text = f"{int(statistics.mean(role_vals)):,}" if role_vals else "-"
+            avg_val = int(statistics.mean(vals))
+            print(f"{prefix}{task_id:<38} {len(vals):<5d} total={sum(vals):<10,} avg={avg_val:<20,} main={main_text}  role={role_text}")
+    else:
+        for task_id in sorted(by):
+            vals = by[task_id]
+            print(f"{prefix}{row_fmt.format(task_id, len(vals), sum(vals), int(statistics.mean(vals)))}")
+
+
+def print_tokens(rows):
+    print("\n=== token usage ===")
+    _print_token_metrics(rows)
+    _print_by_task(rows)
 
 
 def print_suites(rows):
@@ -1063,7 +1354,11 @@ def print_timeline(rows, n=20):
     print("\n=== timeline ===")
     for r in rows[-n:]:
         parts = token_parts(r)
-        print(f"{r.get('run_id',''):<18} {status(r):4s} {r.get('task_id',''):<36} time={fmt_seconds(elapsed(r)):<6} total={parts['total']:<8} in={parts['input']:<8} out={parts['output']:<6} reason={parts['reasoning']}")
+        line = f"{r.get('run_id',''):<18} {status(r):4s} {r.get('task_id',''):<36} time={fmt_seconds(elapsed(r)):<6} total={parts['total']:<8} in={parts['input']:<8} out={parts['output']:<6} reason={parts['reasoning']}"
+        # Append cache info when available
+        if parts.get("cached_read") or parts.get("cache_write"):
+            line += f" cache_r={parts['cached_read']}  cache_w={parts['cache_write']}"
+        print(line)
 
 
 def print_notes(rows):
@@ -1470,13 +1765,83 @@ def print_run_detail(rows, q):
     sessions = meta.get("pi_session_ids") or []
     print(f"sessions     : {', '.join(sessions) if sessions else 'none captured'}")
     print(f"extensions   : {render_extensions(meta)}")
+    orch_version = render_orchestra_version(meta)
+    if orch_version:
+        print(f"orchestra ver: {orch_version}")
     print(f"skills       : {meta.get('aux_skills_summary','')}")
     catalog_path = str(meta.get('catalog_path','') or '')
     config_root = str(Path(catalog_path).parent if catalog_path else '')
     print(f"config       : {config_root}")
     parts = token_parts(r)
     print(f"elapsed      : {fmt_seconds(elapsed(r))}")
+
+    # Legacy flat token line (always shown for backward compat)
     print(f"tokens       : total={parts['total']:,} input={parts['input']:,} output={parts['output']:,} reasoning={parts['reasoning']:,}")
+
+    # Classified tokens and context info when available
+    t = r.get("tokens") or {}
+    exp_main = _get_exp_main_tokens(r)
+    cheap_role = _get_cheap_role_tokens(r)
+    ctx_final = main_context_input(r)
+    ctx_max = main_context_max_input(r)
+    api_calls = main_api_call_count(r)
+    compactions = compaction_count(r)
+
+    if has_classified_tokens(r):
+        print("\ntokens (classified):")
+        exp_total_val = exp_main.get("total_tokens")
+        role_total_val = cheap_role.get("total_tokens")
+        all_total = token_total(r)
+
+        if isinstance(exp_total_val, (int, float)) and exp_total_val > 0:
+            print(f"  main_session   : {exp_total_val:,} tokens")
+            # Show main session breakdown
+            for label, key in [("input", "input_tokens"), ("output", "output_tokens"),
+                               ("reasoning", "reasoning_tokens"),
+                               ("cached_read", "cached_input_read_tokens"),
+                               ("cache_write", "cache_write_tokens")]:
+                v = exp_main.get(key)
+                if isinstance(v, (int, float)) and v > 0:
+                    print(f"    {label:<14}: {v:,}")
+
+        if isinstance(role_total_val, (int, float)) and role_total_val > 0:
+            print(f"  role_sessions  : {role_total_val:,} tokens")
+            for label, key in [("input", "input_tokens"), ("output", "output_tokens"),
+                               ("reasoning", "reasoning_tokens")]:
+                v = cheap_role.get(key)
+                if isinstance(v, (int, float)) and v > 0:
+                    print(f"    {label:<14}: {v:,}")
+
+        # Show all vs main + roles comparison
+        total_all = _safe_int(t.get("total_tokens"))
+        if total_all and (isinstance(exp_total_val, (int, float)) or isinstance(role_total_val, (int, float))):
+            print(f"  all_sessions   : {total_all:,} tokens")
+
+    # Main session context info when available
+    has_context = ctx_final > 0 or ctx_max > 0 or api_calls > 0 or compactions > 0
+    if has_context:
+        print("\nmain_session context:")
+        if ctx_final > 0:
+            print(f"  final_context   : {ctx_final:,} tokens")
+        if ctx_max > 0 and ctx_max != ctx_final:
+            print(f"  max_context     : {ctx_max:,} tokens")
+        elif ctx_max == ctx_final and ctx_final > 0:
+            # Only one value, show it once
+            pass
+        if api_calls > 0:
+            print(f"  api_calls       : {api_calls}")
+        if compactions > 0:
+            print(f"  compactions     : {compactions}")
+
+    active_worker_tokens = main_active_worker_tokens(r)
+    active_worker_api_calls = main_active_worker_api_calls(r)
+    if active_worker_tokens > 0 or active_worker_api_calls > 0:
+        print("\nmain_session worker overlap:")
+        if active_worker_tokens > 0:
+            print(f"  main_active_worker_tokens: {active_worker_tokens:,}")
+        if active_worker_api_calls > 0:
+            print(f"  main_active_worker_api_calls: {active_worker_api_calls}")
+
     efficiency_lines = format_efficiency_summary(TaskResult.from_json(root / r.get('_path', '')), results_dir)
     if efficiency_lines:
         print("\nefficiency:")
@@ -1493,16 +1858,51 @@ def print_run_detail(rows, q):
         print("  none")
 
     orch_checks = r.get("orchestration_checks") or {}
+    special_efficiency_keys = {
+        "parent_tool_calls_while_workers_active",
+        "test_command_ownership_by_role",
+        "duplicate_normalized_test_command_counts",
+        "verifier_repeated_builder_tests",
+        "orchestrator_repeated_worker_tests",
+    }
     if orch_checks:
-        print("\norchestration:")
-        for key in sorted(orch_checks):
-            value = orch_checks[key]
-            if isinstance(value, bool):
-                text = "True" if value else "False"
-                value = color_for_behavior_rate(key, text, 1 if value else 0, 1)
-            elif isinstance(value, (int, float)):
-                value = color_for_behavior_count(key, str(value), int(value))
-            print(f"  {key}: {value}")
+        special_keys = [key for key in special_efficiency_keys if key in orch_checks]
+        if special_keys:
+            print("\norchestration efficiency:")
+            parent_tools = orch_checks.get("parent_tool_calls_while_workers_active")
+            if isinstance(parent_tools, dict):
+                total = parent_tools.get("total")
+                by_category = _format_count_mapping(parent_tools.get("by_category"))
+                if isinstance(total, (int, float)):
+                    line = f"  parent_tool_calls_while_workers_active: total={int(total):,}"
+                    if by_category:
+                        line += f" by_category={by_category}"
+                    print(line)
+            ownership = orch_checks.get("test_command_ownership_by_role")
+            if isinstance(ownership, dict):
+                text = _format_count_mapping(ownership)
+                if text:
+                    print(f"  test_command_ownership_by_role: {text}")
+            duplicates = orch_checks.get("duplicate_normalized_test_command_counts")
+            if isinstance(duplicates, dict):
+                text = _format_count_mapping(duplicates)
+                if text:
+                    print(f"  duplicate_normalized_test_command_counts: {text}")
+            for key in ("verifier_repeated_builder_tests", "orchestrator_repeated_worker_tests"):
+                value = orch_checks.get(key)
+                if isinstance(value, (int, float)):
+                    print(f"  {key}: {int(value)}")
+        remaining_orch = {k: v for k, v in orch_checks.items() if k not in special_efficiency_keys}
+        if remaining_orch:
+            print("\norchestration:")
+            for key in sorted(remaining_orch):
+                value = remaining_orch[key]
+                if isinstance(value, bool):
+                    text = "True" if value else "False"
+                    value = color_for_behavior_rate(key, text, 1 if value else 0, 1)
+                elif isinstance(value, (int, float)):
+                    value = color_for_behavior_count(key, str(value), int(value))
+                print(f"  {key}: {value}")
     warnings = orchestration_warnings(orch_checks)
     if warnings:
         print("\norchestration warnings:")

@@ -16,7 +16,7 @@ Can Orchestra:
 - review, verify, and recover from blockers meaningfully
 - use small models efficiently
 
-Also record: score/pass rate, elapsed time, token usage, model/catalog/config used, and Orchestra logs/traces.
+Also record: score/pass rate, elapsed time, classified token usage, model/catalog/config used, and Orchestra logs/traces. Token reporting separates all-session totals from expensive main-session usage and cheaper Orchestra role/session usage.
 
 ## Suite structure
 
@@ -144,7 +144,7 @@ scripts/05-results timing
 
 ### `02-open-pi <task-id>`
 
-Lists tasks with `--list`, grouped by suite and role. Use `config` to open Pi's package/resource config TUI inside the benchmark container. For a task run, it prepares an isolated per-run workdir inside the container, copies only agent-visible task materials into it, resolves the parent model from `config/orchestra/agent-catalog.yaml`, and writes `.bench_run.json` in `results/<run_id>-<task_id>/`. By default it prints `Prompt.md` and starts Pi interactively. With `--auto`, it first runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` non-interactively. With `--auto --no-orchestra`, it skips only that automatic `/orch on` preflight and sends `Prompt.md` as-is; if Orchestra tools are available, the model may still dispatch when the task prompt asks it to. Role-focused dispatch instructions belong in the task's `Prompt.md`; the harness records `target_role` separately for diagnostics instead of injecting prompt text or running Pi as that worker role. Evaluator files are not mounted during this session. After interactive use, exit normally (Ctrl+D).
+Lists tasks with `--list`, grouped by suite and role. Use `config` to open Pi's package/resource config TUI inside the benchmark container. For a task run, it prepares an isolated per-run workdir inside the container, copies only agent-visible task materials into it, resolves the parent model from `config/orchestra/agent-catalog.yaml`, and writes `.bench_run.json` in `results/<run_id>-<task_id>/`. By default it prints `Prompt.md` and starts Pi interactively. With `--auto`, the intended runner is Pi RPC mode: enable `/orch on` when requested, send `Prompt.md`, keep the host process alive across Pi `agent_settled` events while Orchestra workers are still active, then grade only after expected workers/reports are terminal. With `--auto --no-orchestra`, it skips only that automatic `/orch on` preflight and sends `Prompt.md` as-is; if Orchestra tools are available, the model may still dispatch when the task prompt asks it to. Role-focused dispatch instructions belong in the task's `Prompt.md`; the harness records `target_role` separately for diagnostics instead of injecting prompt text or running Pi as that worker role. Evaluator files are not mounted during this session. After interactive use, exit normally (Ctrl+D).
 
 ### `03-collect-results [task-id]`
 
@@ -154,14 +154,14 @@ For each graded run, the result folder contains:
 - `result.json` — score, checks, metadata, token totals, Pi session ids
 - `artifacts/pi-sessions/` — copied Pi JSONL session files for that workdir
 - `artifacts/pi-sessions.json` — session id summary
-- `artifacts/tokens.json` — token totals parsed from Pi usage fields
+- `artifacts/tokens.json` — token totals parsed from Pi usage fields, including `all_sessions`, `main_session`, and `role_sessions` sections when available
 - `elapsed_seconds` in `result.json` — wall-clock time from task open/prep to grading
 - `artifacts/orchestra-debug/debug/` — full `orchestra debug --session-id ...` output for each Pi session; zero Orchestra runs is not an error
 - `artifacts/orchestra-debug/` — additional Orchestra doctor/state/log artifacts when present
 
 ### `04-run-suite <suite>`
 
-Runs every task in a suite through `scripts/02-open-pi <task-id> --auto`, grades each run, then prints the result summary. This is the dogfood batch path for suite-level checks. Use `--no-orchestra` for baseline runs that skip automatic `/orch on` skill loading while leaving the task prompt unchanged. Use `scripts/04-run-suite --list` to see suites. To grade already prepared runs without opening Pi, use `scripts/03-collect-results`.
+Runs every task in a suite through `scripts/02-open-pi <task-id> --auto`, grades each run, then prints the result summary. This is the dogfood batch path for suite-level checks. Auto mode should use the RPC-backed lifecycle runner so asynchronous Orchestra workers can finish before grading. Use `--no-orchestra` for baseline runs that skip automatic `/orch on` skill loading while leaving the task prompt unchanged. Use `scripts/04-run-suite --list` to see suites. To grade already prepared runs without opening Pi, use `scripts/03-collect-results`.
 
 ### `05-results [view]`
 
@@ -172,7 +172,7 @@ Read-only historical reporting. Default `dashboard` shows overview, per-suite br
 - `scripts/05-results debug <run-id-or-run-folder>` — one run detail plus captured Orchestra debug markdown and recent Pi session trace events
 - `scripts/05-results tasks` — per-test aggregate breakdown
 - `scripts/05-results timeline [--task <task-id>]` — run history
-- `scripts/05-results tokens` — token usage
+- `scripts/05-results tokens` — token usage, including all/main/role splits when available
 - `scripts/05-results timing` — elapsed time
 - `scripts/05-results configs` — discovered result configurations, assigned ids like `C01`
 - `scripts/05-results compare --group-by model,orchestra,plugins,skills` — compare grouped configurations
@@ -221,7 +221,7 @@ scripts/03-collect-results
 scripts/05-results run <run-id>
 ```
 
-The dogfood run should produce a real Pi session, result JSON, token/timing artifacts when available, and `orchestra debug` output. By default `--auto` runs `/orch on` before the task prompt so the orchestrator skill is loaded for the session. Tests and ad hoc checks should not leave fake result history in `results/`; use temporary result dirs or clean generated runs afterward.
+The dogfood run should produce a real Pi session, result JSON, token/timing artifacts when available, RPC event artifacts for auto runs, and `orchestra debug` output. By default `--auto` runs `/orch on` before the task prompt so the orchestrator skill is loaded for the session. Auto grading should wait for tracked Orchestra workers to finish instead of treating first Pi settle as completion. Tests and ad hoc checks should not leave fake result history in `results/`; use temporary result dirs or clean generated runs afterward.
 
 ## Runtime contract
 
@@ -248,8 +248,8 @@ See `TEST_CREATION.md` for the benchmark authoring guide: capability task goals,
 Report separately:
 - **outcome**: pass/fail, evaluator score
 - **process**: which roles were used, in what order, how many times
-- **cost**: total tokens, parent tokens, worker tokens, elapsed time
-- **efficiency**: passes per token, passes per minute
+- **cost/proxy usage**: all-session tokens, expensive main-session tokens, role/local tokens, cache read/write buckets, reasoning tokens, elapsed time
+- **efficiency**: passes per main-session token by default when classified tokens exist, plus passes per minute
 - **policy**: read-only compliance, scope compliance, proper blocking
 - **quality**: review findings, verifier correctness, residual defects
 - **stability**: repeatability across 3+ trials

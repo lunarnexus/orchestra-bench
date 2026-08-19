@@ -811,6 +811,69 @@ class TestRunSuiteScript:
         assert result.returncode != 0
         assert "unknown suite: capability" in result.stderr
 
+    def test_multiple_suites_before_options_run_sequentially(self, tmp_path):
+        import os
+
+        root = tmp_path
+        scripts = root / "scripts"
+        tasks = root / "tasks"
+        results = root / "results"
+        scripts.mkdir()
+        tasks.mkdir()
+        results.mkdir()
+
+        (scripts / "04-run-suite").write_text((_REPO_ROOT / "scripts" / "04-run-suite").read_text())
+        (scripts / "04-run-suite").chmod(0o755)
+
+        (scripts / "02-open-pi").write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "printf 'open %s notes=%s\\n' \"$*\" \"${BENCH_NOTES:-}\" >> \"$BENCH_LOG\"\n"
+        )
+        (scripts / "02-open-pi").chmod(0o755)
+        (scripts / "03-collect-results").write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "printf 'collect %s\\n' \"$*\" >> \"$BENCH_LOG\"\n"
+        )
+        (scripts / "03-collect-results").chmod(0o755)
+        (root / "cli.py").write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "sys.exit(0)\n"
+        )
+        (root / "cli.py").chmod(0o755)
+
+        for suite, task_id in [("smoke", "smoke-alpha"), ("capability-easy", "easy-alpha")]:
+            task_dir = tasks / task_id
+            task_dir.mkdir()
+            (task_dir / "task.yaml").write_text(f"task_id: {task_id}\nbatch: {suite}\n")
+
+        bench_log = root / "bench.log"
+        env = os.environ.copy()
+        env.update({
+            "BENCH_LOG": str(bench_log),
+            "PATH": f"{scripts}:{env['PATH']}",
+        })
+
+        result = sp.run(
+            [scripts / "04-run-suite", "smoke", "capability-easy", "--no-orchestra", "--notes", "hello"],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert bench_log.read_text().splitlines() == [
+            "open smoke-alpha --auto --no-orchestra notes=hello",
+            "collect smoke-alpha",
+            "open easy-alpha --auto --no-orchestra notes=hello",
+            "collect easy-alpha",
+        ]
+
 
 class TestResultsScript:
     """scripts/05-results exposes historical reporting views."""

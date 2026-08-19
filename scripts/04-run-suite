@@ -6,11 +6,11 @@ ROOT="$SCRIPT_DIR/.."
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <suite> [--auto] [--no-orchestra] [--notes <text>]
+Usage: $(basename "$0") <suite> [<suite> ...] [--auto] [--no-orchestra] [--notes <text>]
        $(basename "$0") --list
 
-Run every task in a suite with scripts/02-open-pi <task-id> --auto, grade each
-run, then print the summary. This is the default dogfood suite flow.
+Run every task in one or more suites with scripts/02-open-pi <task-id> --auto,
+grade each run, then print the summary. This is the default dogfood suite flow.
 
 Options:
   --auto          Run each task with 02-open-pi --auto before grading (default)
@@ -27,7 +27,7 @@ Suites:
 Examples:
   scripts/04-run-suite --list
   scripts/04-run-suite smoke
-  scripts/04-run-suite role-focused --auto
+  scripts/04-run-suite smoke capability-easy --no-orchestra
   scripts/04-run-suite role-focused --auto --no-orchestra
 EOF
 }
@@ -77,9 +77,18 @@ case "${1:-}" in
   --list) list_suites; exit 0 ;;
 esac
 
-suite="${1:-}"
-if [ -z "$suite" ]; then usage; exit 1; fi
-shift || true
+suites=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -*) break ;;
+    *) suites+=("$1"); shift ;;
+  esac
+done
+
+if [ ${#suites[@]} -eq 0 ]; then
+  usage
+  exit 1
+fi
 
 run_auto=true
 no_orchestra=false
@@ -88,51 +97,64 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --auto) run_auto=true; shift ;;
     --no-orchestra) no_orchestra=true; shift ;;
-    --notes) run_notes="$2"; shift 2 ;;
+    --notes)
+      if [ $# -lt 2 ]; then
+        echo "[bench] --notes requires a value" >&2
+        exit 1
+      fi
+      run_notes="$2"
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[bench] unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-if ! is_known_suite "$suite"; then
-  echo "[bench] unknown suite: $suite" >&2
-  echo "[bench] available suites:" >&2
-  list_suites >&2
-  exit 1
-fi
-
-mapfile -t task_ids < <(tasks_for_suite "$suite")
-if [ ${#task_ids[@]} -eq 0 ]; then
-  echo "[bench] suite has no tasks yet: $suite"
-  echo "[bench] available suites:"
-  list_suites
-  exit 0
-fi
-
 failures=0
-for task_id in "${task_ids[@]}"; do
-  echo ""
-  echo "=== $suite / $task_id ==="
-  if $run_auto; then
-    open_pi_args=("$task_id" --auto)
-    if $no_orchestra; then
-      open_pi_args+=(--no-orchestra)
+ran_any=false
+for suite in "${suites[@]}"; do
+  if ! is_known_suite "$suite"; then
+    echo "[bench] unknown suite: $suite" >&2
+    echo "[bench] available suites:" >&2
+    list_suites >&2
+    exit 1
+  fi
+
+  mapfile -t task_ids < <(tasks_for_suite "$suite")
+  if [ ${#task_ids[@]} -eq 0 ]; then
+    echo "[bench] suite has no tasks yet: $suite"
+    echo "[bench] available suites:"
+    list_suites
+    continue
+  fi
+
+  ran_any=true
+  for task_id in "${task_ids[@]}"; do
+    echo ""
+    echo "=== $suite / $task_id ==="
+    if $run_auto; then
+      open_pi_args=("$task_id" --auto)
+      if $no_orchestra; then
+        open_pi_args+=(--no-orchestra)
+      fi
+      if ! BENCH_NOTES="$run_notes" "$ROOT/scripts/02-open-pi" "${open_pi_args[@]}"; then
+        echo "[bench] auto run failed: $task_id" >&2
+        failures=$((failures + 1))
+        continue
+      fi
     fi
-    if ! BENCH_NOTES="$run_notes" "$ROOT/scripts/02-open-pi" "${open_pi_args[@]}"; then
-      echo "[bench] auto run failed: $task_id" >&2
+    if ! "$ROOT/scripts/03-collect-results" "$task_id"; then
+      echo "[bench] grading failed: $task_id" >&2
       failures=$((failures + 1))
-      continue
     fi
-  fi
-  if ! "$ROOT/scripts/03-collect-results" "$task_id"; then
-    echo "[bench] grading failed: $task_id" >&2
-    failures=$((failures + 1))
-  fi
+  done
 done
 
-echo ""
-echo "=== suite summary: $suite ==="
-python3 "$ROOT/cli.py" collect-results --results-dir "$ROOT/results"
+if $ran_any; then
+  echo ""
+  echo "=== suite summary: ${suites[*]} ==="
+  python3 "$ROOT/cli.py" collect-results --results-dir "$ROOT/results"
+fi
 if [ "$failures" -gt 0 ]; then
   echo "[bench] $failures task(s) failed during suite run" >&2
   exit 1

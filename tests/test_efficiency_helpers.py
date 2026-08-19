@@ -17,6 +17,48 @@ from __init__ import TaskResult  # noqa: E402
 # ── Helpers ────────────────────────────────────────────────────────
 
 
+def _canonicalize_tokens(tokens: dict | None) -> dict:
+    if not isinstance(tokens, dict):
+        return {}
+    if any(key in tokens for key in ("main_session", "role_sessions", "all_sessions", "expensive_main_session_tokens", "cheap_role_tokens")):
+        return dict(tokens)
+
+    total = tokens.get("total_tokens", tokens.get("total"))
+    if not isinstance(total, (int, float)):
+        return dict(tokens)
+
+    base_section = {
+        "input_tokens": int(tokens.get("input_tokens", tokens.get("prompt_tokens", 0))) if isinstance(tokens.get("input_tokens", tokens.get("prompt_tokens", 0)), (int, float)) else 0,
+        "output_tokens": int(tokens.get("output_tokens", tokens.get("completion_tokens", 0))) if isinstance(tokens.get("output_tokens", tokens.get("completion_tokens", 0)), (int, float)) else 0,
+        "reasoning_tokens": int(tokens.get("reasoning_tokens", 0)) if isinstance(tokens.get("reasoning_tokens", 0), (int, float)) else 0,
+        "cached_input_read_tokens": int(tokens.get("cached_input_read_tokens", 0)) if isinstance(tokens.get("cached_input_read_tokens", 0), (int, float)) else 0,
+        "cache_write_tokens": int(tokens.get("cache_write_tokens", 0)) if isinstance(tokens.get("cache_write_tokens", 0), (int, float)) else 0,
+        "total_tokens": int(total),
+    }
+    return {
+        **tokens,
+        "main_session": dict(base_section),
+        "role_sessions": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "cached_input_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 0,
+        },
+        "all_sessions": dict(base_section),
+        "expensive_main_session_tokens": dict(base_section),
+        "cheap_role_tokens": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "cached_input_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 0,
+        },
+    }
+
+
 def _write_result(base: Path, task_id: str, run_id: str, score: str = "pass",
                   tokens: dict | None = None, elapsed: float | None = None):
     """Write a TaskResult JSON file to *base* and return the result."""
@@ -27,7 +69,7 @@ def _write_result(base: Path, task_id: str, run_id: str, score: str = "pass",
         task_id=task_id,
         run_id=run_id,
         score=score,
-        tokens=tokens or {},
+        tokens=_canonicalize_tokens(tokens),
         elapsed_seconds=elapsed,
     )
     r.write_json(d)
@@ -311,14 +353,57 @@ class TestEdgeCases:
         assert result["tokens"]["min"] == 800
         assert result["tokens"]["max"] == 1200
 
-    def test_total_tokens_key_fallback(self, tmp_path):
-        """Prefer 'total' key, fall back to 'total_tokens' in history."""
+    def test_no_legacy_total_fallback(self, tmp_path):
+        from eval_harness import _get_total_tokens
+        tokens = {"total": 4500, "total_tokens": 3800}
+        assert _get_total_tokens(tokens) is None
+
+    def test_returns_none_when_empty(self, tmp_path):
+        from eval_harness import _get_total_tokens
+        assert _get_total_tokens(None) is None
+        assert _get_total_tokens({}) is None
+
+    def test_uses_main_session_when_expensive_missing(self, tmp_path):
+        from eval_harness import _get_total_tokens
+        tokens = {"main_session": {"total_tokens": 4500}}
+        val = _get_total_tokens(tokens)
+        assert val == 4500
+
+    def test_efficiency_uses_expensive_main_when_present(self, tmp_path):
+        """compare_efficiency uses expensive main-session tokens for position."""
         from eval_harness import compare_efficiency
         base = tmp_path / "results"
-        _write_result(base, "task-a", "h1", tokens={"total_tokens": 800}, elapsed=25.0)
-        _write_result(base, "task-a", "h2", tokens={"total_tokens": 1200}, elapsed=40.0)
-        current = _write_result(base, "task-a", "current-1", tokens={"total_tokens": 950}, elapsed=35.0)
+        _write_result(base, "task-a", "h1",
+                      tokens={"expensive_main_session_tokens": {"total_tokens": 3000}},
+                      elapsed=25.0)
+        _write_result(base, "task-a", "h2",
+                      tokens={"expensive_main_session_tokens": {"total_tokens": 4000}},
+                      elapsed=40.0)
+        current = _write_result(base, "task-a", "current-1",
+                                tokens={"expensive_main_session_tokens": {"total_tokens": 2800}},
+                                elapsed=30.0)
+        result = compare_efficiency(current, base)
+        assert result["tokens"]["current"] == 2800
+        assert result["tokens"]["min"] == 3000
+        assert result["tokens"]["max"] == 4000
+        assert result["tokens"]["position"] == "new-low"
+
+    def test_efficiency_returns_insufficient_history_for_flat_only_tokens(self, tmp_path):
+        from eval_harness import compare_efficiency
+        base = tmp_path / "results"
+        run_dir = base / "h1-task-a"
+        run_dir.mkdir(parents=True)
+        (run_dir / "result.json").write_text(json.dumps({
+            "task_id": "task-a",
+            "run_id": "h1",
+            "score": "pass",
+            "tokens": {"total": 800},
+        }) + "\n")
+        current_dir = base / "current-1-task-a"
+        current_dir.mkdir(parents=True)
+        current = TaskResult(task_id="task-a", run_id="current-1", score="pass", tokens={"total": 950}, elapsed_seconds=30.0)
+        current.write_json(current_dir / "result.json")
 
         result = compare_efficiency(current, base)
-        assert result["tokens"]["min"] == 800
-        assert result["tokens"]["max"] == 1200
+        assert result["tokens"]["position"] == "insufficient-history"
+        assert result["tokens"]["current"] is None or result["tokens"]["current"] == 0

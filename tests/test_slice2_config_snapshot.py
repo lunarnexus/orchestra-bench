@@ -42,6 +42,36 @@ class TestSlice2ConfigSnapshot:
         assert snapshot["pi_enabled_plugins"] == ["orchestra", "pi-lmstudio"]
         assert snapshot["pi_enabled_plugins_summary"] == "orchestra,pi-lmstudio"
 
+    def test_runtime_snapshot_captures_orchestra_version(self, monkeypatch):
+        import json
+        import subprocess as sp
+        import eval_harness
+
+        def fake_exec(*args, env=None):
+            command = " ".join(args)
+            if "/opt/orchestra/.venv/bin/python" in command:
+                return sp.CompletedProcess(
+                    args,
+                    0,
+                    stdout=json.dumps({
+                        "orchestra_version": "0.1.3.dev18+gc4fc74df9",
+                        "orchestra_module_file": "/opt/orchestra/src/orchestra/__init__.py",
+                        "orchestra_source_rev": "c4fc74d",
+                        "orchestra_source_dirty": False,
+                    }) + "\n",
+                    stderr="",
+                )
+            return sp.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(eval_harness, "_docker_ok", lambda: True)
+        monkeypatch.setattr(eval_harness, "_docker_exec", fake_exec)
+
+        snapshot = eval_harness.collect_container_runtime_snapshot()
+
+        assert snapshot["orchestra_version"] == "0.1.3.dev18+gc4fc74df9"
+        assert snapshot["orchestra_source_rev"] == "c4fc74d"
+        assert snapshot["orchestra_source_dirty"] is False
+
     def test_runtime_snapshot_respects_disabled_local_extensions(self, monkeypatch):
         import subprocess as sp
         import eval_harness

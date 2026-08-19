@@ -209,7 +209,70 @@ The prior Orchestra eval suites already use a useful benchmark split:
 
 ---
 
-## 5. Current state of `orchestra-bench`
+## 5. Token tracking findings for expensive-main / cheap-role model comparisons
+
+### User direction
+The benchmark is shifting toward using a more expensive/online model in the main Pi session and cheaper/local models for Orchestra role/subagent sessions. Reporting must therefore separate main-session context and token usage from role-session totals.
+
+### Trace-backed fields currently available
+Focused inspection of current `results/*/artifacts/pi-sessions/*.jsonl` found 980 usage events. Every sampled usage event contained:
+
+```text
+input
+output
+cacheRead
+cacheWrite
+reasoning
+totalTokens
+cost
+```
+
+Every sampled `cost` object contained:
+
+```text
+input
+output
+cacheRead
+cacheWrite
+total
+```
+
+Pi session messages also include `provider` and `model`. Existing local/OAuth/local-model runs report cost fields, but sampled costs are `0`, so they are useful schema evidence but not real spend evidence.
+
+### Computable benchmark fields
+From current traces and logs the harness can compute:
+- all-session input/output/reasoning/cache-read/cache-write/total token buckets
+- main-session-only token buckets
+- role-session-only token buckets
+- main-session API call count
+- role-session API call count
+- final main-session context size from the last usage-bearing event
+- max main-session context size from max usage-bearing event
+- compaction count from Pi `type == "compaction"` events
+- worker role attribution by joining Pi session id to Orchestra log `worker_session_id` when present
+
+### Unsupported or optional fields
+The following should not be first-class required fields until traces or config support them:
+- tool-use tokens
+- search request counts or search line-item costs
+- batch/flex/priority pricing mode
+- real dollar estimates for OAuth/plan/local runs
+
+### Provider pricing research summary
+Public provider documentation supports a provider-neutral schema with optional provider-specific fields:
+- input tokens
+- output tokens
+- cached input/cache-read tokens
+- cache-write tokens
+- reasoning/thinking tokens, safest as an output subcategory unless provider documents otherwise
+- optional tool/search costs or request counts
+- optional pricing mode such as batch/flex/priority
+
+Design conclusion: keep all-session `total_tokens` only as a convenience scalar, add classified `main_session`, `role_sessions`, and `all_sessions` token sections, and use structured main-session tokens as the expensive-model cost proxy. Historical flat-only results are disposable and should be deleted or regenerated rather than used as fallback data.
+
+---
+
+## 6. Current state of `orchestra-bench`
 
 Implemented pieces that can mostly be kept:
 - shared container/task harness structure
@@ -346,7 +409,19 @@ Three strong small-E2E patterns emerged from the inspected sample tasks:
 
 These are good templates for the 3 smoke E2E tests.
 
-## 11. Summary conclusions
+## 11. Pi one-shot auto mode and asynchronous Orchestra workers
+
+Batch07 and Batch08 exposed a benchmark lifecycle failure rather than a task-specific implementation failure. In the failed runs, the parent Pi session dispatched a builder, Pi reached settle in one-shot `pi -p` mode, the host process exited, and grading began while Orchestra logs still showed the worker as `running` with no `worker.exited`/`done` event. Interactive Pi is less exposed to this problem because the TUI process remains alive and can receive real auto-return reports.
+
+Pi documentation confirms a useful distinction:
+- `agent_settled` means Pi has no automatic retry, compaction retry, or queued follow-up left.
+- RPC mode keeps a process-level client connected and streams lifecycle events such as `agent_settled`.
+- Extension follow-up messages can trigger new turns, but fake "still waiting" follow-ups are not a principled keepalive because they can burn extra model turns or loop.
+
+Research conclusion:
+For benchmark automation, `--auto` should move from one-shot `pi -p` to a Pi RPC runner. The runner should keep the host process alive after Pi settle, query Orchestra state for the parent session, and only grade once Pi is settled and expected Orchestra workers/reports are terminal or explicitly failed. This preserves asynchronous Orchestra behavior while fixing benchmark premature grading.
+
+## 12. Summary conclusions
 
 1. The current harness framework is partially useful, but runtime-valid benchmarking is not complete.
 2. The agent catalog is central and must become the benchmark's real source of truth.

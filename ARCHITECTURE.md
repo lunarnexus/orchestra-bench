@@ -100,11 +100,25 @@ Keep the operator surface simple, but with clear semantics:
 - `scripts/01-start start` builds the image and recreates the benchmark container so mounts/config are fresh
 - `scripts/01-start stop` removes the benchmark container cleanly
 - task isolation comes from a fresh per-run workdir created by `scripts/02-open-pi <task-id>`
-- `scripts/02-open-pi <task-id> --auto` uses the same prep path, runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` non-interactively and exits
-- `scripts/02-open-pi <task-id> --auto --no-orchestra` skips only the automatic `/orch on` preflight and sends `Prompt.md` unchanged
+- `scripts/02-open-pi <task-id> --auto` uses the same prep path, then should run Pi through an RPC-backed auto runner so the benchmark process remains alive until asynchronous Orchestra workers finish and reports are delivered
+- `scripts/02-open-pi <task-id> --auto --no-orchestra` skips only the automatic `/orch on` preflight and sends `Prompt.md` unchanged; it may still use the RPC runner so auto/no-auto lifecycle semantics are consistent
 - all role/workflow/artifact requirements live in `Prompt.md`; the harness records metadata such as `target_role` for diagnostics but does not inject prompt text
 - `scripts/03-collect-results` grades all prepared/ungraded runs idempotently
 - `scripts/04-run-suite <suite>` runs each suite task through `02-open-pi --auto`, then grades it; `--no-orchestra` passes through for baseline/no-Orchestra suite runs
+
+### Auto-run lifecycle
+
+The benchmark previously used one-shot `pi -p` for `--auto`: run `/orch on`, continue the same session with `Prompt.md`, and grade when the process exits. That is not sufficient for asynchronous Orchestra dispatch. A parent can dispatch a worker, reach Pi `agent_settled`, and cause the one-shot process to exit while the worker is still running. Interactive Pi does not normally suffer the same failure because the host session remains alive for auto-return reports.
+
+The intended auto-runner design is therefore RPC-based:
+- start Pi with `--mode rpc` in the task workdir
+- send `/orch on` when enabled, then send `Prompt.md`
+- listen for Pi lifecycle events such as `agent_settled`
+- after settle, query Orchestra state for the parent session
+- do not grade until Pi is settled and expected Orchestra workers/reports are terminal or explicitly failed/abandoned
+- persist RPC event logs as artifacts for debugging
+
+This keeps Orchestra dispatch asynchronous for the parent model while making benchmark automation lifecycle-aware. The harness should not inject fake repeated "still waiting" prompts just to keep the process alive.
 
 ## Operator flow
 
@@ -198,10 +212,18 @@ Each run should persist:
 - config/catalog hashes or snapshot identifiers
 - image/container identifiers when useful
 - elapsed time
-- token summaries when available
 - evaluator outcome
-- optional process diagnostics: role usage, dispatch counts, parent/worker token breakdown
+- flat all-session token summaries as convenience fields when available
+- classified token summaries for expensive-main / cheap-role comparisons:
+  - `all_sessions` totals for total system overhead
+  - `main_session` totals for the parent/expensive model
+  - `role_sessions` totals for Orchestra workers/local roles
+  - trace-backed buckets: input, output, reasoning, cache read, cache write, total, reported cost when nonzero
+  - main-session context pressure: final context, max context, API call count, compaction count
+- optional process diagnostics: role usage, dispatch counts, role/worker token breakdown
 - when present, soft process penalties that adjust `score_numeric`/rubric for orchestration or efficiency issues without changing the evaluator's top-level pass/fail field
+
+Token reporting must not conflate context pressure with billable/proxy usage. `total_tokens` remains an all-session convenience field; efficiency and cost-oriented comparisons use explicit structured main-session token fields. Old flat-only results are disposable and should be deleted or regenerated rather than silently reinterpreted. Provider-specific fields such as tool/search costs, pricing mode, or dollar estimates are optional unless present in traces or configured pricing data.
 
 ## Validation and testing process
 
@@ -225,7 +247,7 @@ scripts/03-collect-results
 scripts/05-results run <run-id>
 ```
 
-`--auto` must use the same preparation path as interactive runs. By default it first runs `/orch on` through `pi -p`, then continues the same Pi session with `Prompt.md` inside the per-run workdir. `--no-orchestra` skips only that automatic `/orch on` preflight; it does not rewrite or weaken the task prompt, and Orchestra tools may still be used if available and requested by `Prompt.md`. This proves the operator flow, orchestrator-skill loading, Pi session capture, grading, token capture, timing, and result display against the actual benchmark path.
+`--auto` must use the same preparation path as interactive runs. The desired implementation uses Pi RPC mode rather than one-shot `pi -p`, because benchmark automation must keep the host process alive while asynchronous Orchestra workers finish. `--no-orchestra` skips only the automatic `/orch on` preflight; it does not rewrite or weaken the task prompt, and Orchestra tools may still be used if available and requested by `Prompt.md`. This proves the operator flow, orchestrator-skill loading, Pi session capture, grading, token capture, timing, and result display against the actual benchmark path.
 
 ### Verification expectations
 When dogfooding a run, verify:
