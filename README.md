@@ -110,10 +110,11 @@ Task definitions are not mounted during agent runs. `02-open-pi` automatically c
 ### Step-by-step
 
 ```bash
-# 1. Build and recreate the shared container
+# 1. Build/recreate the shared container and sync runtime config
 scripts/01-start start
 
 # 2. Optional: adjust Pi package/resource config inside the container
+# Longer term, prefer scripted plugin profiles over Dockerfile hand-edits.
 scripts/02-open-pi config
 
 # 3. List tasks, then open Pi for one task
@@ -140,7 +141,7 @@ scripts/05-results timing
 
 ### `01-start [start|stop]`
 
-`start` builds the shared benchmark image, then recreates the long-lived container so mounts/config are fresh. Because the build is fast, this is the normal startup command. `stop` stops and removes the benchmark container cleanly while leaving the image, results, and artifacts intact.
+`start` builds the shared benchmark image, then recreates the long-lived container so mounts/config are fresh. Because the build is fast, this is the normal startup command. Runtime setup should use Orchestra's installed `config.yaml`/`prompts.yaml`, copy the local editable agent catalog and auxiliary skills, and apply Pi plugin/settings state without requiring Dockerfile hand-edits. `stop` stops and removes the benchmark container cleanly while leaving the image, results, and artifacts intact.
 
 ### `02-open-pi <task-id>`
 
@@ -165,7 +166,7 @@ Runs every task in a suite through `scripts/02-open-pi <task-id> --auto`, grades
 
 ### `05-results [view]`
 
-Read-only historical reporting. Default `dashboard` shows overview, per-suite breakdown, per-test breakdown, token/time metrics, and orchestration behavior summaries. Common views:
+Read-only historical reporting. This is the main day-to-day inspection tool after suite runs. Default `dashboard` shows overview, per-suite breakdown, per-test breakdown, token/time metrics, and orchestration behavior summaries. The `debug` view should become the guided path through Pi session traces, RPC events, Orchestra debug output, logs, and state artifacts. Common views:
 
 - `scripts/05-results runs --limit 50` — recent graded runs
 - `scripts/05-results run <run-id-or-run-folder>` — one run detail
@@ -258,7 +259,7 @@ Report separately:
 
 ```
 orchestra-bench/
-  config/orchestra/     — benchmark-local Orchestra config (catalog, prompts, config)
+  config/orchestra/     — benchmark-local Orchestra agent catalog
   config/pi/            — Pi/plugin runtime config (lmstudio.json, settings.json)
   config/skills/        — benchmark-local Pi skills copied into the container image
   docker/               — Dockerfile and entrypoint for the shared container

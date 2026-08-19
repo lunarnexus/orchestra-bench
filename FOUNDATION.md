@@ -15,7 +15,7 @@ The benchmark is only valid if it runs the real stack the user cares about:
 - Orchestra is installed from the user's Gitea source pattern
 - the LM Studio Pi plugin is installed from the user's Gitea source pattern
 - `orchestra init pi --copy --force` is run inside the container
-- local editable Orchestra config files are copied into the container runtime
+- local editable `agent-catalog.yaml` and auxiliary skills are copied into the container runtime
 
 If those are missing, the benchmark is not testing the real system.
 
@@ -25,13 +25,13 @@ If those are missing, the benchmark is not testing the real system.
 - `PI_MODEL` is **not** the benchmark truth source
 - the default role in the catalog, typically `builder`, is the starting place for model resolution unless a run explicitly targets another role
 
-### 3. Config must be local and editable
-The benchmark must use benchmark-local editable config files, copied into the container:
-- `config.yaml`
-- `prompts.yaml`
-- `agent-catalog.yaml`
+### 3. Config must be reproducible but not painful
+The benchmark must use explicit, inspectable config inputs copied into the container runtime. Different files have different ownership:
+- `config.yaml` and `prompts.yaml` are Orchestra-owned and should come from the installed Orchestra version, not this benchmark repo.
+- `agent-catalog.yaml` is intentionally benchmark-local and editable because model/catalog experiments change often.
+- auxiliary Pi skills under `config/skills/` are intentionally benchmark-local and editable because the operator changes them often.
 
-These should live in this repo as benchmark-owned config snapshots, not be generated ad hoc at run time.
+Runtime setup should copy local editable catalog/skills into the container without overriding Orchestra's installed `config.yaml` or `prompts.yaml`. The operator should not have to hand-copy either file after every Orchestra pull.
 
 The LM Studio runtime config should also live in the project config area, but separately from Orchestra config since it is Pi/plugin runtime config, not Orchestra config. Do not copy it directly from `~/.pi/agent/` during runtime setup.
 
@@ -40,6 +40,7 @@ The LM Studio runtime config should also live in the project config area, but se
 - do **not** rebuild/recreate the container for every tiny test
 - task workspaces inside the container must still reset between runs
 - explicit rebuild/recreate/reset operations are acceptable and expected when needed for cleanliness or runtime changes
+- plugin enablement/profile changes should be scriptable runtime state, not Dockerfile hand-edits; commenting plugin installs in the Dockerfile is a symptom that the harness needs first-class plugin profiles
 
 ### 5. Simple operator flow
 The operator flow should stay simple and scripts-first.
@@ -47,12 +48,12 @@ Use numbered scripts as the public UX, with `open-pi.sh` exempt if kept.
 Do not present a user-facing CLI in the main documentation.
 
 Target flow:
-1. setup runtime/container
-2. open Pi for one or more tasks; task runs auto-prepare isolated workdirs
-3. collect/grade prepared runs
-4. inspect results/reporting
+1. setup/sync runtime and container inputs
+2. open Pi or run auto suites; task runs auto-prepare isolated workdirs
+3. grade as part of auto/suite execution, with `03-collect-results` still available for regrade/backfill
+4. inspect results and traces through `05-results`
 
-Avoid unnecessary modes and ceremony.
+The current flow works but is too clunky: rebuild container, hand-copy prompt/catalog files, manually toggle Pi plugins or edit the Dockerfile, run suites, then dig through debug traces. The refactor should reduce this to explicit config/profile commands and better result/debug navigation, without hiding provenance.
 
 ### 6. Outcome first, orchestration second
 The benchmark should measure whether Orchestra helps deliver strong end results.

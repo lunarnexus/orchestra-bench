@@ -13,7 +13,7 @@ The benchmark must:
 - install Orchestra from the user's Gitea/source pattern
 - install the LM Studio Pi plugin from the user's Gitea/source pattern
 - run `orchestra init pi --copy --force` inside the container
-- use local editable Orchestra config files copied into the container runtime
+- use local editable Orchestra agent catalog copied into the container runtime
 
 ### Config / model requirements
 - `agent-catalog.yaml` is the critical artifact
@@ -84,7 +84,7 @@ Important conclusions:
 
 ### Stable harness decisions already validated there
 From the prior harness work in `~/workspace/SaasBench-Orchestra`:
-- local editable Orchestra config files were preferred and used
+- local editable Orchestra catalog/config overlays were preferred at the time; current simplification keeps only the local catalog by default
 - `PI_MODEL` was removed from the source-of-truth path
 - model was read from `agent-catalog.yaml`
 - Pi had to run inside the application/task container
@@ -102,7 +102,7 @@ The working SaaSBench bootstrap flow included:
 - install Pi globally
 - install LM Studio plugin from the Gitea repo
 - run `orchestra init pi --copy --force`
-- copy local `config.yaml` and `agent-catalog.yaml` into Pi's Orchestra config dir
+- copy local `agent-catalog.yaml` into Pi's Orchestra config dir while leaving Orchestra-owned `config.yaml`/`prompts.yaml` from the installed version
 - validate with `orchestra doctor`
 - validate Pi/Orchestra integration with a direct command
 
@@ -112,12 +112,12 @@ Observed working steps in the existing harness:
 - install Pi in the container
 - clone the LM Studio plugin repo and install/copy it
 - run `orchestra init pi --copy --force`
-- copy benchmark-local `config.yaml` and `agent-catalog.yaml` into `/root/.pi/agent/orchestra/`
+- copy benchmark-local `agent-catalog.yaml` into `/root/.pi/agent/orchestra/` while leaving installed Orchestra `config.yaml`/`prompts.yaml` intact
 - verify with `orchestra doctor`
 - verify Pi model execution in container
 
 Conclusion:
-This is the correct runtime pattern to carry into `orchestra-bench`.
+The corrected runtime pattern is to install/init Orchestra from source, then apply only benchmark-local experiment inputs such as `agent-catalog.yaml` and auxiliary skills. Orchestra-owned `config.yaml` and `prompts.yaml` should come from the installed Orchestra version.
 
 ---
 
@@ -300,7 +300,7 @@ The runtime foundation and suite inventory are now valid enough to support real 
 
 The runtime repair sequence was:
 1. install Pi, Orchestra, and LM Studio plugin in the container
-2. add benchmark-local editable config snapshot and mount/copy it
+2. add benchmark-local editable agent catalog and mount/copy it
 3. run `orchestra init pi --copy --force` inside the container
 4. derive model from `agent-catalog.yaml`, remove `PI_MODEL` as truth source
 5. preserve reusable-container semantics
@@ -374,7 +374,7 @@ The old capability tasks were useful scaffolding but are not good enough for fin
 
 ### Config location
 Likely default:
-- commit benchmark-local config under `config/orchestra/`
+- commit benchmark-local agent catalog under `config/orchestra/`
 
 ### Non-Orchestra baseline model selection
 Likely default:
@@ -421,10 +421,25 @@ Pi documentation confirms a useful distinction:
 Research conclusion:
 For benchmark automation, `--auto` should move from one-shot `pi -p` to a Pi RPC runner. The runner should keep the host process alive after Pi settle, query Orchestra state for the parent session, and only grade once Pi is settled and expected Orchestra workers/reports are terminal or explicitly failed. This preserves asynchronous Orchestra behavior while fixing benchmark premature grading.
 
-## 12. Summary conclusions
+## 12. Operator ergonomics and harness refactor needs
+
+The current benchmark workflow is functional but too manual for repeated overnight model/config experiments. The recurring pain points are evidence that the harness needs first-class runtime/profile management rather than more ad hoc shell patches:
+
+- `scripts/01-start` rebuilds/recreates the container, but the operator still has to manually copy Orchestra-owned config/prompt files and `agent-catalog.yaml` from the updated Orchestra checkout.
+- `config.yaml` and `prompts.yaml` should not live in benchmark config; absence should mean "use the installed Orchestra defaults" so config/prompt changes are tested with the matching Orchestra code.
+- `agent-catalog.yaml` should remain local and hand-editable because model/role experiments change frequently.
+- auxiliary skills under `config/skills/` are also local and frequently edited; runtime init should sync them predictably.
+- Pi plugin enablement is currently adjusted through `pi config` or by commenting plugin installs in `docker/Dockerfile`; that is useful for experiments but poor provenance and easy to forget.
+- `04-run-suite --auto` and integrated grading are useful; `05-results` is the essential inspection surface.
+- Debug trace navigation remains too path-oriented. Operators need a guided view across Pi session JSONL, RPC events, Orchestra debug markdown, logs, and state DB summaries.
+
+Research conclusion:
+The RPC runner should be implemented as part of a focused harness refactor that removes benchmark-owned Orchestra `config.yaml`/`prompts.yaml`, adds explicit plugin profile/runtime state, introduces small importable modules for run paths/artifacts/results, and improves debug trace navigation. The refactor should reduce operator steps while improving provenance, not hide configuration state.
+
+## 13. Summary conclusions
 
 1. The current harness framework is partially useful, but runtime-valid benchmarking is not complete.
 2. The agent catalog is central and must become the benchmark's real source of truth.
-3. The benchmark must copy benchmark-local Orchestra config into the container and run the real Pi+Orchestra runtime there.
+3. The benchmark must copy the benchmark-local Orchestra agent catalog into the container and run the real Pi+Orchestra runtime there.
 4. The benchmark should be organized around batches inspired by existing Orchestra evals and SaaSBench methodology.
 5. The benchmark should be judged outcome-first: whether Orchestra delivers strong finished results, not whether it merely exercised every role.
