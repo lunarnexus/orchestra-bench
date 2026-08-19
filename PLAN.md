@@ -145,15 +145,22 @@ Keep public script names stable.
   Verify: reporting/debug tests.
   Risk: P2 — operator diagnostics.
 
-- [ ] Slice 8 — sequential — Dogfood full auto run
-  Scope: run at least one no-Orchestra and one Orchestra-enabled task in the real container.
-  Stop when: results show correct grading lifecycle and no false `worker_running_without_exit` from one-shot exit.
+- [ ] Slice 8 — sequential, MANDATORY FINAL GATE — Live end-to-end verification
+  Scope: after all other slices land and unit tests pass, run at least one no-Orchestra task AND one Orchestra-enabled task in the real container through `--auto`.
+  Stop when (all required):
+  - both runs produce a graded result.json with sane tokens/orchestration fields,
+  - RPC events artifact exists (`artifacts/pi-rpc/events.jsonl`) and shows agent_settled before exit,
+  - Orchestra run has no false `worker_running_without_exit` from early one-shot exit,
+  - `scripts/05-results debug <run-id>` renders the new trace guidance on a real run.
   Verify:
   ```bash
-  scripts/02-open-pi cap-easy-django-reports --auto --notes "RPC runner smoke"
+  scripts/01-start start   # only if container is stale/recreated for mounts
+  scripts/02-open-pi <small-smoke-task> --auto --no-orchestra --notes "RPC live e2e"
+  scripts/02-open-pi <small-role-or-capability-task> --auto --notes "RPC live e2e orchestra"
   scripts/05-results run <run-id>
   scripts/05-results debug <run-id>
   ```
+  If the live run fails, fix and re-run before declaring the plan complete. LM Studio concurrency==1 means runs serialize with any other local model use — acceptable.
   Risk: P1 — real runtime integration.
 
 - [ ] Slice 9 — parallel-safe after core stabilizes — Start decomposing `05-results`
