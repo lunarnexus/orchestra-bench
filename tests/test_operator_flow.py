@@ -445,7 +445,7 @@ class TestOpenPiInteractiveSession:
         before = {p for p in results_dir.glob("*-smoke-public-admin-handoff")}
         try:
             result = sp.run(
-                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke-public-admin-handoff", "--auto"],
+                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke-public-admin-handoff", "--auto", "--auto-runner", "print"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -522,7 +522,7 @@ class TestOpenPiInteractiveSession:
         before = {p for p in results_dir.glob("*-smoke-public-admin-handoff")}
         try:
             result = sp.run(
-                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke-public-admin-handoff", "--auto", "--no-orchestra"],
+                [_REPO_ROOT / "scripts" / "02-open-pi", "smoke-public-admin-handoff", "--auto", "--no-orchestra", "--auto-runner", "print"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -575,7 +575,7 @@ class TestOpenPiInteractiveSession:
         before = {p for p in results_dir.glob(f"*-{task_id}")}
         try:
             result = sp.run(
-                [_REPO_ROOT / "scripts" / "02-open-pi", task_id, "--auto"],
+                [_REPO_ROOT / "scripts" / "02-open-pi", task_id, "--auto", "--auto-runner", "print"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -634,7 +634,7 @@ class TestOpenPiInteractiveSession:
         before = {p for p in results_dir.glob(f"*-{task_id}")}
         try:
             result = sp.run(
-                [_REPO_ROOT / "scripts" / "02-open-pi", task_id, "--auto"],
+                [_REPO_ROOT / "scripts" / "02-open-pi", task_id, "--auto", "--auto-runner", "print"],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -689,7 +689,7 @@ class TestOpenPiInteractiveSession:
         before = {p for p in results_dir.glob(f"*-{task_id}")}
         try:
             result = sp.run(
-                [_REPO_ROOT / "scripts" / "02-open-pi", task_id, "--auto"],
+                [_REPO_ROOT / "scripts" / "02-open-pi", task_id, "--auto", "--auto-runner", "print"],
                 env=env,
                 capture_output=True,
                 text=True,

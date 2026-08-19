@@ -104,15 +104,28 @@ Keep public script names stable.
 - Show mismatches: worker running at grade time, missing worker session JSONL, empty debug output, no role tokens despite dispatch, pending report not delivered.
 - Keep raw artifacts; do not duplicate large logs into result JSON.
 
+## Status (overnight fork, 2026-08-19)
+
+Slices 1-8 complete and live-verified. Slices 9-10 deferred as planned.
+
+Live E2E evidence (container `orchestra-bench-runner`, model lmstudio/qwen/qwen3.8-27b):
+- Run A: `researcher-summarize-release-notes --auto --no-orchestra --auto-runner rpc`
+  → PASS, pi_exit 0, session captured, events.jsonl with agent_settled, debug section renders.
+- Run B: `cap-easy-express-inventory --auto --auto-runner rpc` (Orchestra on)
+  → /orch on preflight OK; gate result "settled" before exit; `worker_running_without_exit=False`;
+  graded after settle. Task score=fail is a genuine local-model capability failure
+  (incomplete app.js), not a harness lifecycle issue.
+- Default `--auto-runner` flipped to rpc after the live pass; `print` remains as escape hatch.
+
 ## Task Breakdown
 
-- [ ] Slice 1 — sequential — Extract `RunDirectory` path helper
+- [x] Slice 1 — sequential — Extract `RunDirectory` path helper
   Scope: add `bench/run_paths.py` and replace a small set of repeated run/artifact path constructions in tests or non-risky code.
   Stop when: tests can use `RunDirectory` for result/artifact paths.
   Verify: focused path/helper tests.
   Risk: P2 — foundation for later refactor.
 
-- [ ] Slice 2 — sequential — Simplify runtime config sync
+- [x] Slice 2 — sequential — Simplify runtime config sync (verified live: container keeps installed Orchestra config.yaml/prompts.yaml; only agent-catalog.yaml + skills overlaid)
   Scope: stop requiring/copying benchmark `config.yaml` and `prompts.yaml`; preserve local `agent-catalog.yaml`; sync `config/skills/`; keep runtime config/prompts from installed Orchestra defaults.
   Stop when: `config/orchestra/config.yaml` and `config/orchestra/prompts.yaml` can both be absent and `scripts/01-start start` / runtime init still succeeds without overwriting the local catalog.
   Verify: unit tests or script tests with temp config/runtime dirs plus a container init smoke.
@@ -121,31 +134,31 @@ Keep public script names stable.
 - [x] Slice 3 — dropped — Plugin profiles
   Decision (operator): keep commented `pi install` lines in `docker/Dockerfile` as the plugin selection mechanism. Simple and sufficient; no profile machinery.
 
-- [ ] Slice 4 — sequential — RPC runner tracer bullet
+- [x] Slice 4 — sequential — RPC runner tracer bullet
   Scope: implement minimal `bench/pi_rpc_runner.py` that starts Pi RPC, sends one prompt, logs events, and exits on `agent_settled` for no-Orchestra mode.
   Stop when: mocked process tests pass and a harmless container smoke can run without grading.
   Verify: `tests/test_pi_rpc_runner.py` for JSONL protocol/event parsing.
   Risk: P1 — new execution path.
 
-- [ ] Slice 5 — sequential — Orchestra-aware settle gate
+- [x] Slice 5 — sequential — Orchestra-aware settle gate (live: Run B gate result "settled")
   Scope: add active-run/report detection around RPC settle; use existing Orchestra CLI/state outputs where possible.
   Stop when: mocked tests cover active worker preventing exit and terminal worker allowing exit.
   Verify: mocked Orchestra CLI outputs and synthetic RPC events.
   Risk: P1 — prevents premature grading.
 
-- [ ] Slice 6 — sequential — Wire `02-open-pi --auto` to RPC runner
+- [x] Slice 6 — sequential — Wire `02-open-pi --auto` to RPC runner (default now rpc; print escape hatch kept)
   Scope: keep existing prep, metadata, cleanup, artifact collection, grading integration; replace one-shot auto path or add temporary `--auto-runner rpc|print` rollout flag.
   Stop when: operator-flow tests prove command construction and cleanup/grade sequencing.
   Verify: `pytest -q tests/test_operator_flow.py tests/test_pi_rpc_runner.py --tb=short`.
   Risk: P1 — public workflow.
 
-- [ ] Slice 7 — sequential — RPC artifacts and debug navigation
+- [x] Slice 7 — sequential — RPC artifacts and debug navigation (verified on real runs)
   Scope: save RPC events under run artifacts; extend manifest/debug view to summarize RPC/Pi/Orchestra trace availability and lifecycle chain.
   Stop when: `scripts/05-results debug <run>` shows useful trace guidance on synthetic fixtures.
   Verify: reporting/debug tests.
   Risk: P2 — operator diagnostics.
 
-- [ ] Slice 8 — sequential, MANDATORY FINAL GATE — Live end-to-end verification
+- [x] Slice 8 — sequential, MANDATORY FINAL GATE — Live end-to-end verification (passed; see Status above)
   Scope: after all other slices land and unit tests pass, run at least one no-Orchestra task AND one Orchestra-enabled task in the real container through `--auto`.
   Stop when (all required):
   - both runs produce a graded result.json with sane tokens/orchestration fields,

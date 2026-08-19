@@ -24,7 +24,7 @@ Commands:
   --auto       Run Pi with Prompt.md non-interactively and exit, then grade
   --auto-runner Runner for --auto: "print" (one-shot pi -p) or "rpc"
                 (Pi RPC mode; stays alive until Orchestra work is terminal).
-                Default: ${BENCH_AUTO_RUNNER:-print}
+                Default: rpc. Use "print" for the legacy one-shot pi -p path.
   --no-orchestra Skip the automatic /orch on preflight for baseline/debug runs
   --notes      Free-form run notes stored in .bench_run.json
   --list   List tasks grouped by suite/role
@@ -114,7 +114,7 @@ esac
 
 auto=false
 auto_orch_on=true
-auto_runner="${BENCH_AUTO_RUNNER:-print}"
+auto_runner="${BENCH_AUTO_RUNNER:-rpc}"
 run_notes="${BENCH_NOTES:-}"
 
 task_id="${1:-}"
