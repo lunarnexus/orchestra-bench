@@ -62,7 +62,9 @@ class TestSlice3RuntimeInit:
 
         assert result.returncode != 0
         assert "orchestra config source not found" in result.stderr
-        assert not log.exists()
+        # Orchestra init now runs before the benchmark overlay, so its fake
+        # invocation is logged even when the catalog sync fails.
+        assert log.read_text().splitlines() == ["init pi --copy --force"]
         assert not runtime.exists()
 
     def test_init_runtime_syncs_config_and_runs_orchestra_init(self, tmp_path):

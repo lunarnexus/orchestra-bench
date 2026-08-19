@@ -98,9 +98,11 @@ class TestSlice2ConfigSnapshot:
     def test_benchmark_local_orchestra_config_files_exist(self):
         config_dir = REPO_ROOT / "config" / "orchestra"
         pi_dir = REPO_ROOT / "config" / "pi"
-        assert (config_dir / "config.yaml").is_file()
-        assert (config_dir / "prompts.yaml").is_file()
+        # Only the catalog is benchmark-local; config.yaml/prompts.yaml come
+        # from the installed Orchestra version, not this repo.
         assert (config_dir / "agent-catalog.yaml").is_file()
+        assert not (config_dir / "config.yaml").exists()
+        assert not (config_dir / "prompts.yaml").exists()
         assert (pi_dir / "lmstudio.json").is_file()
         assert not (REPO_ROOT / "config" / "lmstudio.json").exists()
 
