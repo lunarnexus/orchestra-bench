@@ -434,7 +434,7 @@ The current benchmark workflow is functional but too manual for repeated overnig
 - Debug trace navigation remains too path-oriented. Operators need a guided view across Pi session JSONL, RPC events, Orchestra debug markdown, logs, and state DB summaries.
 
 Research conclusion:
-The RPC runner should be implemented as part of a focused harness refactor that removes benchmark-owned Orchestra `config.yaml`/`prompts.yaml`, adds explicit plugin profile/runtime state, introduces small importable modules for run paths/artifacts/results, and improves debug trace navigation. The refactor should reduce operator steps while improving provenance, not hide configuration state.
+The RPC runner was implemented as part of a focused harness refactor that removed benchmark-owned Orchestra `config.yaml`/`prompts.yaml`, introduced small importable modules for run paths/RPC execution/settle gating (`bench/run_paths.py`, `bench/pi_rpc_runner.py`, `bench/orchestration_gate.py`, `bench/auto_run.py`), and improved debug trace navigation. Plugin selection stayed as commented Dockerfile install lines per operator decision.
 
 ## 13. Summary conclusions
 
