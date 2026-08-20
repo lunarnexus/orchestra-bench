@@ -36,7 +36,7 @@ Options:
                      Exclude auxiliary skill substrings without shell-sensitive ! syntax
   --orchestra         Filter to runs with actual Orchestra dispatch/activity
   --no-orchestra      Filter to runs with no actual Orchestra dispatch/activity
-  --detail <1|2|3>    Dashboard detail level (default: 3)
+  --detail <1|2|3>    Detail level; for debug: 1 summary, 2 transcript tails, 3 full transcripts (default: 3)
   --rubric [names]    Show only rubric breakdowns; optional comma-separated names
   --checks [names]    Show only check breakdowns; optional comma-separated names
   --behaviors [names] Show only behavior breakdowns; optional comma-separated names
@@ -84,6 +84,7 @@ group_by="model,orchestra,plugins,skills"
 configs_filter=""
 per_task="false"
 detail_level="3"
+detail_set="false"
 rubric_filter=""
 checks_filter=""
 behaviors_filter=""
@@ -112,7 +113,7 @@ while [ $# -gt 0 ]; do
     --group-by) group_by="$2"; shift 2 ;;
     --configs) configs_filter="$2"; shift 2 ;;
     --per-task) per_task="true"; shift ;;
-    --detail) detail_level="$2"; shift 2 ;;
+    --detail) detail_level="$2"; detail_set="true"; shift 2 ;;
     --rubric)
       if [ $# -gt 1 ] && [[ "$2" != --* ]]; then rubric_filter="$2"; shift 2
       else rubric_filter="__all__"; shift
@@ -133,15 +134,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_filter" "$model_filter" "$plugins_filter" "$skills_filter" "$orchestra_filter" "$no_orchestra_filter" "$group_by" "$configs_filter" "$per_task" "$detail_level" "$rubric_filter" "$checks_filter" "$behaviors_filter" "$limit" "$yes_delete" "$new_notes" <<'PY'
+python3 - "$ROOT" "$view" "$run_query" "$task_filter" "$suite_filter" "$notes_filter" "$model_filter" "$plugins_filter" "$skills_filter" "$orchestra_filter" "$no_orchestra_filter" "$group_by" "$configs_filter" "$per_task" "$detail_level" "$detail_set" "$rubric_filter" "$checks_filter" "$behaviors_filter" "$limit" "$yes_delete" "$new_notes" <<'PY'
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import signal
 import statistics
 import sys
 import textwrap
+
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 from collections import defaultdict
 from pathlib import Path
 
@@ -176,19 +180,19 @@ except Exception:
     detail_level = 3
 if detail_level not in (1, 2, 3):
     detail_level = 3
-rubric_filter = sys.argv[16].strip()
-checks_filter = sys.argv[17].strip()
-behaviors_filter = sys.argv[18].strip()
+detail_set = sys.argv[16].strip().lower() == "true"
+if view == "debug" and not detail_set:
+    detail_level = 1
+rubric_filter = sys.argv[17].strip()
+checks_filter = sys.argv[18].strip()
+behaviors_filter = sys.argv[19].strip()
 try:
-    limit = int(sys.argv[19])
+    limit = int(sys.argv[20])
 except Exception:
     limit = 20
-# Debug traces should be complete by default. Use --limit N to tail the raw Pi
-# fallback trace when a bounded view is explicitly desired.
-if view == "debug" and limit == 20:
-    limit = 0
-yes_delete = sys.argv[20].strip().lower() == "true"
-new_notes = sys.argv[21]
+# Debug defaults to compact readable traces. Use --limit 0 for full raw Orchestra markdown.
+yes_delete = sys.argv[21].strip().lower() == "true"
+new_notes = sys.argv[22]
 
 results_dir = root / "results"
 tasks_dir = root / "tasks"
@@ -306,8 +310,15 @@ def _plugins_filter_excludes_orchestra():
 
 def _orchestra_used(r):
     checks = r.get("orchestration_checks") or {}
-    dispatch_count = checks.get("dispatch_count")
-    if isinstance(dispatch_count, (int, float)) and dispatch_count > 0:
+    if checks.get("orchestra_effective") is True:
+        return True
+    if checks.get("dispatches_rejected_without_worker") is True:
+        return False
+    accepted = checks.get("dispatch_accepted_count", checks.get("dispatch_count"))
+    if isinstance(accepted, (int, float)) and accepted > 0:
+        return True
+    started = checks.get("worker_started_count")
+    if isinstance(started, (int, float)) and started > 0:
         return True
     if checks.get("no_orchestration") is False:
         return True
@@ -722,7 +733,14 @@ def aggregate_orchestration(rows):
     metrics = {}
     numeric_keys = (
         "compaction_count",
+        "dispatch_attempt_count",
+        "dispatch_accepted_count",
+        "dispatch_rejected_count",
         "dispatch_count",
+        "worker_started_count",
+        "worker_exit_count",
+        "worker_reconciled_count",
+        "worker_failed_count",
         "timeouts",
         "retries",
         "scope_blockers",
@@ -735,6 +753,8 @@ def aggregate_orchestration(rows):
         "fallback_answer_after_dispatch",
         "premature_completion",
         "missing_expected_role",
+        "orchestra_effective",
+        "dispatches_rejected_without_worker",
         "no_orchestration",
         "process_penalty_applied",
     )
@@ -1658,6 +1678,74 @@ def _content_text(content):
     return str(content or "")
 
 
+def _print_pi_session_pretty(run_dir):
+    session_dir = run_dir / "artifacts" / "pi-sessions"
+    files = sorted(session_dir.glob("*.jsonl")) if session_dir.is_dir() else []
+    if not files:
+        print("\npi session pretty transcripts: none captured")
+        return False
+    print("\npi session pretty transcripts:")
+    for path in files:
+        try:
+            rel_path = path.relative_to(run_dir)
+        except ValueError:
+            rel_path = path.name
+        print(f"\n-- {rel_path} --")
+        printable = []
+        session_id = ""
+        cwd = ""
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            typ = event.get("type", "")
+            if typ == "session":
+                session_id = str(event.get("id", "") or session_id)
+                cwd = str(event.get("cwd", "") or cwd)
+                continue
+            msg = event.get("message") if isinstance(event.get("message"), dict) else {}
+            if not msg:
+                continue
+            role = str(msg.get("role", "") or "?")
+            content = msg.get("content")
+            if not isinstance(content, list):
+                text = _clip_text(_content_text(content), 900).strip()
+                if text:
+                    printable.append(f"{role}: {text}")
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                typ = item.get("type")
+                if typ == "thinking":
+                    text = _clip_text(str(item.get("thinking", "") or "").strip(), 500)
+                    if text:
+                        printable.append(f"{role} thinking: {text}")
+                elif typ == "text":
+                    text = _clip_text(str(item.get("text", "") or "").strip(), 1000)
+                    if text:
+                        printable.append(f"{role}: {text}")
+                elif typ == "toolCall":
+                    name = item.get("name", "")
+                    args = _clip_text(json.dumps(item.get("arguments", ""), ensure_ascii=False), 500)
+                    printable.append(f"{role} toolCall {name}: {args}")
+                elif typ == "toolResult":
+                    name = item.get("toolName", "")
+                    text = _clip_text(str(item.get("content", "") or ""), 900).strip()
+                    printable.append(f"toolResult {name}: {text}")
+        if session_id or cwd:
+            print(f"  session_id: {session_id or '?'}")
+            print(f"  cwd       : {cwd or '?'}")
+        if not printable:
+            print("  (no printable events)")
+            continue
+        for event in printable:
+            for line in event.splitlines():
+                print(f"  {line}")
+    return True
+
+
 def _print_pi_session_trace(run_dir, max_events=0):
     session_dir = run_dir / "artifacts" / "pi-sessions"
     files = sorted(session_dir.glob("*.jsonl")) if session_dir.is_dir() else []
@@ -1682,7 +1770,11 @@ def _print_pi_session_trace(run_dir, max_events=0):
                     events.append(f"{role}: {content}")
             elif typ in {"session", "toolCall", "toolResult", "compaction"}:
                 events.append(json.dumps(event, ensure_ascii=False))
-        print(f"\n-- {path.name} --")
+        try:
+            rel_path = path.relative_to(run_dir)
+        except ValueError:
+            rel_path = path.name
+        print(f"\n-- {rel_path} --")
         if not events:
             print("  (no printable events)")
             continue
@@ -1701,7 +1793,75 @@ def _debug_text_looks_complete(text):
         return False
     if stripped.startswith("error:") or "requires 'skills'" in stripped or "unknown option" in stripped:
         return False
-    return True
+    for line in stripped.splitlines():
+        if line.strip().startswith("runs:"):
+            raw = line.split(":", 1)[1].strip()
+            try:
+                return int(raw) > 0
+            except ValueError:
+                return False
+    return False
+
+
+def _extract_prefixed_value(block, key):
+    prefix = f"{key}:"
+    for line in str(block or "").splitlines():
+        if line.startswith(prefix):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _print_orchestra_lifecycle_summary(block):
+    lines = []
+    in_lifecycle = False
+    for line in str(block or "").splitlines():
+        stripped = line.strip()
+        if stripped == "## Lifecycle log":
+            in_lifecycle = True
+            continue
+        if in_lifecycle and stripped.startswith("## "):
+            break
+        if in_lifecycle and stripped.startswith("{"):
+            try:
+                event = json.loads(stripped)
+            except Exception:
+                continue
+            name = event.get("event", "")
+            if name not in {"run.created", "worker.started", "worker.exited", "worker.reconciled", "artifact.written", "run.updated"}:
+                continue
+            status = event.get("status")
+            previous = event.get("previous_status")
+            if name == "run.updated" and status not in {"running", "done", "failed", "cancelled"}:
+                continue
+            bits = [str(event.get("timestamp", "")), str(name)]
+            if previous or status:
+                bits.append(f"{previous or '?'}→{status or '?'}")
+            for key in ("role", "process_id", "exit_code", "path", "reason", "error_text", "blocker_text"):
+                if event.get(key) is not None:
+                    bits.append(f"{key}={event.get(key)}")
+            lines.append(" ".join(bit for bit in bits if bit))
+    if lines:
+        print("  lifecycle:")
+        for line in lines[:12]:
+            print(f"    - {_clip_text(line, 220)}")
+        if len(lines) > 12:
+            print(f"    ... {len(lines) - 12} more lifecycle events omitted")
+
+
+def _print_orchestra_run_summary(block, index):
+    keys = [
+        "run_id", "status", "role", "harness", "task", "created_at", "started_at", "ended_at",
+        "process_id", "error", "blocker", "result", "result_artifact_path", "worker_session_id",
+    ]
+    run_id = _extract_prefixed_value(block, "run_id") or f"run-{index}"
+    role = _extract_prefixed_value(block, "role")
+    status = _extract_prefixed_value(block, "status")
+    print(f"\n  [{index}] {run_id}  role={role or '?'} status={status or '?'}")
+    for key in keys:
+        value = _extract_prefixed_value(block, key)
+        if value:
+            print(f"    {key:<20}: {_clip_text(value, 180)}")
+    _print_orchestra_lifecycle_summary(block)
 
 
 def _print_orchestra_debug_trace(run_dir):
@@ -1710,14 +1870,67 @@ def _print_orchestra_debug_trace(run_dir):
     if not files:
         print("\norchestra debug trace: none captured")
         return False
-    print("\norchestra debug trace:")
+    raw = limit == 0
+    print("\norchestra debug trace:" + ("" if not raw else " (raw)"))
     complete = False
     for path in files:
         print(f"\n-- {path.relative_to(run_dir)} --")
         text = path.read_text(errors="replace")
-        print(text, end="" if text.endswith("\n") else "\n")
         complete = complete or _debug_text_looks_complete(text)
+        if raw:
+            print(text, end="" if text.endswith("\n") else "\n")
+            continue
+        run_count = _extract_prefixed_value(text, "runs")
+        print(f"runs: {run_count or '?'}")
+        blocks = text.split("\n## Run state\n")[1:]
+        if not blocks:
+            body = "\n".join(line for line in text.splitlines() if not line.startswith("#") and not line.startswith("runs:"))
+            if body.strip():
+                print(_clip_text(body.strip(), 1200))
+            else:
+                print("  (no run-state blocks; use --limit 0 for raw trace)")
+            continue
+        for idx, block in enumerate(blocks, 1):
+            _print_orchestra_run_summary(block, idx)
+        print("\n  raw trace omitted; rerun with --limit 0 for full Orchestra markdown")
     return complete
+
+
+def _load_rpc_summary(run_dir):
+    summary_path = run_dir / ".bench_rpc_run.json"
+    if not summary_path.exists():
+        return None
+    try:
+        data = json.loads(summary_path.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _classify_rpc_debug(r, rpc_summary):
+    score = str(r.get("score", "") or "")
+    orch_checks = r.get("orchestration_checks") or {}
+    if orch_checks.get("dispatches_rejected_without_worker") is True:
+        return "harness lifecycle failure"
+    failed = orch_checks.get("worker_failed_count")
+    reconciled = orch_checks.get("worker_reconciled_count")
+    if (isinstance(failed, (int, float)) and failed > 0) or (isinstance(reconciled, (int, float)) and reconciled > 0):
+        return "harness worker failure"
+    if orch_checks.get("worker_running_without_exit") is True or orch_checks.get("premature_completion") is True:
+        return "harness lifecycle failure"
+    if isinstance(rpc_summary, dict) and rpc_summary:
+        if rpc_summary.get("rpc_summary_written") is False:
+            return "harness lifecycle suspect"
+        if rpc_summary.get("rpc_runner_used") is False:
+            return "harness lifecycle suspect"
+        if rpc_summary.get("rpc_agent_settled_seen") is False:
+            return "harness lifecycle suspect"
+        gate = str(rpc_summary.get("rpc_gate_result") or rpc_summary.get("gate_result") or "")
+        if gate == "timeout":
+            return "harness lifecycle suspect"
+        if gate == "settled":
+            return "task failure" if score == "fail" else "task success"
+    return "task failure" if score == "fail" else "task success"
 
 
 def _print_rpc_trace(run_dir):
@@ -1734,11 +1947,26 @@ def _print_rpc_trace(run_dir):
         print(f"  pi_exit      : {s.get('pi_exit','?')}")
         print(f"  orch_on_ok   : {s.get('orch_on_ok','?')}")
         print(f"  session_id   : {s.get('session_id') or 'none captured'}")
-        gate = str(s.get("gate_result", "skipped"))
+        gate = str(s.get("rpc_gate_result", s.get("gate_result", "skipped")))
         marker = ""
         if gate == "timeout":
             marker = "  <-- warning: Orchestra still active when runner gave up waiting"
         print(f"  orch gate    : {gate}{marker}")
+        print(
+            "  lifecycle    : "
+            f"rpc_runner_used={s.get('rpc_runner_used', '?')} "
+            f"rpc_agent_settled_seen={s.get('rpc_agent_settled_seen', '?')} "
+            f"rpc_gate_result={gate} "
+            f"rpc_summary_written={s.get('rpc_summary_written', '?')}"
+        )
+        gate_bits = []
+        for key in ("rpc_gate_active_runs", "rpc_gate_descendants_terminal", "rpc_gate_session_report_available", "rpc_gate_session_report_delivered"):
+            if key in s and s.get(key) is not None:
+                gate_bits.append(f"{key.replace('rpc_gate_', '')}={s.get(key)}")
+        if gate_bits:
+            print(f"  gate detail  : {' '.join(gate_bits)}")
+        if s.get("rpc_error"):
+            print(f"  runner error : {s.get('rpc_error')}")
     else:
         print("  summary      : missing (.bench_rpc_run.json not written)")
     if events_path.exists():
@@ -1759,6 +1987,8 @@ def _print_rpc_trace(run_dir):
               + (f" tools_done={tool_calls}" if tool_calls else ""))
         if settled == 0:
             print("  warning      : no agent_settled event; Pi exited before settling (premature grade risk)")
+        if counts.get("agent_end", 0) and settled == 0:
+            print("  warning      : agent ended without a recorded settle; inspect RPC events and Pi session trace together")
 
 
 def print_debug_detail(rows, q):
@@ -1773,12 +2003,20 @@ def print_debug_detail(rows, q):
     except ValueError:
         print("\ndebug trace: unsafe result path")
         return
+    rpc_summary = _load_rpc_summary(run_dir)
+    print(f"\ndebug classification: {_classify_rpc_debug(r, rpc_summary)}")
     orchestra_complete = _print_orchestra_debug_trace(run_dir)
-    if orchestra_complete:
-        print("\npi session trace: not printed separately; included in orchestra debug trace")
-    else:
+    if detail_level >= 3:
+        print("\npi session transcripts (detail=3 full):")
+        _print_pi_session_trace(run_dir, 0)
+    elif detail_level == 2:
+        _print_pi_session_pretty(run_dir)
+    elif not orchestra_complete:
         print("\n[bench] orchestra debug trace is missing or incomplete; showing raw Pi session fallback")
-        _print_pi_session_trace(run_dir, limit)
+        _print_pi_session_trace(run_dir, 0)
+    else:
+        print("\npi session trace: not printed separately; included in orchestra debug trace")
+        print("pi session transcripts: omitted at --detail 1; use --detail 2 for pretty transcripts or --detail 3 for full transcripts")
     _print_rpc_trace(run_dir)
 
 

@@ -590,6 +590,27 @@ def _orchestra_debug_run_count(text: str) -> int | None:
     return None
 
 
+def _orchestra_debug_worker_session_ids(text: str) -> set[str]:
+    """Extract worker Pi session ids mentioned by Orchestra debug markdown."""
+    out: set[str] = set()
+    for match in re.finditer(r"\borchestra-worker-[A-Za-z0-9._-]+", str(text or "")):
+        out.add(match.group(0))
+    return out
+
+
+def _orchestra_debug_container_paths(text: str) -> set[str]:
+    """Extract absolute container paths from Orchestra debug markdown."""
+    out: set[str] = set()
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("path:"):
+            continue
+        path = stripped.split(":", 1)[1].strip()
+        if path.startswith("/") and ".." not in Path(path).parts:
+            out.add(path)
+    return out
+
+
 def _copy_orchestra_db_preserving_nonempty(container_path: str, host_path: Path, warnings: list[object]) -> bool:
     """Copy Orchestra DB without replacing a non-empty captured DB with empty state."""
     tmp_path = host_path.with_suffix(host_path.suffix + ".tmp")
@@ -1340,6 +1361,57 @@ def collect_run_artifacts(task_id: str, run_id: str) -> Path:
             debug_files = [manifest_name for manifest_name, _path, _count in debug_entries]
         manifest["orchestra"]["debug"] = debug_files  # type: ignore[index]
 
+    # `orchestra debug` can identify worker sessions/log paths even when the
+    # initial parent-cwd Pi session scan missed them. Capture those artifacts so
+    # failed auto workers remain diagnosable after grading.
+    if _docker_ok():
+        debug_texts: list[str] = []
+        for md_path in list((orch_dir / "debug").glob("*.md")) + list((orch_dir / "debug-empty").glob("*.md")):
+            try:
+                debug_texts.append(md_path.read_text(errors="replace"))
+            except Exception:
+                pass
+        worker_session_ids: set[str] = set()
+        debug_container_paths: set[str] = set()
+        for text in debug_texts:
+            worker_session_ids.update(_orchestra_debug_worker_session_ids(text))
+            debug_container_paths.update(_orchestra_debug_container_paths(text))
+
+        existing_session_ids = {
+            str(session.get("session_id"))
+            for session in manifest["pi_sessions"]  # type: ignore[index]
+            if isinstance(session, dict) and session.get("session_id")
+        }
+        for worker_session_id in sorted(worker_session_ids - existing_session_ids):
+            find_proc = _docker_exec(
+                "sh", "-c",
+                "find \"${PI_CODING_AGENT_SESSION_DIR:-$HOME/.pi/agent/sessions}\" "
+                f"-type f -name '*_{shlex.quote(worker_session_id)}.jsonl' 2>/dev/null | head -1",
+            )
+            session_path = find_proc.stdout.strip().splitlines()[0] if find_proc.stdout.strip() else ""
+            if not session_path:
+                manifest["warnings"].append(f"worker Pi session not found: {worker_session_id}")  # type: ignore[union-attr]
+                continue
+            dest = pi_dir / Path(session_path).name
+            if _copy_from_container(session_path, dest):
+                manifest["pi_sessions"].append(_parse_pi_session_file(dest))  # type: ignore[union-attr]
+            else:
+                manifest["warnings"].append(f"failed to copy worker Pi session: {session_path}")  # type: ignore[union-attr]
+
+        copied_log_paths: list[str] = []
+        for container_path in sorted(debug_container_paths):
+            if not container_path.startswith("/root/workspace/orchestra/logs/"):
+                continue
+            rel_name = Path(container_path).name
+            if not rel_name:
+                continue
+            dest = orch_dir / "logs" / rel_name
+            if _copy_from_container(container_path, dest):
+                copied_log_paths.append(f"orchestra-debug/logs/{rel_name}")
+        if copied_log_paths:
+            manifest["orchestra"]["logs"] = "orchestra-debug/logs"  # type: ignore[index]
+            manifest["orchestra"]["debug_logs"] = sorted(set(copied_log_paths))  # type: ignore[index]
+
     main_context_usage: dict[str, object] = {}
     main_sessions = [
         session for session in manifest["pi_sessions"]  # type: ignore[index]
@@ -1825,8 +1897,8 @@ def _enrich_result_with_bench_run(
 def _parse_pi_session_dispatches(pi_sessions_dir: Path) -> list[dict[str, object]]:
     """Extract orch_dispatch tool calls from Pi session JSONL files.
 
-    Returns a list of dicts with keys: role, goal, task_label.
-    Missing or malformed sessions are silently skipped.
+    These are dispatch *attempts*. A later toolResult determines whether the
+    dispatch was accepted and a worker was actually queued.
     """
     dispatches: list[dict[str, object]] = []
     if not pi_sessions_dir.is_dir():
@@ -1868,6 +1940,72 @@ def _parse_pi_session_dispatches(pi_sessions_dir: Path) -> list[dict[str, object
                     })
 
     return dispatches
+
+
+def _parse_pi_session_dispatch_results(pi_sessions_dir: Path) -> dict[str, object]:
+    """Count accepted/rejected orch_dispatch tool results.
+
+    Accepted dispatches create an Orchestra run. Rejected dispatches, e.g. model
+    concurrency errors, do not start workers and must not count as effective
+    orchestration.
+    """
+    result: dict[str, object] = {
+        "accepted": 0,
+        "rejected": 0,
+        "accepted_roles": [],
+        "rejection_reasons": {},
+    }
+    accepted_roles: list[str] = []
+    rejection_reasons: dict[str, int] = {}
+    if not pi_sessions_dir.is_dir():
+        return result
+
+    for jsonl_file in sorted(pi_sessions_dir.glob("*.jsonl")):
+        try:
+            text = jsonl_file.read_text(errors="replace")
+        except Exception:
+            continue
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = _json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            msg = event.get("message")
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("toolName") != "orch_dispatch":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            text_value = "\n".join(
+                str(item.get("text", ""))
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+            if not text_value:
+                continue
+            lower = text_value.lower()
+            if "dispatch was not accepted" in lower or "model concurrency limit exceeded" in lower:
+                result["rejected"] = int(result["rejected"]) + 1
+                first_line = text_value.splitlines()[0].strip()
+                if first_line:
+                    rejection_reasons[first_line] = rejection_reasons.get(first_line, 0) + 1
+                continue
+            if "orchestra dispatched:" in lower:
+                result["accepted"] = int(result["accepted"]) + 1
+                first_line = text_value.splitlines()[0].strip()
+                parts = first_line.split()
+                if len(parts) >= 3:
+                    role = parts[2] if parts[2] != "unknown" else "unknown"
+                    if role and role not in accepted_roles:
+                        accepted_roles.append(role)
+
+    result["accepted_roles"] = accepted_roles
+    result["rejection_reasons"] = rejection_reasons
+    return result
 
 
 def _count_pi_session_compactions(pi_sessions_dir: Path) -> int:
@@ -1933,23 +2071,29 @@ def _count_pi_session_worker_successes(pi_sessions_dir: Path) -> int:
 
 
 def _parse_orchestra_logs(orchestra_debug_dir: Path) -> list[dict[str, object]]:
-    """Extract structured events from Orchestra debug log JSONL files.
+    """Extract structured events from Orchestra debug artifacts.
 
-    Returns a flat list of event dicts. Missing or malformed logs are skipped.
+    Prefer copied JSONL logs, but also parse JSON event lines embedded in
+    `orchestra debug` markdown. The markdown fallback is critical when live logs
+    were not copied but debug captured the lifecycle bundle.
     """
     events: list[dict[str, object]] = []
     if not orchestra_debug_dir.is_dir():
         return events
 
     logs_dir = orchestra_debug_dir / "logs"
-    if not logs_dir.is_dir():
-        # Try direct .jsonl files in the debug dir itself
+    if logs_dir.is_dir():
+        for jsonl_file in sorted(logs_dir.rglob("*.jsonl")):
+            _read_jsonl_events(jsonl_file, events)
+    else:
         for jsonl_file in sorted(orchestra_debug_dir.glob("*.jsonl")):
             _read_jsonl_events(jsonl_file, events)
-        return events
 
-    for jsonl_file in sorted(logs_dir.rglob("*.jsonl")):
-        _read_jsonl_events(jsonl_file, events)
+    if not events:
+        for md_file in sorted((orchestra_debug_dir / "debug").glob("*.md")):
+            _read_markdown_embedded_jsonl_events(md_file, events)
+        for md_file in sorted((orchestra_debug_dir / "debug-empty").glob("*.md")):
+            _read_markdown_embedded_jsonl_events(md_file, events)
     return events
 
 
@@ -2065,12 +2209,25 @@ def _read_jsonl_events(jsonl_path: Path, out: list[dict[str, object]]) -> None:
         text = jsonl_path.read_text(errors="replace")
     except Exception:
         return
+    _read_json_event_lines(text, out)
 
+
+def _read_markdown_embedded_jsonl_events(markdown_path: Path, out: list[dict[str, object]]) -> None:
+    """Read JSON event lines embedded in an Orchestra debug markdown file."""
+    try:
+        text = markdown_path.read_text(errors="replace")
+    except Exception:
+        return
+    _read_json_event_lines(text, out)
+
+
+def _read_json_event_lines(text: str, out: list[dict[str, object]]) -> None:
     for line in text.splitlines():
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
             continue
         try:
-            event = _json.loads(line)
+            event = _json.loads(stripped)
         except (ValueError, TypeError):
             continue
         if isinstance(event, dict) and "event" in event:
@@ -2110,25 +2267,53 @@ def extract_orchestration_checks(
 
     checks: dict[str, object] = {}
 
+    rpc_summary_path = run_dir / ".bench_rpc_run.json"
+    if rpc_summary_path.is_file():
+        try:
+            rpc_summary = _json.loads(rpc_summary_path.read_text())
+            if isinstance(rpc_summary, dict):
+                checks["rpc_runner_used"] = bool(rpc_summary.get("rpc_runner_used", True))
+                checks["rpc_agent_settled_seen"] = bool(rpc_summary.get("rpc_agent_settled_seen", False))
+                gate_result = rpc_summary.get("rpc_gate_result", rpc_summary.get("gate_result"))
+                if isinstance(gate_result, str) and gate_result:
+                    checks["rpc_gate_result"] = gate_result
+                checks["rpc_summary_written"] = True
+        except Exception as exc:
+            print(f"[bench] warning: failed to parse RPC summary from {rpc_summary_path}: {exc}", file=sys.stderr)
+
     # ── 1. Parse Pi session dispatches / compactions ─────────────────
     pi_sessions_dir = artifacts_dir / "pi-sessions"
     dispatches = _parse_pi_session_dispatches(pi_sessions_dir)
+    dispatch_results = _parse_pi_session_dispatch_results(pi_sessions_dir)
     checks["compaction_count"] = _count_pi_session_compactions(pi_sessions_dir)
     worker_success_returns = _count_pi_session_worker_successes(pi_sessions_dir)
 
-    roles_dispatched: list[str] = []
+    roles_attempted: list[str] = []
     goals_seen: dict[str, int] = {}
     for d in dispatches:
         role = str(d.get("role", "unknown"))
-        if role not in roles_dispatched:
-            roles_dispatched.append(role)
+        if role not in roles_attempted:
+            roles_attempted.append(role)
         goal = str(d.get("goal", "")).strip()
         goals_seen[goal] = goals_seen.get(goal, 0) + 1
 
-    checks["dispatch_count"] = len(dispatches)
-    checks["roles_dispatched"] = roles_dispatched
+    dispatch_attempt_count = len(dispatches)
+    dispatch_rejected_count = int(dispatch_results.get("rejected", 0) or 0)
+    dispatch_accepted_count = int(dispatch_results.get("accepted", 0) or 0)
+    accepted_roles = [str(r) for r in dispatch_results.get("accepted_roles", []) if str(r)]
 
-    # Same-slice redispatches: goals dispatched more than once
+    # New semantics: dispatch_count is accepted dispatches. Attempts are kept
+    # separately so rejected dispatches cannot masquerade as worker use.
+    checks["dispatch_attempt_count"] = dispatch_attempt_count
+    checks["dispatch_accepted_count"] = dispatch_accepted_count
+    checks["dispatch_rejected_count"] = dispatch_rejected_count
+    checks["dispatch_count"] = dispatch_accepted_count
+    checks["roles_dispatch_attempted"] = roles_attempted
+    checks["roles_dispatched"] = accepted_roles
+    if dispatch_results.get("rejection_reasons"):
+        checks["dispatch_rejection_reasons"] = dispatch_results["rejection_reasons"]
+
+    # Same-slice redispatches: attempted goals dispatched more than once
     same_slice_redispatches = sum(v - 1 for v in goals_seen.values() if v > 1)
     checks["same_slice_redispatches"] = max(0, same_slice_redispatches)
 
@@ -2144,6 +2329,9 @@ def extract_orchestration_checks(
     worker_exits_ok: bool = False
     worker_started_count: int = 0
     worker_exit_count: int = 0
+    worker_reconciled_count: int = 0
+    worker_failed_run_ids: set[str] = set()
+    worker_failure_reasons: list[str] = []
     roles_from_logs: list[str] = []
 
     for event in orch_events:
@@ -2164,6 +2352,23 @@ def extract_orchestration_checks(
             exit_code = event.get("exit_code")
             if isinstance(exit_code, (int, float)) and exit_code == 0:
                 worker_exits_ok = True
+            else:
+                run_id = str(event.get("run_id", "") or f"exit-{worker_exit_count}")
+                worker_failed_run_ids.add(run_id)
+                worker_failure_reasons.append(f"worker exited with code {exit_code}")
+        elif evt_type == "worker.reconciled":
+            worker_reconciled_count += 1
+            run_id = str(event.get("run_id", "") or f"reconciled-{worker_reconciled_count}")
+            worker_failed_run_ids.add(run_id)
+            reason = str(event.get("reason", "") or "worker reconciled")
+            if reason and reason not in worker_failure_reasons:
+                worker_failure_reasons.append(reason)
+        elif evt_type == "run.updated" and str(event.get("status", "")) == "failed":
+            run_id = str(event.get("run_id", "") or f"failed-{len(worker_failed_run_ids) + 1}")
+            worker_failed_run_ids.add(run_id)
+            reason = str(event.get("error_text", "") or event.get("blocker_text", "") or "worker failed")
+            if reason and reason not in worker_failure_reasons:
+                worker_failure_reasons.append(reason)
         elif evt_type == "run.created":
             role = str(event.get("role", ""))
             if role and role not in roles_from_logs:
@@ -2172,9 +2377,29 @@ def extract_orchestration_checks(
     checks["timeouts"] = timeouts
     checks["retries"] = retries
     checks["scope_blockers"] = scope_blockers
+    checks["worker_started_count"] = worker_started_count
+    checks["worker_exit_count"] = worker_exit_count
+    checks["worker_reconciled_count"] = worker_reconciled_count
+    checks["worker_failed_count"] = len(worker_failed_run_ids)
+    if worker_failure_reasons:
+        checks["worker_failure_reasons"] = worker_failure_reasons
     checks["worker_completed"] = worker_exits_ok or worker_success_returns > 0
-    checks["worker_running_without_exit"] = worker_started_count > worker_exit_count and worker_success_returns == 0
+    checks["worker_running_without_exit"] = (
+        worker_started_count > worker_exit_count
+        and worker_success_returns == 0
+        and len(worker_failed_run_ids) == 0
+        and worker_reconciled_count == 0
+    )
     has_orchestra_log_evidence = bool(orch_events)
+    if roles_from_logs:
+        merged_roles = list(checks.get("roles_dispatched", []))
+        for role in roles_from_logs:
+            if role not in merged_roles:
+                merged_roles.append(role)
+        checks["roles_dispatched"] = merged_roles
+        if checks["dispatch_accepted_count"] == 0:
+            checks["dispatch_accepted_count"] = len({str(e.get("run_id", "")) for e in orch_events if str(e.get("event", "")) == "run.created" and str(e.get("run_id", ""))})
+            checks["dispatch_count"] = checks["dispatch_accepted_count"]
 
     task_meta = result.task_meta if isinstance(result.task_meta, dict) else {}
     family = str(task_meta.get("family", "") or "").lower()
@@ -2184,11 +2409,14 @@ def extract_orchestration_checks(
         or batch.startswith("capability-")
         or result.task_id.startswith("cap-")
     )
-    checks["no_orchestration"] = capability_task and len(dispatches) == 0 and not roles_from_logs
+    orchestra_effective = bool(checks["dispatch_accepted_count"] or worker_started_count or worker_success_returns or roles_from_logs)
+    checks["orchestra_effective"] = orchestra_effective
+    checks["dispatches_rejected_without_worker"] = dispatch_attempt_count > 0 and not orchestra_effective
+    checks["no_orchestration"] = capability_task and not orchestra_effective
 
     # ── 3. Target role dispatched check ─────────────────────
     target_role = str(result.run_meta.get("target_role", "") or "").lower().strip()
-    all_dispatch_roles = set(r.lower() for r in roles_dispatched)
+    all_dispatch_roles = set(str(r).lower() for r in checks.get("roles_dispatched", []))
     all_log_roles = set(r.lower() for r in roles_from_logs)
 
     if target_role:
@@ -2196,18 +2424,22 @@ def extract_orchestration_checks(
             target_role in all_dispatch_roles or target_role in all_log_roles
         )
         # Missing expected role: no evidence of the target at all
-        checks["missing_expected_role"] = not checks["target_role_dispatched"]
+        checks["missing_expected_role"] = (
+            not checks["target_role_dispatched"]
+            and (orchestra_effective or checks.get("dispatch_rejected_count", 0) > 0)
+        )
     else:
-        checks["target_role_dispatched"] = len(dispatches) > 0 or len(roles_from_logs) > 0
+        checks["target_role_dispatched"] = orchestra_effective
         checks["missing_expected_role"] = False
 
     # ── 4. Premature completion / fallback detection ───────
     has_answer_check = "answer_exists" in result.checks
     has_answer = result.checks.get("answer_exists") is True
     checks["fallback_answer_after_dispatch"] = (
-        bool(dispatches)
+        orchestra_effective
         and has_answer
         and not checks["worker_completed"]
+        and bool(target_role)
         and has_orchestra_log_evidence
     )
     checks["premature_completion"] = bool(dispatches) and has_answer_check and not has_answer
@@ -3151,8 +3383,13 @@ def orchestration_warnings(orchestration_checks: dict[str, object] | None) -> li
         warnings.append("fallback answer after dispatch")
     if orchestration_checks.get("worker_running_without_exit") is True:
         warnings.append("worker still running / no exit")
+    failed = orchestration_checks.get("worker_failed_count")
+    if isinstance(failed, (int, float)) and failed > 0:
+        warnings.append(f"{int(failed)} worker failure{'s' if int(failed) != 1 else ''}")
+    if orchestration_checks.get("dispatches_rejected_without_worker") is True:
+        warnings.append("dispatches rejected; no worker started")
     if orchestration_checks.get("no_orchestration") is True:
-        warnings.append("no orchestration")
+        warnings.append("no effective orchestration")
 
     for key, singular, plural in (
         ("timeouts", "timeout", "timeouts"),

@@ -8,7 +8,7 @@ CONTAINER_NAME="orchestra-bench-runner"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <task-id> [--auto] [--auto-runner print|rpc] [--no-orchestra] [--notes <text>]
+Usage: $(basename "$0") <task-id> [--auto] [--debug] [--auto-runner print|rpc] [--no-orchestra] [--notes <text>]
        $(basename "$0") --list
        $(basename "$0") config
 
@@ -16,16 +16,17 @@ Open Pi for one benchmark task. A fresh run id and isolated workdir are created
 automatically. The parent Pi session uses the catalog-derived model for the default parent role.
 
 Use --auto to run Pi non-interactively with Prompt.md and exit. By default,
---auto first runs /orch on, then continues the same Pi session with the task
-prompt. For role-focused tasks, --auto asks the parent session to dispatch the
-target Orchestra role.
+--auto opens a Pi RPC session and, when orchestration is enabled, drives it like
+a human operator: send /orch on, send the task prompt, keep the session open,
+and check /orch status before grading.
 
 Commands:
   --auto       Run Pi with Prompt.md non-interactively and exit, then grade
+  --debug      With --auto --auto-runner rpc, mirror the parent Pi session live
   --auto-runner Runner for --auto: "print" (one-shot pi -p) or "rpc"
                 (Pi RPC mode; stays alive until Orchestra work is terminal).
                 Default: rpc. Use "print" for the legacy one-shot pi -p path.
-  --no-orchestra Skip the automatic /orch on preflight for baseline/debug runs
+  --no-orchestra Skip /orch on for baseline/debug runs
   --notes      Free-form run notes stored in .bench_run.json
   --list   List tasks grouped by suite/role
   config   Open Pi's package/resource config TUI inside the benchmark container
@@ -115,6 +116,7 @@ esac
 auto=false
 auto_orch_on=true
 auto_runner="${BENCH_AUTO_RUNNER:-rpc}"
+auto_debug=false
 run_notes="${BENCH_NOTES:-}"
 
 task_id="${1:-}"
@@ -127,6 +129,7 @@ shift || true
 while [ $# -gt 0 ]; do
   case "$1" in
     --auto) auto=true; shift ;;
+    --debug) auto_debug=true; shift ;;
     --auto-runner) auto_runner="$2"; shift 2 ;;
     --no-orchestra) auto_orch_on=false; shift ;;
     --notes) run_notes="$2"; shift 2 ;;
@@ -193,8 +196,8 @@ echo "[bench] model:  ${model_to_use:-<default>}"
 echo "[bench] collect: scripts/03-collect-results $task_id --run-id $BENCH_RUN_ID"
 
 # Keep benchmark prompts task-local and concise. Prompt.md contains all
-# role/task-specific instructions. --auto may still run an explicit /orch on
-# preflight when enabled, but the harness does not prepend prompt text.
+# role/task-specific instructions. RPC --auto drives Pi like a human operator:
+# /orch on, task prompt, wait/check /orch status, then grade.
 
 if $auto; then
   case "$auto_runner" in
@@ -202,10 +205,13 @@ if $auto; then
     *) echo "[bench] unknown --auto-runner: $auto_runner (expected print or rpc)" >&2; exit 1 ;;
   esac
   echo "[bench] auto:   runner=$auto_runner"
+  if $auto_debug; then
+    echo "[bench] debug:  parent session mirror enabled"
+  fi
   if $auto_orch_on; then
-    echo "[bench] orch:   /orch on preflight enabled"
+    echo "[bench] orch:   /orch on human-control enabled"
   else
-    echo "[bench] orch:   /orch on preflight skipped"
+    echo "[bench] orch:   /orch on skipped"
   fi
   auto_orch_on_value="false"
   if $auto_orch_on; then auto_orch_on_value="true"; fi
@@ -219,7 +225,8 @@ if $auto; then
       ${model_to_use:+--model "$model_to_use"} \
       $([ "true" = "$auto_orch_on_value" ] && echo --orch-on) \
       --events-path "$ROOT/results/$BENCH_RUN_ID-$task_id/artifacts/pi-rpc/events.jsonl" \
-      --summary-out "$ROOT/results/$BENCH_RUN_ID-$task_id/.bench_rpc_run.json")
+      --summary-out "$ROOT/results/$BENCH_RUN_ID-$task_id/.bench_rpc_run.json" \
+      $($auto_debug && echo --debug))
     pi_status=$?
   else
   docker exec \

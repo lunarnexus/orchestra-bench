@@ -643,6 +643,29 @@ class TestOrchestrationChecksIntegration:
         # The function returns a dict; caller assigns it to result.orchestration_checks
         assert isinstance(checks, dict)
 
+    def test_extracts_rpc_runner_lifecycle_summary(self, tmp_path):
+        run_dir = _build_artifacts_dir(tmp_path, "run-rpc", "task-rpc")
+        (run_dir / ".bench_rpc_run.json").write_text(json.dumps({
+            "pi_exit": 0,
+            "orch_on_ok": True,
+            "session_id": "sess-rpc",
+            "gate_result": "settled",
+            "rpc_runner_used": True,
+            "rpc_agent_settled_seen": True,
+            "rpc_gate_result": "settled",
+            "rpc_summary_written": True,
+        }) + "\n")
+
+        from eval_harness import extract_orchestration_checks
+
+        result = TaskResult(task_id="task-rpc", run_id="run-rpc", score="pass")
+        checks = extract_orchestration_checks(result, base_dir=tmp_path / "results")
+
+        assert checks["rpc_runner_used"] is True
+        assert checks["rpc_agent_settled_seen"] is True
+        assert checks["rpc_gate_result"] == "settled"
+        assert checks["rpc_summary_written"] is True
+
     def test_extracts_active_worker_efficiency_and_test_ownership(self, tmp_path):
         run_dir = _build_artifacts_dir(tmp_path, "run-eff", "task-eff")
         workdir = "/workspace/run-eff-task-eff"
@@ -921,6 +944,40 @@ class TestCombinedParsing:
         assert checks["worker_running_without_exit"] is False
         assert checks["fallback_answer_after_dispatch"] is False
 
+    def test_debug_markdown_lifecycle_counts_worker_reconciled_failure(self, tmp_path):
+        run_dir = _build_artifacts_dir(tmp_path, "run-md", "task-md")
+        debug_dir = run_dir / "artifacts" / "orchestra-debug" / "debug"
+        debug_dir.mkdir(parents=True)
+        debug_dir.joinpath("session.md").write_text(
+            "# Orchestra debug session\n"
+            "session_id: pi:sess-md\n"
+            "runs: 1\n"
+            "## Lifecycle log\n"
+            + json.dumps({"event": "run.created", "run_id": "w-md", "role": "builder", "orchestrator_session_id": "pi:sess-md"}) + "\n"
+            + json.dumps({"event": "worker.started", "run_id": "w-md", "role": "builder", "worker_session_id": "orchestra-worker-w-md"}) + "\n"
+            + json.dumps({"event": "worker.reconciled", "run_id": "w-md", "reason": "worker process exited/disappeared without terminal status"}) + "\n"
+            + json.dumps({"event": "run.updated", "run_id": "w-md", "status": "failed", "error_text": "worker process exited/disappeared without terminal status"}) + "\n"
+        )
+
+        from eval_harness import extract_orchestration_checks
+
+        result = TaskResult(
+            task_id="task-md",
+            run_id="run-md",
+            score="fail",
+            run_meta={"target_role": "builder", "pi_session_ids": ["sess-md"]},
+        )
+        checks = extract_orchestration_checks(result, base_dir=tmp_path / "results")
+
+        assert checks["worker_started_count"] == 1
+        assert checks["worker_reconciled_count"] == 1
+        assert checks["worker_failed_count"] == 1
+        assert checks["worker_completed"] is False
+        assert checks["worker_running_without_exit"] is False
+        assert checks["orchestra_effective"] is True
+        assert checks["roles_dispatched"] == ["builder"]
+        assert checks["worker_failure_reasons"] == ["worker process exited/disappeared without terminal status"]
+
     def test_dispatch_without_orchestra_logs_does_not_flag_fallback(self, tmp_path):
         run_dir = _build_artifacts_dir(tmp_path, "run-cb0", "task-cb0")
 
@@ -980,6 +1037,50 @@ class TestCombinedParsing:
         assert checks["worker_completed"] is True
         assert checks["worker_running_without_exit"] is False
         assert checks["fallback_answer_after_dispatch"] is False
+
+    def test_rejected_dispatch_does_not_count_as_effective_orchestration(self, tmp_path):
+        run_dir = _build_artifacts_dir(tmp_path, "run-reject", "task-reject")
+
+        lines = [
+            _session_line("session", id="sess-reject"),
+            _session_line("message", message={
+                "role": "assistant",
+                "content": [{"type": "toolCall", "name": "orch_dispatch",
+                             "arguments": {"goal": "build thing", "role": "builder"}}],
+            }),
+            _session_line("message", message={
+                "role": "toolResult",
+                "toolName": "orch_dispatch",
+                "content": [{"type": "text", "text": "error: model concurrency limit exceeded: model active=1 limit=1; dispatch was not accepted; wait for current workers to return, then re-dispatch."}],
+            }),
+        ]
+        _write_session_jsonl(run_dir, lines)
+
+        from eval_harness import extract_orchestration_checks
+
+        result = TaskResult(
+            task_id="task-reject",
+            run_id="run-reject",
+            score="pass",
+            checks={"answer_exists": True},
+            task_meta={"family": "capability"},
+            run_meta={"target_role": "builder"},
+        )
+        checks = extract_orchestration_checks(result, base_dir=tmp_path / "results")
+
+        assert checks["dispatch_attempt_count"] == 1
+        assert checks["dispatch_rejected_count"] == 1
+        assert checks["dispatch_accepted_count"] == 0
+        assert checks["dispatch_count"] == 0
+        assert checks["roles_dispatch_attempted"] == ["builder"]
+        assert checks["roles_dispatched"] == []
+        assert checks["worker_started_count"] == 0
+        assert checks["worker_completed"] is False
+        assert checks["orchestra_effective"] is False
+        assert checks["dispatches_rejected_without_worker"] is True
+        assert checks["no_orchestration"] is True
+        assert checks["target_role_dispatched"] is False
+        assert checks["missing_expected_role"] is True
 
     def test_missing_answer_check_does_not_flag_premature_completion(self, tmp_path):
         run_dir = _build_artifacts_dir(tmp_path, "run-cb1b", "task-cb1b")

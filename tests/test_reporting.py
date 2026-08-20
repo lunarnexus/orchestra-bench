@@ -1618,6 +1618,121 @@ class TestRunDetailReporting:
         assert long_text in result.stdout
         assert "earlier events omitted" not in result.stdout
 
+    def test_debug_view_falls_back_to_pi_trace_when_orchestra_debug_has_zero_runs(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a")
+        _write_result_json(tmp_path, TaskResult(task_id="task-a", run_id="run-debug-zero", score="fail"))
+        run_dir = tmp_path / "results" / "run-debug-zero-task-a"
+        debug_dir = run_dir / "artifacts" / "orchestra-debug" / "debug"
+        debug_dir.mkdir(parents=True)
+        (debug_dir / "session-debug.md").write_text("# Orchestra debug session\nsession_id: sess\nruns: 0\n")
+        session_dir = run_dir / "artifacts" / "pi-sessions"
+        session_dir.mkdir(parents=True)
+        (session_dir / "session.jsonl").write_text(
+            json.dumps({"type": "session", "id": "sess", "cwd": "/workspace/run-debug-zero-task-a"}) + "\n" +
+            json.dumps({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "main session diagnostic evidence"}]}}) + "\n"
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "debug", "run-debug-zero"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "runs: 0" in result.stdout
+        assert "orchestra debug trace is missing or incomplete" in result.stdout
+        assert "main session diagnostic evidence" in result.stdout
+
+    def test_debug_view_classifies_rpc_task_failure_vs_harness_lifecycle(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a")
+        _write_result_json(tmp_path, TaskResult(task_id="task-a", run_id="run-debug-classify", score="fail"))
+        run_dir = tmp_path / "results" / "run-debug-classify-task-a"
+        (run_dir / ".bench_rpc_run.json").write_text(json.dumps({
+            "pi_exit": 0,
+            "orch_on_ok": True,
+            "session_id": "sess-classify",
+            "gate_result": "settled",
+            "rpc_runner_used": True,
+            "rpc_agent_settled_seen": True,
+            "rpc_gate_result": "settled",
+            "rpc_summary_written": True,
+        }) + "\n")
+        debug_dir = run_dir / "artifacts" / "orchestra-debug" / "debug"
+        debug_dir.mkdir(parents=True)
+        (debug_dir / "session-debug.md").write_text("# Orchestra debug session\nruns: 1\nworker failed\n")
+        session_dir = run_dir / "artifacts" / "pi-sessions"
+        session_dir.mkdir(parents=True)
+        (session_dir / "session.jsonl").write_text(
+            json.dumps({"type": "session", "id": "sess", "cwd": "/workspace/run-debug-classify-task-a"}) + "\n" +
+            json.dumps({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "raw pi trace"}]}}) + "\n"
+        )
+        events_dir = run_dir / "artifacts" / "pi-rpc"
+        events_dir.mkdir(parents=True)
+        (events_dir / "events.jsonl").write_text(
+            json.dumps({"type": "agent_start"}) + "\n" +
+            json.dumps({"type": "agent_settled"}) + "\n"
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "debug", "run-debug-classify"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "debug classification: task failure" in result.stdout
+        assert "pi rpc runner:" in result.stdout
+        assert "artifacts/pi-rpc/events.jsonl" in result.stdout
+        assert "worker failed" in result.stdout
+
+    def test_debug_view_classifies_harness_lifecycle_when_rpc_timeout(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a")
+        _write_result_json(tmp_path, TaskResult(task_id="task-a", run_id="run-debug-harness", score="fail"))
+        run_dir = tmp_path / "results" / "run-debug-harness-task-a"
+        (run_dir / ".bench_rpc_run.json").write_text(json.dumps({
+            "pi_exit": 1,
+            "orch_on_ok": True,
+            "session_id": "sess-harness",
+            "gate_result": "timeout",
+            "rpc_runner_used": True,
+            "rpc_agent_settled_seen": False,
+            "rpc_gate_result": "timeout",
+            "rpc_summary_written": True,
+        }) + "\n")
+        debug_dir = run_dir / "artifacts" / "orchestra-debug" / "debug"
+        debug_dir.mkdir(parents=True)
+        (debug_dir / "session-debug.md").write_text("# Orchestra debug session\nruns: 1\nworker still active\n")
+        session_dir = run_dir / "artifacts" / "pi-sessions"
+        session_dir.mkdir(parents=True)
+        (session_dir / "session.jsonl").write_text(
+            json.dumps({"type": "session", "id": "sess", "cwd": "/workspace/run-debug-harness-task-a"}) + "\n"
+        )
+        events_dir = run_dir / "artifacts" / "pi-rpc"
+        events_dir.mkdir(parents=True)
+        (events_dir / "events.jsonl").write_text(
+            json.dumps({"type": "agent_start"}) + "\n"
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "debug", "run-debug-harness"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "debug classification: harness lifecycle" in result.stdout
+        assert "pi rpc runner:" in result.stdout
+        assert "worker still active" in result.stdout
+
     def test_run_detail_colors_boolean_checks_when_forced(self, tmp_path):
         script = _install_results_script(tmp_path)
         _write_task_yaml(tmp_path, "task-a")

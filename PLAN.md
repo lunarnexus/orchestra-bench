@@ -103,6 +103,8 @@ Keep public script names stable.
 - Show lifecycle chain: dispatch -> worker started -> worker exited/done -> report delivered/consumed.
 - Show mismatches: worker running at grade time, missing worker session JSONL, empty debug output, no role tokens despite dispatch, pending report not delivered.
 - Keep raw artifacts; do not duplicate large logs into result JSON.
+- RPC event traces are benchmark-runner artifacts, not Orchestra debug artifacts. `orchestra debug` does not automatically capture the raw Pi RPC event stream, so the runner should write it alongside other run artifacts under `artifacts/pi-rpc/`.
+- Keep `result.json` stable. Do not add bulky RPC event data. If needed, store only compact booleans/status in existing `orchestration_checks`; otherwise let `05-results debug` read RPC summary/events directly from artifacts.
 
 ## Status (overnight fork, 2026-08-19)
 
@@ -111,11 +113,11 @@ Slices 1-8 complete and live-verified. Slices 9-10 deferred as planned.
 Live E2E evidence (container `orchestra-bench-runner`, model lmstudio/qwen/qwen3.8-27b):
 - Run A: `researcher-summarize-release-notes --auto --no-orchestra --auto-runner rpc`
   → PASS, pi_exit 0, session captured, events.jsonl with agent_settled, debug section renders.
-- Run B: `cap-easy-express-inventory --auto --auto-runner rpc` (Orchestra on)
+- Run B: `cap-easy-express-inventory --auto` (Orchestra on; RPC default)
   → /orch on preflight OK; gate result "settled" before exit; `worker_running_without_exit=False`;
   graded after settle. Task score=fail is a genuine local-model capability failure
   (incomplete app.js), not a harness lifecycle issue.
-- Default `--auto-runner` flipped to rpc after the live pass; `print` remains as escape hatch.
+- Default `--auto` flipped to RPC after the live pass. Legacy print runner should be removed completely.
 
 ## Task Breakdown
 
@@ -146,8 +148,8 @@ Live E2E evidence (container `orchestra-bench-runner`, model lmstudio/qwen/qwen3
   Verify: mocked Orchestra CLI outputs and synthetic RPC events.
   Risk: P1 — prevents premature grading.
 
-- [x] Slice 6 — sequential — Wire `02-open-pi --auto` to RPC runner (default now rpc; print escape hatch kept)
-  Scope: keep existing prep, metadata, cleanup, artifact collection, grading integration; replace one-shot auto path or add temporary `--auto-runner rpc|print` rollout flag.
+- [x] Slice 6 — sequential — Wire `02-open-pi --auto` to RPC runner (default now rpc)
+  Scope: keep existing prep, metadata, cleanup, artifact collection, grading integration; replace one-shot auto path. Follow-up cleanup: remove the legacy print runner path and public `--auto-runner` option completely.
   Stop when: operator-flow tests prove command construction and cleanup/grade sequencing.
   Verify: `pytest -q tests/test_operator_flow.py tests/test_pi_rpc_runner.py --tb=short`.
   Risk: P1 — public workflow.
@@ -195,14 +197,14 @@ Keep every slice minimal — simple over clever. No security scans. Commit at mi
 Order:
 1. Slices 1-4: foundation + RPC tracer bullet with mocked tests.
 2. Slice 5: settle gate with mocked Orchestra outputs.
-3. Slice 6: wire `02-open-pi --auto` behind `--auto-runner {print,rpc}`; dogfood rpc explicitly first, flip default only after a live pass.
+3. Slice 6: wire `02-open-pi --auto` to RPC, dogfood it, then remove the legacy print runner path.
 4. Slice 7-8: RPC artifact wiring + debug view + real end-to-end runs (one no-Orchestra, one Orchestra).
 5. Slices 9-10 are deferred until the RPC path has stabilized in real use; do not start them opportunistically.
 
 Constraints:
 - Do not rewrite `05-results` or split all of `eval_harness.py` this pass.
 - Do not overwrite local `agent-catalog.yaml` automatically.
-- Do not remove current script UX (`--auto-runner print` stays as escape hatch).
+- Remove legacy one-shot print runner UX after RPC live verification; `--auto` should mean RPC only.
 - Do not delete existing result artifacts.
 - LM Studio is concurrency==1; live dogfood runs serialize with the operator session — that is acceptable, no special handling.
 
@@ -236,5 +238,4 @@ scripts/05-results debug <run-id>
 ## Open Questions
 
 - None for Orchestra `config.yaml`/`prompts.yaml`: they come from installed Orchestra, not benchmark config.
-- Should `--auto-runner print` remain as an escape hatch after RPC is default?
-- How much RPC event summarization belongs in `result.json` versus artifact-only debug views?
+- Closed: RPC event details belong in artifacts and `05-results debug`, not in `result.json`; only compact status fields may be added to existing `orchestration_checks` if they materially help filtering/comparison.

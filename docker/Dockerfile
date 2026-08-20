@@ -60,8 +60,9 @@ RUN echo "source/plugin cache bust: $SOURCE_PLUGIN_CACHE_BUST" && \
 ENV PATH="/opt/orchestra/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Install Pi plugins via the official Pi command.
-RUN pi install "$PI_LMSTUDIO_PLUGIN_URL" && \
-    pi install "$PI_CODEGRAPH_PLUGIN_URL" 
+#RUN pi install "$PI_LMSTUDIO_PLUGIN_URL" && \
+RUN pi install "$PI_LMSTUDIO_PLUGIN_URL" 
+#    pi install "$PI_CODEGRAPH_PLUGIN_URL" 
 #    pi install "$PI_WEB_TOOLS_PLUGIN_URL"
 
 # Working dirs — these are the mount points for the host volumes

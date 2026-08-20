@@ -55,6 +55,8 @@ Target flow:
 
 The old flow was clunky (rebuild container, hand-copy prompt/catalog files, manual plugin toggles, digging through raw traces). The 2026-08-19 refactor removed the pain: installed Orchestra owns `config.yaml`/`prompts.yaml`, runtime init overlays only the local catalog/skills, `--auto` is RPC-backed with an Orchestra settle gate instead of one-shot `pi -p`, and `05-results debug` gives guided trace navigation. Plugin selection remains Dockerfile comment lines.
 
+Debug traces are artifacts, not result data. `orchestra debug` is Orchestra-side output and does not automatically capture the benchmark runner's raw Pi RPC event stream. The RPC runner must write its own artifacts alongside Orchestra debug, e.g. `artifacts/pi-rpc/events.jsonl` plus a compact runner summary. `result.json` should stay a stable benchmark result and should not embed bulky RPC traces; only compact lifecycle/status fields belong in existing result sections when they help filtering or comparison. `05-results debug` is responsible for joining result data, Pi session JSONL, RPC events, Orchestra debug output, logs, and state summaries for human inspection.
+
 ### 6. Outcome first, orchestration second
 The benchmark should measure whether Orchestra helps deliver strong end results.
 - do **not** force subagent usage just to prove orchestration happened

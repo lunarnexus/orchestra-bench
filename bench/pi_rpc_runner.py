@@ -18,6 +18,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass
@@ -25,6 +26,7 @@ class PiRpcRunner:
     command: list[str]
     workdir: str | None = None
     event_log_path: Path | str | None = None
+    event_callback: Callable[[dict], None] | None = None
     events: list[dict] = field(default_factory=list)
 
     _proc: subprocess.Popen | None = field(default=None, repr=False, compare=False)
@@ -34,6 +36,10 @@ class PiRpcRunner:
     @property
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def agent_settled_seen(self) -> bool:
+        return any(event.get("type") == "agent_settled" for event in self.events)
 
     def start(self) -> None:
         if self.running:
@@ -94,6 +100,8 @@ class PiRpcRunner:
         if log_file is not None:
             log_file.write(json.dumps(event, default=str) + "\n")
             log_file.flush()
+        if self.event_callback is not None:
+            self.event_callback(event)
         return event
 
     def wait_for_settled(self, timeout: float | None = None, poll_timeout: float = 1.0) -> bool:
@@ -110,6 +118,17 @@ class PiRpcRunner:
             if not self.running:
                 return any(e.get("type") == "agent_settled" for e in self.events)
 
+    def _drain_remaining_output(self) -> None:
+        """Consume any remaining stdout lines after process exit.
+
+        This improves capture of final agent_settled/response lines that may have
+        been written before exit but not yet read by the caller.
+        """
+        while True:
+            event = self.read_line(timeout=0.0)
+            if event is None:
+                break
+
     def stop(self, grace_seconds: float = 5.0) -> int | None:
         """Close the session cleanly; kill after grace period. Returns exit code."""
         proc = self._proc
@@ -124,6 +143,7 @@ class PiRpcRunner:
             proc.kill()
             proc.wait()
         finally:
+            self._drain_remaining_output()
             log_file = self._log_file
             if log_file is not None:
                 log_file.close()
