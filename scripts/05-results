@@ -478,9 +478,13 @@ def _format_count_mapping(mapping):
 
 
 def compaction_count(r):
-    """Get compaction count from tokens dict (ingested from artifacts)."""
+    """Get Pi context-compression count from tokens or orchestration diagnostics."""
     t = r.get("tokens") or {}
     v = t.get("compaction_count")
+    if isinstance(v, (int, float)):
+        return int(v)
+    checks = r.get("orchestration_checks") or {}
+    v = checks.get("compaction_count") if isinstance(checks, dict) else None
     return int(v) if isinstance(v, (int, float)) else 0
 
 
@@ -985,9 +989,9 @@ def print_section_metrics(rows, indent=""):
     if repeated_worker_tests:
         print_metric_line(f"{indent}orchestrator_repeated_worker_tests", repeated_worker_tests, integer=True, total=True)
 
-    compacations = [compaction_count(r) for r in rows if compaction_count(r)]
-    if compacations:
-        print(f"{indent}compactions   : total={int(sum(compacations)):,} avg={statistics.mean(compacations):.1f}")
+    compactions = [compaction_count(r) for r in rows]
+    if compactions:
+        print(f"{indent}context_compressions: total={int(sum(compactions)):,} avg={statistics.mean(compactions):.1f} max={max(compactions):,}")
 
     times = [elapsed(r) for r in rows if elapsed(r)]
     print_metric_line(f"{indent}elapsed", times, formatter=fmt_seconds, total=True)
@@ -1286,9 +1290,9 @@ def _print_token_metrics(rows, prefix=""):
     api_calls = [main_api_call_count(r) for r in rows if main_api_call_count(r)]
     if api_calls:
         print(f"{prefix}avg_api_calls   : {int(statistics.mean(api_calls)):,}")
-    compacations = [compaction_count(r) for r in rows if compaction_count(r)]
-    if compacations:
-        print(f"{prefix}total_compactions: {sum(compacations):,}")
+    compactions = [compaction_count(r) for r in rows]
+    if compactions:
+        print(f"{prefix}context_compressions: total={sum(compactions):,} avg={statistics.mean(compactions):.1f} max={max(compactions):,}")
 
     # Classified token breakdown (main vs roles)
     has_classified = any(has_classified_tokens(r) for r in rows)
@@ -2110,8 +2114,7 @@ def print_run_detail(rows, q):
             pass
         if api_calls > 0:
             print(f"  api_calls       : {api_calls}")
-        if compactions > 0:
-            print(f"  compactions     : {compactions}")
+        print(f"  context_compressions: {compactions}")
 
     active_worker_tokens = main_active_worker_tokens(r)
     active_worker_api_calls = main_active_worker_api_calls(r)

@@ -129,6 +129,46 @@ class TestTokenIngestion:
         enriched = ingest_artifacts(result, base_dir=tmp_path / "results")
         assert enriched is not None
 
+    def test_manual_elapsed_uses_last_parent_session_activity(self, tmp_path):
+        """Manual runs should not count overnight idle time after the last Pi activity."""
+        from eval_harness import ingest_artifacts
+        run_dir = tmp_path / "results" / "run-1-task-a"
+        session_dir = run_dir / "artifacts" / "pi-sessions"
+        session_dir.mkdir(parents=True)
+        (session_dir / "2026-08-20T00-00-00-000Z_parent.jsonl").write_text(
+            json.dumps({"type": "session", "id": "parent", "timestamp": "2026-08-20T00:00:00Z"}) + "\n" +
+            json.dumps({"type": "message", "timestamp": "2026-08-20T00:10:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}}) + "\n"
+        )
+        (session_dir / "2026-08-20T00-00-00-000Z_orchestra-worker-abc.jsonl").write_text(
+            json.dumps({"type": "message", "timestamp": "2026-08-20T02:00:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "worker later"}]}}) + "\n"
+        )
+
+        result = _make_result(run_id="run-1", task_id="task-a")
+        result.run_meta = {"started_epoch": 1787184000, "auto": False}  # 2026-08-20T00:00:00Z
+        enriched = ingest_artifacts(result, base_dir=tmp_path / "results")
+
+        assert enriched.elapsed_seconds == 600.0
+        assert enriched.run_meta["elapsed_source"] == "last_parent_session_activity"
+        assert "wall_elapsed_seconds" in enriched.run_meta
+        assert "orchestra-worker" not in enriched.run_meta["last_parent_session_activity_file"]
+
+    def test_auto_elapsed_keeps_wall_clock_fallback(self, tmp_path):
+        """Auto runs already have controlled lifecycle; do not override with session activity."""
+        from eval_harness import ingest_artifacts
+        run_dir = tmp_path / "results" / "run-1-task-a"
+        session_dir = run_dir / "artifacts" / "pi-sessions"
+        session_dir.mkdir(parents=True)
+        (session_dir / "parent.jsonl").write_text(
+            json.dumps({"type": "message", "timestamp": "2026-08-20T00:10:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}}) + "\n"
+        )
+
+        result = _make_result(run_id="run-1", task_id="task-a")
+        result.run_meta = {"started_epoch": 1787184000, "auto": True}
+        enriched = ingest_artifacts(result, base_dir=tmp_path / "results")
+
+        assert enriched.elapsed_seconds is not None
+        assert enriched.run_meta.get("elapsed_source") == "wall_clock"
+
     def test_ingest_classified_expensive_main_session_tokens(self, tmp_path):
         """New classified expensive_main_session_tokens dict appears in result.tokens."""
         from eval_harness import ingest_artifacts

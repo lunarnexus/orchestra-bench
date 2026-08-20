@@ -1732,6 +1732,57 @@ _ARTIFACT_NESTED_TOKEN_KEYS = (
 )
 
 
+def _parse_iso_epoch(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _parent_session_files(pi_sessions_dir: Path, result: TaskResult) -> list[Path]:
+    if not pi_sessions_dir.is_dir():
+        return []
+    session_ids = []
+    meta_ids = (result.run_meta or {}).get("pi_session_ids") if isinstance(result.run_meta, dict) else None
+    if isinstance(meta_ids, list):
+        session_ids = [str(s) for s in meta_ids if str(s) and not str(s).startswith("orchestra-worker-")]
+    files = sorted(pi_sessions_dir.glob("*.jsonl"))
+    if session_ids:
+        matched = [path for path in files if any(path.stem.endswith(f"_{sid}") or path.stem == sid for sid in session_ids)]
+        if matched:
+            return matched
+    return [path for path in files if "orchestra-worker-" not in path.name]
+
+
+def _last_parent_session_activity_epoch(artifacts_dir: Path, result: TaskResult) -> tuple[float | None, str]:
+    pi_sessions_dir = artifacts_dir / "pi-sessions"
+    latest: float | None = None
+    latest_path = ""
+    meaningful_types = {"message", "toolCall", "toolResult", "compaction"}
+    for path in _parent_session_files(pi_sessions_dir, result):
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in lines:
+            try:
+                event = _json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") not in meaningful_types and not isinstance(event.get("message"), dict):
+                continue
+            epoch = _parse_iso_epoch(event.get("timestamp"))
+            if epoch is not None and (latest is None or epoch > latest):
+                latest = epoch
+                latest_path = str(path)
+    return latest, latest_path
+
+
 def ingest_artifacts(
     result: TaskResult,
     base_dir: Path | str | None = None,
@@ -1821,10 +1872,26 @@ def ingest_artifacts(
                 print(f"[bench] warning: failed to parse timing from {timing_file}: {exc}",
                       file=sys.stderr)
 
+    run_meta = result.run_meta if isinstance(result.run_meta, dict) else {}
+    started_epoch = run_meta.get("started_epoch")
+    auto_run = run_meta.get("auto") is True
+    if result.elapsed_seconds is None and not auto_run and isinstance(started_epoch, (int, float)) and started_epoch > 0:
+        last_activity_epoch, last_activity_path = _last_parent_session_activity_epoch(artifacts_dir, result)
+        if isinstance(last_activity_epoch, (int, float)) and last_activity_epoch >= float(started_epoch):
+            wall_elapsed = max(0.0, time.time() - float(started_epoch))
+            result.run_meta.setdefault("wall_elapsed_seconds", wall_elapsed)
+            result.run_meta["elapsed_source"] = "last_parent_session_activity"
+            result.run_meta["last_parent_session_activity_epoch"] = last_activity_epoch
+            if last_activity_path:
+                try:
+                    result.run_meta["last_parent_session_activity_file"] = str(Path(last_activity_path).relative_to(run_dir))
+                except ValueError:
+                    result.run_meta["last_parent_session_activity_file"] = last_activity_path
+            result.elapsed_seconds = max(0.0, last_activity_epoch - float(started_epoch))
+
     if result.elapsed_seconds is None:
-        run_meta = result.run_meta if isinstance(result.run_meta, dict) else {}
-        started_epoch = run_meta.get("started_epoch")
         if isinstance(started_epoch, (int, float)) and started_epoch > 0:
+            result.run_meta.setdefault("elapsed_source", "wall_clock")
             result.elapsed_seconds = max(0.0, time.time() - float(started_epoch))
 
     # Orchestra process diagnostics — best-effort, non-fatal.
