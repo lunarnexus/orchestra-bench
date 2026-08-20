@@ -1,0 +1,282 @@
+{
+  "task_id": "cap-normal-python-worker-sync",
+  "run_id": "20260820T022159",
+  "score": "pass",
+  "checks": {
+    "functional_browser_homepage": true,
+    "functional_document_and_job_flow": true,
+    "functional_retry_dedup_and_conflict_handling": true,
+    "functional_stale_reclaim_and_audit_history": true,
+    "functional_pagination_filtering_and_status_codes": true,
+    "functional_persistence_file_backed": true,
+    "plan_present": true,
+    "plan_relevant": true,
+    "plan_quality": 0.95,
+    "plan_credit": 0.95,
+    "research_present": true,
+    "research_relevant": true,
+    "research_quality": 0.85,
+    "research_credit": 0.85,
+    "verify_present": true,
+    "verify_relevant": true,
+    "verify_quality": 0.846296,
+    "verify_credit": 0.846296,
+    "verify_mentions_changed_files": true,
+    "verify_changed_file_coverage": 0.75,
+    "verify_changed_file_credit": 0.75,
+    "review_present": true,
+    "review_relevant": true,
+    "review_quality": 0.835,
+    "review_credit": 0.835,
+    "appsec_present": true,
+    "appsec_relevant": true,
+    "appsec_quality": 0.91,
+    "appsec_credit": 0.91
+  },
+  "workdir": "",
+  "task_meta": {
+    "family": "capability",
+    "batch": "capability-normal",
+    "scoring_type": "numeric"
+  },
+  "run_meta": {
+    "role": "builder",
+    "default_role": "builder",
+    "model": "lmstudio/qwen/qwen3.8-27b",
+    "catalog_path": "config/orchestra/agent-catalog.yaml",
+    "catalog_sha256": "c3b168535fc97ef07e61b1893c9e9c0b0cd27f441b383098d840df20b5c0497d",
+    "auto": false,
+    "extra_skills": [],
+    "notes": "Batch01 manual no-orch-plugin no-orch-on",
+    "role_models": {
+      "appsec": "lmstudio/qwen/qwen3.8-27b",
+      "builder": "lmstudio/qwen/qwen3.8-27b",
+      "intern": "lmstudio/llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved",
+      "planner": "openai-codex/gpt-5.5",
+      "researcher": "lmstudio/qwen/qwen3.8-27b",
+      "reviewer": "lmstudio/qwen/qwen3.8-27b",
+      "verifier": "lmstudio/qwen/qwen3.8-27b"
+    },
+    "role_models_summary": "appsec=lmstudio/qwen/qwen3.8-27b, builder=lmstudio/qwen/qwen3.8-27b, intern=lmstudio/llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved, planner=openai-codex/gpt-5.5, researcher=lmstudio/qwen/qwen3.8-27b, reviewer=lmstudio/qwen/qwen3.8-27b, verifier=lmstudio/qwen/qwen3.8-27b",
+    "role_models_sha256": "433f63a6c19c6082830c839f808b51926f0f1f4f7db2457ecf0c76c3361f709e",
+    "enabled_roles": [
+      "appsec",
+      "builder",
+      "researcher",
+      "reviewer",
+      "verifier"
+    ],
+    "enabled_roles_summary": "appsec,builder,researcher,reviewer,verifier",
+    "orchestra_config_files": [
+      "agent-catalog.yaml",
+      "agent-catalog.yaml.codex",
+      "agent-catalog.yaml.local",
+      "agent-catalog.yaml.qwen3.8-27b"
+    ],
+    "orchestra_config_sha256": "a31716d0f4038af4f49c4dad118fb8820fcedaf7afefa048c431554054a0b9d9",
+    "aux_skill_names": [],
+    "aux_skills_enabled": false,
+    "aux_skills_summary": "none",
+    "aux_skills_sha256": "",
+    "orchestra_version": "0.1.3.dev24+gf8a174df1",
+    "orchestra_module_file": "/opt/orchestra/src/src/orchestra/__init__.py",
+    "orchestra_source_rev": "f8a174df1",
+    "pi_package_names": [
+      "pi-lmstudio"
+    ],
+    "pi_packages_summary": "pi-lmstudio",
+    "pi_packages_sha256": "0f486a7d93773d831bbcbfc812fc03daa62c9b7935b353b65f92f0daad970c98",
+    "pi_extensions": [
+      "orchestra",
+      "pi-lmstudio"
+    ],
+    "pi_extensions_summary": "orchestra,pi-lmstudio",
+    "pi_extensions_sha256": "6eda4a5a14e9224f5d4544ef903b086b9979fb0723eef397ba84867fae40f1f0",
+    "pi_enabled_plugins": [
+      "pi-lmstudio"
+    ],
+    "pi_enabled_plugins_summary": "pi-lmstudio",
+    "pi_enabled_plugins_sha256": "0f486a7d93773d831bbcbfc812fc03daa62c9b7935b353b65f92f0daad970c98",
+    "started_at": "2026-08-20T02:21:59Z",
+    "started_epoch": 1787192519,
+    "pi_session_ids": [
+      "01a01cf9-c7a3-74ea-b174-5a7898a6d24a"
+    ],
+    "orchestra_artifacts": {
+      "doctor_collected": true,
+      "debug": [
+        "orchestra-debug/debug/session-01a01cf9-c7a3-74ea-b174-5a7898a6d24a.md",
+        "orchestra-debug/debug/session-pi_01a01cf9-c7a3-74ea-b174-5a7898a6d24a.md"
+      ]
+    },
+    "wall_elapsed_seconds": 34993.01582622528,
+    "elapsed_source": "last_parent_session_activity",
+    "last_parent_session_activity_epoch": 1787193710.757,
+    "last_parent_session_activity_at": "2026-08-20T02:41:50.757Z",
+    "last_parent_session_activity_file": "artifacts/pi-sessions/2026-08-20T02-22-06-755Z_01a01cf9-c7a3-74ea-b174-5a7898a6d24a.jsonl"
+  },
+  "tokens": {
+    "total_tokens": 849489,
+    "input_tokens": 811443,
+    "output_tokens": 38046,
+    "reasoning_tokens": 15045,
+    "main_session_context_input_tokens": 47861,
+    "main_session_context_total_tokens": 48558,
+    "main_session_api_call_count": 29,
+    "main_session_max_input_tokens": 47861,
+    "main_session_max_total_tokens": 48558,
+    "main_session": {
+      "session_id": "01a01cf9-c7a3-74ea-b174-5a7898a6d24a",
+      "file": "2026-08-20T02-22-06-755Z_01a01cf9-c7a3-74ea-b174-5a7898a6d24a.jsonl",
+      "input_tokens": 811443,
+      "output_tokens": 38046,
+      "reasoning_tokens": 15045,
+      "cached_input_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "total_tokens": 849489,
+      "reported_cost": 0.0,
+      "provider": "lmstudio",
+      "model": "qwen/qwen3.8-27b"
+    },
+    "role_sessions": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_tokens": 0,
+      "cached_input_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "total_tokens": 0,
+      "reported_cost": 0.0
+    },
+    "all_sessions": {
+      "input_tokens": 811443,
+      "output_tokens": 38046,
+      "reasoning_tokens": 15045,
+      "cached_input_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "total_tokens": 849489,
+      "reported_cost": 0.0
+    },
+    "expensive_main_session_tokens": {
+      "input_tokens": 811443,
+      "output_tokens": 38046,
+      "reasoning_tokens": 15045,
+      "cached_input_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "total_tokens": 849489,
+      "reported_cost": 0.0
+    },
+    "cheap_role_tokens": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_tokens": 0,
+      "cached_input_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "total_tokens": 0,
+      "reported_cost": 0.0
+    }
+  },
+  "elapsed_seconds": 1191.757,
+  "roles_used": [],
+  "split": "dev",
+  "score_numeric": 0.9,
+  "rubric": {
+    "functionality": {
+      "score": 0.7,
+      "max": 0.7,
+      "checks": {
+        "functional_browser_homepage": true,
+        "functional_document_and_job_flow": true,
+        "functional_retry_dedup_and_conflict_handling": true,
+        "functional_stale_reclaim_and_audit_history": true,
+        "functional_pagination_filtering_and_status_codes": true,
+        "functional_persistence_file_backed": true
+      }
+    },
+    "workflow_evidence": {
+      "score": 0.2,
+      "max": 0.2,
+      "checks": {
+        "plan_relevant": true,
+        "research_relevant": true
+      }
+    },
+    "verification_review_security": {
+      "score": 0.1,
+      "max": 0.1,
+      "checks": {
+        "verify_relevant": true,
+        "review_relevant": true,
+        "appsec_relevant": true
+      }
+    },
+    "process_penalties": {
+      "score": -0.1,
+      "max": 0.0,
+      "checks": {
+        "no_orchestration": false
+      },
+      "details": [
+        "no orchestration"
+      ]
+    }
+  },
+  "orchestration_checks": {
+    "compaction_count": 0,
+    "dispatch_attempt_count": 0,
+    "dispatch_accepted_count": 0,
+    "dispatch_rejected_count": 0,
+    "dispatch_count": 0,
+    "roles_dispatch_attempted": [],
+    "roles_dispatched": [],
+    "same_slice_redispatches": 0,
+    "timeouts": 0,
+    "retries": 0,
+    "scope_blockers": 0,
+    "worker_started_count": 0,
+    "worker_exit_count": 0,
+    "worker_reconciled_count": 0,
+    "worker_failed_count": 0,
+    "worker_completed": false,
+    "worker_running_without_exit": false,
+    "orchestra_effective": false,
+    "dispatches_rejected_without_worker": false,
+    "no_orchestration": true,
+    "target_role_dispatched": false,
+    "missing_expected_role": false,
+    "fallback_answer_after_dispatch": false,
+    "premature_completion": false,
+    "test_command_ownership_by_role": {
+      "orchestrator": 3
+    },
+    "process_penalty_applied": true,
+    "process_penalty_total": 0.1,
+    "process_penalty_reasons": [
+      "no orchestration"
+    ]
+  },
+  "efficiency": {
+    "tokens": {
+      "min": null,
+      "median": null,
+      "max": null,
+      "current": 849489,
+      "position": "insufficient-history",
+      "count": 0
+    },
+    "elapsed": {
+      "min": null,
+      "median": null,
+      "max": null,
+      "current": 1191.76,
+      "position": "insufficient-history",
+      "count": 0
+    }
+  },
+  "category_scores": {
+    "intelligence": 1.0,
+    "speed": null,
+    "efficiency": null,
+    "process": 0.6
+  },
+  "details": "{\n  \"changed_files\": [\n    \"app.py\",\n    \"worker.py\",\n    \"sync_core.py\",\n    \"tests/test_sync_app.py\"\n  ],\n  \"functional_details\": {\n    \"homepage\": {\n      \"status_code\": 200,\n      \"content_type\": \"text/html; charset=utf-8\",\n      \"body\": \"<!doctype html>\\n<html lang=\\\"en\\\">\\n<head>\\n<meta charset=\\\"utf-8\\\">\\n<meta name=\\\"viewport\\\" content=\\\"width=device-width, initial-scale=1\\\">\\n<title>Doc Sync</title>\\n<style>\\n  body { font-family: system-ui, -apple-system, sans-serif; margin: 0 auto; max-width: 46rem; padding: 2rem 1.5rem; color: #1c2330; line-height: 1.55; }\\n  h1 { margin-bottom: .2rem; }\\n  h2 { border-bottom: 1px solid #d7dde8; padding-bottom: .3rem; margin-top: 2rem; }\\n  code, pre { background: #eef1f6; border-radius: 4px; font-size: .95em; }\\n  code { padding: .1rem .35rem; }\\n  li { margin: .35rem 0; }\\n  .tag { display: inline-block; min-width: 3.2rem; text-align: center; border-radius: 4px; font-weight: 600; font-size: .8em; padding: .1rem .4rem; margin-right: .5rem; color: #fff; }\\n  .post { background: #2f7d4f; } .get { background: #2b6cb0; }\\n</style>\\n</head>\\n<body>\\n<header>\\n  <h1>Doc Sync</h1>\\n  <p>A small document app with a durable SQLite sync queue. Documents are edited locally,\\n     queued for sync, and pushed to an upstream service by a separate background worker.</p>\\n</header>\\n\\n<section>\\n  <h2>Documents (local store)</h2>\\n  <ul>\\n    <li><span class=\\\"tag post\\\">POST</span><code>POST /documents</code> \\u2014 create or update a document by\\n        <code>slug</code>. Creating returns <code>201</code>; updating an existing slug bumps its\\n        <code>version</code> and returns <code>200</code>.</li>\\n    <li><span class=\\\"tag get\\\">GET</span><code>GET /documents/{slug}</code> \\u2014 read a document, including its current\\n        <code>sync_status</code>. Unknown slugs return <code>404</code>.</li>\\n  </ul>\\n</section>\\n\\n<section>\\n  <h2>Queueing and polling sync jobs</h2>\\n  <ul>\\n    <li><span class=\\\"tag post\\\">POST</span><code>POST /sync-jobs</code> \\u2014 queue a sync for the document's current version.\\n        The same <code>idempotency_key</code> always returns the original job, and an equivalent job that is already\\n        queued, running, or succeeded for that version is deduped instead of duplicated.</li>\\n    <li><span class=\\\"tag get\\\">GET</span><code>GET /sync-jobs/{job_id}</code> \\u2014 poll a job. The payload carries\\n        <code>status</code> (<code>queued</code>, <code>running</code>, <code>succeeded</code>, <code>failed</code>,\\n        or <code>conflict</code>), the <code>attempts</code> counter, and any last error.</li>\\n  </ul>\\n</section>\\n\\n<section>\\n  <h2>How the worker handles queued jobs</h2>\\n  <p>A separate worker process (<code>python worker.py --drain</code>) claims queued jobs from SQLite, marks them\\n     running, and POSTs <code>slug</code>, <code>title</code>, <code>content</code>, and <code>version</code> to the\\n     upstream service. It never holds a database write lock across that HTTP call.</p>\\n  <ul>\\n    <li><strong>Retry behavior:</strong> transient upstream failures (HTTP 5xx or connection errors) re-queue the same\\n        job row and increase its <code>attempts</code> counter \\u2014 no duplicate jobs are created. After a bounded number\\n        of attempts the job is marked <code>failed</code>.</li>\\n    <li><strong>Conflict outcomes:</strong> if the document changes after a job was queued but before it syncs, that job\\n        finishes with status <code>conflict</code> instead of pushing stale content. If a worker crashes and leaves a job\\n        stuck in <code>running</code>, a later worker run reclaims the stale job and finishes it.</li>\\n  </ul>\\n</section>\\n\\n<section>\\n  <h2>Admin audit (requires <code>X-Admin-Token</code>)</h2>\\n  <ul>\\n    <li><span class=\\\"tag get\\\">GET</span><code>GET /admin/sync-jobs</code> \\u2014 list jobs with pagination and filters:\\n        <code>?status=succeeded&amp;slug=launch-plan&amp;page=1&amp;page_size=20</code>.</li>\\n    <li><span class=\\\"tag get\\\">GET</span><code>GET /admin/sync-jobs/{job_id}/history</code> \\u2014 newest-first audit trail for a job:\\n        <code>queued</code>, <code>started</code>, <code>retry</code>, <code>succeeded</code>/<code>failed</code>,\\n        <code>conflict</code>, and <code>reclaimed</code> events.</li>\\n  </ul>\\n</section>\\n\\n<footer><p>State lives in SQLite (<code>SYNC_DB</code>), so jobs survive restarts of both the API and the worker.</p></footer>\\n</body>\\n</html>\\n\"\n    },\n    \"created\": {\n      \"slug\": \"launch-plan\",\n      \"title\": \"Launch plan\",\n      \"content\": \"Initial draft\",\n      \"version\": 1,\n      \"sync_status\": \"unsynced\",\n      \"last_synced_version\": null,\n      \"created_at\": \"2026-08-20T12:05:03.314074+00:00\",\n      \"updated_at\": \"2026-08-20T12:05:03.314074+00:00\"\n    },\n    \"job\": {\n      \"id\": 1,\n      \"slug\": \"launch-plan\",\n      \"requested_version\": 1,\n      \"status\": \"queued\",\n      \"attempts\": 0,\n      \"error\": null,\n      \"idempotency_key\": \"launch-v1\",\n      \"claimed_at\": null,\n      \"created_at\": \"2026-08-20T12:05:03.331533+00:00\",\n      \"updated_at\": \"2026-08-20T12:05:03.331533+00:00\"\n    },\n    \"polled\": {\n      \"id\": 1,\n      \"slug\": \"launch-plan\",\n      \"requested_version\": 1,\n      \"status\": \"succeeded\",\n      \"attempts\": 1,\n      \"error\": null,\n      \"idempotency_key\": \"launch-v1\",\n      \"claimed_at\": \"2026-08-20T12:05:03.456953+00:00\",\n      \"created_at\": \"2026-08-20T12:05:03.331533+00:00\",\n      \"updated_at\": \"2026-08-20T12:05:03.472500+00:00\"\n    },\n    \"history_events\": [\n      \"succeeded\",\n      \"started\",\n      \"queued\"\n    ],\n    \"retry_job\": {\n      \"id\": 2,\n      \"slug\": \"retry-report\",\n      \"requested_version\": 1,\n      \"status\": \"succeeded\",\n      \"attempts\": 2,\n      \"error\": null,\n      \"idempotency_key\": \"retry-v1\",\n      \"claimed_at\": \"2026-08-20T12:05:03.816972+00:00\",\n      \"created_at\": \"2026-08-20T12:05:03.560241+00:00\",\n      \"updated_at\": \"2026-08-20T12:05:03.829564+00:00\"\n    },\n    \"conflict_job\": {\n      \"id\": 3,\n      \"slug\": \"conflict-doc\",\n      \"requested_version\": 1,\n      \"status\": \"conflict\",\n      \"attempts\": 1,\n      \"error\": \"document at version 2, job requested v1; stale content not synced\",\n      \"idempotency_key\": \"conflict-v1\",\n      \"claimed_at\": \"2026-08-20T12:05:04.130250+00:00\",\n      \"created_at\": \"2026-08-20T12:05:03.901433+00:00\",\n      \"updated_at\": \"2026-08-20T12:05:04.140095+00:00\"\n    },\n    \"stale_job\": {\n      \"id\": 4,\n      \"slug\": \"stale-doc\",\n      \"requested_version\": 1,\n      \"status\": \"succeeded\",\n      \"attempts\": 2,\n      \"error\": null,\n      \"idempotency_key\": \"stale-v1\",\n      \"claimed_at\": \"2026-08-20T12:05:04.470664+00:00\",\n      \"created_at\": \"2026-08-20T12:05:04.211301+00:00\",\n      \"updated_at\": \"2026-08-20T12:05:04.487950+00:00\"\n    },\n    \"stale_events\": [\n      \"succeeded\",\n      \"started\",\n      \"reclaimed\",\n      \"queued\"\n    ],\n    \"listing\": {\n      \"items\": [\n        {\n          \"id\": 1,\n          \"slug\": \"launch-plan\",\n          \"requested_version\": 1,\n          \"status\": \"succeeded\",\n          \"attempts\": 1,\n          \"error\": null,\n          \"idempotency_key\": \"launch-v1\",\n          \"claimed_at\": \"2026-08-20T12:05:03.456953+00:00\",\n          \"created_at\": \"2026-08-20T12:05:03.331533+00:00\",\n          \"updated_at\": \"2026-08-20T12:05:03.472500+00:00\"\n        }\n      ],\n      \"total\": 1,\n      \"page\": 1,\n      \"page_size\": 10\n    },\n    \"db_path\": \"/workspace/20260820T022159-cap-normal-python-worker-sync/.evaluator-sync.sqlite3\",\n    \"db_exists\": true,\n    \"db_size\": 40960,\n    \"worker_stdout\": \"{\\\"processed\\\": 1, \\\"reclaimed_stale\\\": 0, \\\"actions\\\": [\\\"job 1 (launch-plan v1): succeeded\\\"]}\",\n    \"worker_stderr\": \"\",\n    \"fresh_payload\": {\n      \"job_status\": 200,\n      \"state\": \"succeeded\",\n      \"admin_total\": 4\n    }\n  },\n  \"workflow\": {\n    \"score\": 4.15,\n    \"max\": 5.0,\n    \"checks\": {\n      \"plan_present\": true,\n      \"plan_relevant\": true,\n      \"plan_quality\": 0.95,\n      \"plan_credit\": 0.95,\n      \"research_present\": true,\n      \"research_relevant\": true,\n      \"research_quality\": 0.85,\n      \"research_credit\": 0.85,\n      \"verify_present\": true,\n      \"verify_relevant\": true,\n      \"verify_quality\": 0.846296,\n      \"verify_credit\": 0.846296,\n      \"verify_mentions_changed_files\": true,\n      \"verify_changed_file_coverage\": 0.75,\n      \"verify_changed_file_credit\": 0.75,\n      \"review_present\": true,\n      \"review_relevant\": true,\n      \"review_quality\": 0.835,\n      \"review_credit\": 0.835,\n      \"appsec_present\": true,\n      \"appsec_relevant\": true,\n      \"appsec_quality\": 0.91,\n      \"appsec_credit\": 0.91\n    },\n    \"details\": {\n      \"plan\": {\n        \"score\": 0.8,\n        \"max\": 1.0,\n        \"checks\": {\n          \"present\": true,\n          \"relevant\": true,\n          \"quality\": 0.95,\n          \"credit\": 0.95\n        },\n        \"source\": \"/workspace/20260820T022159-cap-normal-python-worker-sync/PLAN.md\",\n        \"quality\": 0.95,\n        \"credit\": 0.95,\n        \"word_count\": 824,\n        \"min_words\": 35,\n        \"matched_keywords\": [\n          \"plan\",\n          \"steps\",\n          \"tests\"\n        ],\n        \"missing_keywords\": [\n          \"files\"\n        ],\n        \"min_keywords\": 1,\n        \"substantive_line_count\": 31,\n        \"min_substantive_lines\": 2,\n        \"matched_evidence_terms\": [\n          \"app.py\",\n          \"worker.py\",\n          \"sync_core.py\",\n          \"tests/test_sync_app.py\",\n          \"sqlite\",\n          \"retry\",\n          \"conflict\",\n          \"stale\",\n          \"pagination\"\n        ],\n        \"missing_evidence_terms\": [],\n        \"min_evidence_terms\": 3,\n        \"matched_required_terms\": [\n          \"GET /\",\n          \"POST /documents\",\n          \"POST /sync-jobs\",\n          \"admin\",\n          \"worker\",\n          \"idempotency\",\n          \"retry\"\n        ],\n        \"missing_required_terms\": [],\n        \"matched_required_patterns\": [],\n        \"missing_required_patterns\": [],\n        \"required_coverage\": 1.0,\n        \"min_required_coverage\": 0.6,\n        \"relevance_quality_threshold\": 0.6,\n        \"low_value_filler\": false,\n        \"mentioned_changed_files\": [],\n        \"missing_changed_files\": [\n          \"app.py\",\n          \"worker.py\",\n          \"sync_core.py\",\n          \"tests/test_sync_app.py\"\n        ],\n        \"changed_file_coverage\": 0.0,\n        \"min_changed_file_coverage\": 0.0\n      },\n      \"research\": {\n        \"score\": 0.8,\n        \"max\": 1.0,\n        \"checks\": {\n          \"present\": true,\n          \"relevant\": true,\n          \"quality\": 0.85,\n          \"credit\": 0.85\n        },\n        \"source\": \"/workspace/20260820T022159-cap-normal-python-worker-sync/RESEARCH.md\",\n        \"quality\": 0.85,\n        \"credit\": 0.85,\n        \"word_count\": 850,\n        \"min_words\": 35,\n        \"matched_keywords\": [\n          \"research\"\n        ],\n        \"missing_keywords\": [\n          \"source\",\n          \"decision\",\n          \"tradeoff\"\n        ],\n        \"min_keywords\": 1,\n        \"substantive_line_count\": 44,\n        \"min_substantive_lines\": 2,\n        \"matched_evidence_terms\": [\n          \"sqlite3\",\n          \"FastAPI\",\n          \"retry\",\n          \"worker\",\n          \"idempotency\",\n          \"persistence\"\n        ],\n        \"missing_evidence_terms\": [],\n        \"min_evidence_terms\": 2,\n        \"matched_required_terms\": [\n          \"sqlite3\",\n          \"FastAPI\",\n          \"idempotency\",\n          \"worker\",\n          \"retry\"\n        ],\n        \"missing_required_terms\": [],\n        \"matched_required_patterns\": [],\n        \"missing_required_patterns\": [],\n        \"required_coverage\": 1.0,\n        \"min_required_coverage\": 0.6,\n        \"relevance_quality_threshold\": 0.6,\n        \"low_value_filler\": false,\n        \"mentioned_changed_files\": [],\n        \"missing_changed_files\": [\n          \"app.py\",\n          \"worker.py\",\n          \"sync_core.py\",\n          \"tests/test_sync_app.py\"\n        ],\n        \"changed_file_coverage\": 0.0,\n        \"min_changed_file_coverage\": 0.0\n      },\n      \"verify\": {\n        \"score\": 0.95,\n        \"max\": 1.0,\n        \"checks\": {\n          \"present\": true,\n          \"relevant\": true,\n          \"quality\": 0.846296,\n          \"credit\": 0.846296,\n          \"mentions_changed_files\": true,\n          \"changed_file_coverage\": 0.75,\n          \"changed_file_credit\": 0.75\n        },\n        \"source\": \"/workspace/20260820T022159-cap-normal-python-worker-sync/VERIFY.md\",\n        \"quality\": 0.846296,\n        \"credit\": 0.846296,\n        \"word_count\": 760,\n        \"min_words\": 30,\n        \"matched_keywords\": [\n          \"verify\",\n          \"test\",\n          \"pass\"\n        ],\n        \"missing_keywords\": [\n          \"result\"\n        ],\n        \"min_keywords\": 1,\n        \"substantive_line_count\": 30,\n        \"min_substantive_lines\": 1,\n        \"matched_evidence_terms\": [\n          \"app.py\",\n          \"worker.py\",\n          \"tests/test_sync_app.py\",\n          \"sqlite\",\n          \"retry\",\n          \"conflict\",\n          \"stale\"\n        ],\n        \"missing_evidence_terms\": [\n          \"sync_core.py\",\n          \"pagination\"\n        ],\n        \"min_evidence_terms\": 2,\n        \"matched_required_terms\": [\n          \"GET /\",\n          \"pytest\",\n          \"pass\",\n          \"worker\"\n        ],\n        \"missing_required_terms\": [\n          \"queued jobs\"\n        ],\n        \"matched_required_patterns\": [],\n        \"missing_required_patterns\": [],\n        \"required_coverage\": 0.8,\n        \"min_required_coverage\": 0.6,\n        \"relevance_quality_threshold\": 0.6,\n        \"low_value_filler\": false,\n        \"mentioned_changed_files\": [\n          \"app.py\",\n          \"worker.py\",\n          \"tests/test_sync_app.py\"\n        ],\n        \"missing_changed_files\": [\n          \"sync_core.py\"\n        ],\n        \"changed_file_coverage\": 0.75,\n        \"min_changed_file_coverage\": 0.0\n      },\n      \"review\": {\n        \"score\": 0.8,\n        \"max\": 1.0,\n        \"checks\": {\n          \"present\": true,\n          \"relevant\": true,\n          \"quality\": 0.835,\n          \"credit\": 0.835\n        },\n        \"source\": \"/workspace/20260820T022159-cap-normal-python-worker-sync/REVIEW.md\",\n        \"quality\": 0.835,\n        \"credit\": 0.835,\n        \"word_count\": 945,\n        \"min_words\": 30,\n        \"matched_keywords\": [\n          \"review\",\n          \"risk\"\n        ],\n        \"missing_keywords\": [\n          \"issue\",\n          \"follow-up\"\n        ],\n        \"min_keywords\": 1,\n        \"substantive_line_count\": 53,\n        \"min_substantive_lines\": 2,\n        \"matched_evidence_terms\": [\n          \"status\",\n          \"audit\",\n          \"pagination\",\n          \"risk\"\n        ],\n        \"missing_evidence_terms\": [\n          \"schema\"\n        ],\n        \"min_evidence_terms\": 2,\n        \"matched_required_terms\": [\n          \"400\",\n          \"401\",\n          \"404\",\n          \"422\",\n          \"admin\",\n          \"retry\",\n          \"newest first\"\n        ],\n        \"missing_required_terms\": [\n          \"GET /\"\n        ],\n        \"matched_required_patterns\": [],\n        \"missing_required_patterns\": [],\n        \"required_coverage\": 0.875,\n        \"min_required_coverage\": 0.6,\n        \"relevance_quality_threshold\": 0.6,\n        \"low_value_filler\": false,\n        \"mentioned_changed_files\": [],\n        \"missing_changed_files\": [\n          \"app.py\",\n          \"worker.py\",\n          \"sync_core.py\",\n          \"tests/test_sync_app.py\"\n        ],\n        \"changed_file_coverage\": 0.0,\n        \"min_changed_file_coverage\": 0.0\n      },\n      \"appsec\": {\n        \"score\": 0.8,\n        \"max\": 1.0,\n        \"checks\": {\n          \"present\": true,\n          \"relevant\": true,\n          \"quality\": 0.91,\n          \"credit\": 0.91\n        },\n        \"source\": \"/workspace/20260820T022159-cap-normal-python-worker-sync/APPSEC.md\",\n        \"quality\": 0.91,\n        \"credit\": 0.91,\n        \"word_count\": 1066,\n        \"min_words\": 30,\n        \"matched_keywords\": [\n          \"security\",\n          \"input\",\n          \"validation\"\n        ],\n        \"missing_keywords\": [\n          \"auth\"\n        ],\n        \"min_keywords\": 1,\n        \"substantive_line_count\": 38,\n        \"min_substantive_lines\": 2,\n        \"matched_evidence_terms\": [\n          \"validation\",\n          \"sqlite\",\n          \"worker\",\n          \"token\"\n        ],\n        \"missing_evidence_terms\": [\n          \"parameter\"\n        ],\n        \"min_evidence_terms\": 2,\n        \"matched_required_terms\": [\n          \"GET /\",\n          \"X-Admin-Token\",\n          \"worker\"\n        ],\n        \"missing_required_terms\": [],\n        \"matched_required_patterns\": [],\n        \"missing_required_patterns\": [],\n        \"required_coverage\": 1.0,\n        \"min_required_coverage\": 0.6,\n        \"relevance_quality_threshold\": 0.6,\n        \"low_value_filler\": false,\n        \"mentioned_changed_files\": [],\n        \"missing_changed_files\": [\n          \"app.py\",\n          \"worker.py\",\n          \"sync_core.py\",\n          \"tests/test_sync_app.py\"\n        ],\n        \"changed_file_coverage\": 0.0,\n        \"min_changed_file_coverage\": 0.0\n      },\n      \"final_summary\": {\n        \"score\": 0.0,\n        \"max\": 0.0,\n        \"checks\": {\n          \"present\": false,\n          \"relevant\": false,\n          \"quality\": 0.0,\n          \"credit\": 0.0,\n          \"mentions_changed_files\": false,\n          \"changed_file_coverage\": 0.0,\n          \"changed_file_credit\": 0.0\n        },\n        \"source\": \"final_answer\",\n        \"quality\": 0.0,\n        \"credit\": 0.0,\n        \"word_count\": 0,\n        \"min_words\": 6,\n        \"matched_keywords\": [],\n        \"missing_keywords\": [\n          \"changed\",\n          \"tests\",\n          \"verify\",\n          \"risk\"\n        ],\n        \"min_keywords\": 1,\n        \"substantive_line_count\": 0,\n        \"min_substantive_lines\": 1,\n        \"matched_evidence_terms\": [],\n        \"missing_evidence_terms\": [],\n        \"min_evidence_terms\": 0,\n        \"matched_required_terms\": [],\n        \"missing_required_terms\": [],\n        \"matched_required_patterns\": [],\n        \"missing_required_patterns\": [],\n        \"required_coverage\": 1.0,\n        \"min_required_coverage\": 0.6,\n        \"relevance_quality_threshold\": 0.6,\n        \"low_value_filler\": false,\n        \"mentioned_changed_files\": [],\n        \"missing_changed_files\": [\n          \"app.py\",\n          \"worker.py\",\n          \"sync_core.py\",\n          \"tests/test_sync_app.py\"\n        ],\n        \"changed_file_coverage\": 0.0,\n        \"min_changed_file_coverage\": 0.0\n      }\n    }\n  }\n}"
+}
