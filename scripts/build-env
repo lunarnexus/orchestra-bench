@@ -30,7 +30,11 @@ cmd="${1:-}"
 case "$cmd" in
   build)
     echo "[bench] building image $IMAGE_NAME ..."
-    docker build -t "$IMAGE_NAME" "$ROOT/docker/"
+    docker build \
+      --build-arg SOURCE_PLUGIN_CACHE_BUST="$(date +%s)" \
+      -f "$ROOT/docker/Dockerfile" \
+      -t "$IMAGE_NAME" \
+      "$ROOT"
     echo "[bench] image built: $IMAGE_NAME"
     ;;
 

@@ -1,5 +1,19 @@
 # orchestra-bench
 
+## Preamble 
+This bench suite is just terrible to use, but has provided some excellent results and experiment data.
+
+Findings in a nutshell:
+- There's a major advantage to using Orchestra for long running tasks. 
+- Short running tasks <2M tokens, tend to see a savings of 27% of main-session tokens.  
+- Long running tasks tend to see main-sesison savings of up to 74% in the 7M-14M token range, depending greatly on the task, favoring short plan long build tasks.  
+- The LLM model makes a huge difference in quality.  Adherence to skills, workflows makes all the difference.  
+
+Orchestra attempts to be a model and harness agnostic setup, not customized by default.  Orchestra workflow is a balance of deterministic and non-deterministic, which makes it very flexible, but adherence to workflows, dispatches, error detection/recovery is greatly model dependent.   
+Orchestra was mainly a research project to see if agentic orchestration really provides benefits.  
+
+-------
+
 Lightweight SaaSBench-style benchmark suite for evaluating [Orchestra](https://github.com/lunarnexus/orchestra) itself.
 
 ## Why this exists

@@ -123,6 +123,37 @@ class TestCapabilityAdvancedUrlShortenerReviewTask:
         assert result["checks"]["research_present"] is False
         assert result["checks"]["appsec_present"] is False
 
+    def test_homepage_accepts_controls_and_links_not_literal_route_docs(self, tmp_path):
+        _copy_tree(_TASK_DIR / "evaluate" / "solved", tmp_path)
+        app_py = tmp_path / "app.py"
+        text = app_py.read_text()
+        text = text.replace(
+            """        <ul>\n          <li>POST /shorten</li><li>GET /links</li><li>GET /stats/{code}</li>\n          <li>GET /s/{code}</li><li>GET /admin/review</li>\n        </ul>""",
+            """        <ul>\n          <li><a href=\"/links\">All recent links</a></li>\n          <li><a href=\"/stats/{code}\">Stats for a specific link</a></li>\n          <li><a href=\"/admin/review\">Admin review queue</a></li>\n          <li>Approved links use /s/{code}.</li>\n        </ul>""",
+        )
+        app_py.write_text(text)
+
+        code, result = _run_evaluator(tmp_path)
+
+        assert code == 0
+        assert result["checks"]["functional_homepage"] is True
+
+    def test_audit_history_accepts_table_rows_when_newest_first(self, tmp_path):
+        _copy_tree(_TASK_DIR / "evaluate" / "solved", tmp_path)
+        app_py = tmp_path / "app.py"
+        text = app_py.read_text()
+        text = text.replace(
+            "items = \"\".join(f\"<li>{html.escape(e['event'])}: {html.escape(e['detail'])} — {html.escape(e['created_at'])}</li>\" for e in events)",
+            "items = \"\".join(f\"<tr><td>{html.escape(e['event'])}</td><td>{html.escape(e['detail'])}</td><td>{html.escape(e['created_at'])}</td></tr>\" for e in events)",
+        )
+        text = text.replace("<h2>Audit history</h2><ul>{items}</ul>", "<h2>Audit history</h2><table>{items}</table>")
+        app_py.write_text(text)
+
+        code, result = _run_evaluator(tmp_path)
+
+        assert code == 0
+        assert result["checks"]["functional_audit_history"] is True
+
     def test_security_stub_fails_live_e2e_checks(self, tmp_path):
         _copy_tree(_TASK_DIR / "evaluate" / "solved", tmp_path)
         app_py = tmp_path / "app.py"

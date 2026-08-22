@@ -4,7 +4,9 @@ This document is the benchmark authoring guide for `orchestra-bench`.
 
 It exists for future agents and humans who need to create, replace, or redesign benchmark tasks — especially capability tasks.
 
-Capability tasks should borrow from SWE-bench and SaaSBench: real code snapshots or realistic app fixtures, detailed end-state requirements, source changes where appropriate, and live end-to-end verification.
+Capability tasks should borrow from SWE-bench, SaaSBench, and mature open-source projects: real code snapshots or realistic app fixtures, detailed end-state requirements, source changes where appropriate, and live end-to-end verification.
+
+For process/orchestration benchmarking, mature open-source slices are especially valuable. We are not primarily testing whether a model can invent a novel implementation; we are testing whether the agent system can research, decompose, implement, verify, review, and integrate a well-specified behavior. Existing mature code and tests provide a high-quality oracle and comparison target.
 
 The goal is not just to add more tests. The goal is to add tests that meaningfully answer:
 
@@ -149,6 +151,34 @@ The evaluator should:
 6. verify persisted state and hidden invariants.
 
 For web apps, use Playwright or equivalent browser automation when practical. For CLI apps, use subprocess golden-output tests. For APIs/services, use local HTTP fixtures. For workers, seed jobs/state and run the worker process.
+
+### 3.2 Mature open-source slice tasks
+
+A strong task may be a small, well-bounded slice of a mature open-source project rather than a complete app. Good sources include Git, OpenSSH, rsync, curl, SQLite, and similarly old, heavily tested projects.
+
+Use this pattern when the mature project already gives us better behavior and tests than we can invent quickly:
+
+1. choose a stable subsystem boundary, such as a parser, matcher, CLI mode, file-tree operation, or protocol-free helper;
+2. record upstream provenance: project, license, URL, commit or release, source files, and test files;
+3. keep evaluator-only reference code or oracle invocations outside `fixture/`;
+4. write a PRD that describes the required behavior, not the solved implementation;
+5. allow equivalent implementations, but keep a comparison note against upstream code for diagnosis;
+6. run end-to-end tests through the same public surface the agent is asked to provide.
+
+Good mature-OSS slices:
+- Git `wildmatch`: compact glob/path matcher with rich mature test vectors.
+- OpenSSH client config resolution: realistic parser/precedence behavior, oracle-checkable with `ssh -G -F` where available.
+- rsync filter/exclude behavior: filesystem E2E semantics and strong regression tests.
+- curl-style transfer/test harness slices: useful, but often higher infra cost.
+
+Avoid deleting a giant subsystem from a full app unless the build and test loop remains reliable. A trimmed fixture with the target implementation removed is usually the first choice. Full-repo deletion/rebuild variants can be added later when the smaller benchmark proves useful.
+
+Mature-OSS tasks must still follow the normal benchmark rules:
+- behavior dominates source similarity;
+- hidden tests check invariants, not arbitrary implementation style;
+- workflow evidence remains secondary process evidence;
+- evaluator-only upstream code/tests must not be visible in the run workspace;
+- license/provenance must be documented.
 
 ---
 
@@ -606,7 +636,7 @@ Before merging a new capability task, confirm:
 - [ ] The task is likely to separate stronger vs weaker agents
 - [ ] Workflow evidence is useful but not the sole truth source
 - [ ] Unit tests for the evaluator/task were added
-- [ ] The task was dogfooded through the real benchmark flow
+- [ ] The task was dogfooded through the real benchmark flow: prepare a run workspace with `scripts/02-open-pi` or `scripts/_prepare-task-run`, grade with `scripts/03-collect-results <task-id> --run-id <run-id> --force`, confirm `results/<run-id>-<task-id>/result.json` exists, and confirm `scripts/05-results` reports it. Direct evaluator runs or direct `eval_harness.grade()` calls are smoke checks only and do not satisfy this requirement.
 
 ---
 

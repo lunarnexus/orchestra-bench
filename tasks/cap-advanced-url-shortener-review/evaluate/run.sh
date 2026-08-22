@@ -34,6 +34,36 @@ def _body_contains(payload: str, *needles: str) -> bool:
     return all(n in payload for n in needles)
 
 
+def _has_route_reference(payload: str, method: str, path: str) -> bool:
+    """Accept either literal route documentation or ordinary HTML controls/links."""
+    lowered = payload.lower()
+    literal = f"{method} {path}"
+    if literal in payload:
+        return True
+    if method == "GET":
+        return f'href="{path}"' in payload or f"href='{path}'" in payload
+    if method == "POST":
+        has_action = f'action="{path}"' in payload or f"action='{path}'" in payload
+        has_method = 'method="post"' in lowered or "method='post'" in lowered
+        return has_action and has_method
+    return False
+
+
+def _audit_events_newest_first(payload: str, *events: str) -> bool:
+    """Check event ordering in the audit section, not by a specific HTML tag."""
+    section = payload
+    marker = payload.lower().find("audit")
+    if marker >= 0:
+        section = payload[marker:]
+    cursor = 0
+    for event in events:
+        pos = section.find(event, cursor)
+        if pos < 0:
+            return False
+        cursor = pos + len(event)
+    return True
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -132,11 +162,11 @@ def _run_functional_checks(workspace: Path) -> tuple[dict[str, object], dict[str
             homepage_status == 200
             and "text/html" in homepage_headers.get("Content-Type", homepage_headers.get("content-type", ""))
             and "ShortLink Desk" in homepage_body
-            and "POST /shorten" in homepage_body
-            and "GET /links" in homepage_body
-            and "GET /stats/{code}" in homepage_body
-            and "GET /s/{code}" in homepage_body
-            and "GET /admin/review" in homepage_body
+            and _has_route_reference(homepage_body, "POST", "/shorten")
+            and _has_route_reference(homepage_body, "GET", "/links")
+            and ("GET /stats/{code}" in homepage_body or "/stats/{code}" in homepage_body or "/stats/{{code}}" in homepage_body or "/stats/" in homepage_body)
+            and ("GET /s/{code}" in homepage_body or "/s/{code}" in homepage_body or "/s/{{code}}" in homepage_body or "/s/" in homepage_body)
+            and _has_route_reference(homepage_body, "GET", "/admin/review")
             and "suspicious" in homepage_body.lower()
             and "stats" in homepage_body.lower()
         )
@@ -215,11 +245,8 @@ def _run_functional_checks(workspace: Path) -> tuple[dict[str, object], dict[str
         local_stats_status, _, local_stats_body = _request(port, "GET", "/stats/local-admin")
         checks["functional_audit_history"] = (
             local_stats_status == 200
+            and _audit_events_newest_first(local_stats_body, "redirected", "approved", "marked_pending")
             and "created" in local_stats_body
-            and "marked_pending" in local_stats_body
-            and "approved" in local_stats_body
-            and "redirected" in local_stats_body
-            and local_stats_body.find("<li>redirected") < local_stats_body.find("<li>approved") < local_stats_body.find("<li>marked_pending")
         )
 
         _stop_server(proc); proc = None

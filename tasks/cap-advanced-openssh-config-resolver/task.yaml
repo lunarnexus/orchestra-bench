@@ -1,0 +1,14 @@
+task_id: cap-advanced-openssh-config-resolver
+description: "Rebuild an OpenSSH-style ssh_config resolver subset with oracle checks"
+family: capability
+batch: capability-advanced
+scoring_type: numeric
+timeout_minutes: 25
+evaluator: evaluate/run.sh
+split: dev
+source_benchmark:
+  name: OpenSSH portable
+  repo_or_url: https://github.com/openssh/openssh-portable
+  license: BSD-style/OpenSSH portable licenses
+  source_files: readconf.c,regress config tests
+  adaptation_notes: Standalone Python CLI resolver compared against ssh -G -F for supported client config semantics.

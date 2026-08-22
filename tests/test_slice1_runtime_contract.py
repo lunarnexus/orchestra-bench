@@ -33,6 +33,28 @@ class TestSlice1RuntimeContract:
         assert "gem install --no-document sinatra sqlite3 rack-test minitest" in dockerfile
         assert "pkg-config" in dockerfile
 
+    def test_docker_build_cache_bust_only_starts_before_source_and_plugins(self):
+        dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+        apt_pos = dockerfile.index("apt-get install")
+        npm_pos = dockerfile.index("npm install -g")
+        gem_pos = dockerfile.index("gem install --no-document")
+        bust_pos = dockerfile.index("ARG SOURCE_PLUGIN_CACHE_BUST")
+        orchestra_clone_pos = dockerfile.index("git clone \"$ORCHESTRA_REPO_URL\"")
+        plugin_install_pos = dockerfile.index("pi install \"$PI_LMSTUDIO_PLUGIN_URL\"")
+
+        assert apt_pos < bust_pos
+        assert npm_pos < bust_pos
+        assert gem_pos < bust_pos
+        assert bust_pos < orchestra_clone_pos
+        assert bust_pos < plugin_install_pos
+
+    def test_build_scripts_pass_source_plugin_cache_bust_with_repo_context(self):
+        for script_name in ["01-start", "build-env"]:
+            script = (REPO_ROOT / "scripts" / script_name).read_text()
+            assert "--build-arg SOURCE_PLUGIN_CACHE_BUST=\"$(date +%s)\"" in script
+            assert '-f "$ROOT/docker/Dockerfile"' in script
+            assert '"$ROOT"' in script
+
     def test_readme_mentions_numbered_runtime_entrypoint(self):
         readme = (REPO_ROOT / "README.md").read_text()
 

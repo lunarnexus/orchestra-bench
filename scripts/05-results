@@ -36,7 +36,7 @@ Options:
                      Exclude auxiliary skill substrings without shell-sensitive ! syntax
   --orchestra         Filter to runs with actual Orchestra dispatch/activity
   --no-orchestra      Filter to runs with no actual Orchestra dispatch/activity
-  --detail <1|2|3>    Detail level; for debug: 1 summary, 2 transcript tails, 3 full transcripts (default: 3)
+  --detail <1|2|3>    Detail level; for debug: 1 summary, 2 transcript tails, 3 full transcripts (default: 2)
   --rubric [names]    Show only rubric breakdowns; optional comma-separated names
   --checks [names]    Show only check breakdowns; optional comma-separated names
   --behaviors [names] Show only behavior breakdowns; optional comma-separated names
@@ -83,7 +83,7 @@ no_orchestra_filter="false"
 group_by="model,orchestra,plugins,skills"
 configs_filter=""
 per_task="false"
-detail_level="3"
+detail_level="2"
 detail_set="false"
 rubric_filter=""
 checks_filter=""
@@ -144,6 +144,7 @@ import signal
 import statistics
 import sys
 import textwrap
+from datetime import datetime, timezone
 
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 from collections import defaultdict
@@ -177,9 +178,9 @@ per_task = sys.argv[14].strip().lower() == "true"
 try:
     detail_level = int(sys.argv[15])
 except Exception:
-    detail_level = 3
+    detail_level = 2
 if detail_level not in (1, 2, 3):
-    detail_level = 3
+    detail_level = 2
 detail_set = sys.argv[16].strip().lower() == "true"
 if view == "debug" and not detail_set:
     detail_level = 1
@@ -372,8 +373,38 @@ def prepared_only_runs():
             if not meta_matches_filters({"run_meta": d, "task_meta": {"batch": suite}}):
                 continue
             d["_dir"] = str(p.parent.relative_to(root))
+            d["_mtime"] = p.stat().st_mtime
             out.append(d)
-    return out
+    return _sort_rows_chronological(out)
+
+
+def _run_sort_key(r):
+    """Stable chronological ordering for result rows.
+
+    Prefer captured runtime timestamps when available; fall back to timestamp-like
+    run ids and finally file mtime/path for legacy/manual runs.
+    """
+    meta = r.get("run_meta") or {}
+    for key in ("started_epoch", "last_parent_session_activity_epoch"):
+        value = meta.get(key)
+        if isinstance(value, (int, float)):
+            return (float(value), str(r.get("run_id", "")), str(r.get("task_id", "")))
+    run_id = str(r.get("run_id", "") or "")
+    if len(run_id) >= 15 and run_id[:8].isdigit() and run_id[8:9] == "T" and run_id[9:15].isdigit():
+        try:
+            dt = datetime.strptime(run_id[:15], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+            return (dt.timestamp(), run_id, str(r.get("task_id", "")))
+        except Exception:
+            pass
+    return (float(r.get("_mtime", 0) or 0), run_id, str(r.get("task_id", "")))
+
+
+def _sort_rows_chronological(rows):
+    return sorted(rows, key=_run_sort_key)
+
+
+def _sort_rows_recent_first(rows):
+    return list(reversed(_sort_rows_chronological(rows)))
 
 
 def load_results():
@@ -402,8 +433,7 @@ def load_results():
         d["_path"] = str(p.relative_to(root))
         d["_mtime"] = p.stat().st_mtime
         rows.append(d)
-    rows.sort(key=lambda r: (str(r.get("run_id", "")), str(r.get("task_id", ""))))
-    return rows
+    return _sort_rows_chronological(rows)
 
 
 def token_total(r):
@@ -824,11 +854,56 @@ def print_metric_line(label, values, *, integer=False, formatter=None, total=Fal
     print(f"{label:<12}: {' '.join(parts)}")
 
 
+def _category_score(r, key):
+    cats = r.get("category_scores") or {}
+    value = cats.get(key) if isinstance(cats, dict) else None
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _format_category_score(r, key):
+    value = _category_score(r, key)
+    return "n/a" if value is None else f"{value:.3f}"
+
+
+def _aggregate_category_scores(rows):
+    out = []
+    keys = ["intelligence", "speed", "efficiency", "normal_behavior", "orchestra_behavior"]
+    for key in keys:
+        vals = []
+        for r in rows:
+            cats = r.get("category_scores") or {}
+            value = cats.get(key) if isinstance(cats, dict) else None
+            if isinstance(value, (int, float)):
+                vals.append(float(value))
+        if vals:
+            out.append((key, vals))
+    return out
+
+
+ORCHESTRA_BEHAVIOR_KEYS = {
+    "dispatch_attempt_count", "dispatch_accepted_count", "dispatch_rejected_count", "dispatch_count",
+    "worker_started_count", "worker_exit_count", "worker_reconciled_count", "worker_failed_count",
+    "worker_completed", "worker_running_without_exit", "orchestra_effective", "dispatches_rejected_without_worker",
+    "no_orchestration", "target_role_dispatched", "missing_expected_role", "fallback_answer_after_dispatch",
+    "premature_completion", "same_slice_redispatches", "scope_blockers",
+}
+NORMAL_BEHAVIOR_KEYS = {"timeouts", "retries", "compaction_count", "process_penalty_applied", "process_penalty_total"}
+
+
+def _print_category_score_summary(rows, indent="  "):
+    categories = _aggregate_category_scores(rows)
+    if categories:
+        print(f"{indent}scores:")
+        for key, vals in categories:
+            print(f"{indent}  - {key}: avg={statistics.mean(vals):.3f} median={statistics.median(vals):.3f} high={max(vals):.3f} low={min(vals):.3f} n={len(vals)}")
+
+
 def print_score_breakdown(rows, indent="  "):
     if not section_only_mode and detail_level >= 2:
         scores = numeric_scores(rows)
         if scores:
             print(f"{indent}score_numeric: avg={statistics.mean(scores):.4f} median={statistics.median(scores):.4f} high={max(scores):.4f} low={min(scores):.4f} n={len(scores)}")
+        _print_category_score_summary(rows, indent)
 
     rubric_items, rubric_totals = aggregate_rubric(rows)
     rubric = rubric_items if rubric_names is None else [item for item in rubric_items if _name_selected(item[0], rubric_names)]
@@ -878,15 +953,24 @@ def print_score_breakdown(rows, indent="  "):
                 text = f"total={int(data['total'])} avg={data['avg']:.2f} high={int(data['high'])} low={int(data['low'])}"
                 print(f"{indent}  - {key}: {color_for_behavior_count(key, text, int(data['total']))}")
     elif not section_only_mode and orchestration and detail_level >= 3:
-        print(f"{indent}behaviors:")
-        for key in sorted(orchestration):
-            data = orchestration[key]
-            if data.get("kind") == "bool":
-                text = f"true={int(data['true'])} false={int(data['false'])} rate={data['rate']*100:.0f}%"
-                print(f"{indent}  - {key}: {color_for_behavior_rate(key, text, int(data['true']), int(data['count']))}")
-            else:
-                text = f"total={int(data['total'])} avg={data['avg']:.2f} high={int(data['high'])} low={int(data['low'])}"
-                print(f"{indent}  - {key}: {color_for_behavior_count(key, text, int(data['total']))}")
+        def _print_behavior_group(title, items):
+            if not items:
+                return
+            print(f"{indent}{title}:")
+            for key in sorted(items):
+                data = items[key]
+                if data.get("kind") == "bool":
+                    text = f"true={int(data['true'])} false={int(data['false'])} rate={data['rate']*100:.0f}%"
+                    print(f"{indent}  - {key}: {color_for_behavior_rate(key, text, int(data['true']), int(data['count']))}")
+                else:
+                    text = f"total={int(data['total'])} avg={data['avg']:.2f} high={int(data['high'])} low={int(data['low'])}"
+                    print(f"{indent}  - {key}: {color_for_behavior_count(key, text, int(data['total']))}")
+        normal = {k: v for k, v in orchestration.items() if k in NORMAL_BEHAVIOR_KEYS}
+        orch = {k: v for k, v in orchestration.items() if k in ORCHESTRA_BEHAVIOR_KEYS}
+        other = {k: v for k, v in orchestration.items() if k not in normal and k not in orch}
+        _print_behavior_group("normal behaviors", normal)
+        _print_behavior_group("orchestra behaviors", orch)
+        _print_behavior_group("other behaviors", other)
     elif not section_only_mode and orchestration and detail_level == 2:
         summary_parts = []
         for key in sorted(orchestration):
@@ -906,6 +990,7 @@ def print_section_metrics(rows, indent=""):
         print(f"{indent}pass rate   : {color_for_rate(f'{passed}/{len(rows)}', passed, len(rows))}")
     else:
         print(f"{indent}pass rate   : n/a")
+    _print_category_score_summary(rows, indent)
     toks = [token_total(r) for r in rows if token_total(r)]
     print_metric_line(f"{indent}tokens", toks, integer=True, total=True)
 
@@ -1179,6 +1264,7 @@ def print_overview(rows):
     print(f"passed      : {colorize(str(passed), 'green') if passed else passed}")
     print(f"failed      : {colorize(str(failed), 'red') if failed else failed}")
     print(f"pass rate   : {color_for_rate(f'{passed}/{len(rows)}', passed, len(rows))}" if rows else "pass rate   : n/a")
+    _print_category_score_summary(rows, "")
     toks = [token_total(r) for r in rows if token_total(r)]
     print_metric_line("tokens", toks, integer=True, total=True)
 
@@ -1211,7 +1297,7 @@ def _print_wrapped_kv(label, value, *, indent="      ", width=118):
 
 def print_runs(rows, n=20):
     print("\n=== recent runs ===")
-    for r in rows[-n:][::-1]:
+    for r in _sort_rows_recent_first(rows)[:n]:
         meta = r.get("run_meta") or {}
         parts = token_parts(r)
         sid = ",".join(meta.get("pi_session_ids", [])[:1])
@@ -1376,7 +1462,7 @@ def print_timing(rows):
 
 def print_timeline(rows, n=20):
     print("\n=== timeline ===")
-    for r in rows[-n:]:
+    for r in _sort_rows_chronological(rows)[-n:]:
         parts = token_parts(r)
         line = f"{r.get('run_id',''):<18} {status(r):4s} {r.get('task_id',''):<36} time={fmt_seconds(elapsed(r)):<6} total={parts['total']:<8} in={parts['input']:<8} out={parts['output']:<6} reason={parts['reasoning']}"
         # Append cache info when available
@@ -2039,6 +2125,18 @@ def print_run_detail(rows, q):
     if isinstance(score_numeric, (int, float)):
         print(f"score_numeric: {score_numeric:.4f}")
     print(f"rubric       : {format_rubric_summary(r.get('rubric'))}")
+    cats = r.get("category_scores") or {}
+    if isinstance(cats, dict) and cats:
+        ordered = ["intelligence", "speed", "efficiency", "normal_behavior", "orchestra_behavior"]
+        parts_cat = []
+        for key in ordered:
+            value = cats.get(key)
+            if isinstance(value, (int, float)):
+                parts_cat.append(f"{key}={value:.3f}")
+            elif key == "orchestra_behavior" and key in cats:
+                parts_cat.append("orchestra_behavior=n/a")
+        if parts_cat:
+            print(f"categories   : {'; '.join(parts_cat)}")
     print(f"result       : {r.get('_path','')}")
     print(f"artifacts    : {r.get('_dir','')}/artifacts/")
     meta = r.get("run_meta") or {}
@@ -2128,6 +2226,8 @@ def print_run_detail(rows, q):
     efficiency_lines = format_efficiency_summary(TaskResult.from_json(root / r.get('_path', '')), results_dir)
     if efficiency_lines:
         print("\nefficiency:")
+        print(f"  score          : {_format_category_score(r, 'efficiency')}")
+        print(f"  normal_behavior: {_format_category_score(r, 'normal_behavior')}")
         for line in efficiency_lines:
             print(f"  {line}")
 
@@ -2152,6 +2252,7 @@ def print_run_detail(rows, q):
         special_keys = [key for key in special_efficiency_keys if key in orch_checks]
         if special_keys:
             print("\norchestration efficiency:")
+            print(f"  orchestra_behavior: {_format_category_score(r, 'orchestra_behavior')}")
             parent_tools = orch_checks.get("parent_tool_calls_while_workers_active")
             if isinstance(parent_tools, dict):
                 total = parent_tools.get("total")
@@ -2178,6 +2279,7 @@ def print_run_detail(rows, q):
         remaining_orch = {k: v for k, v in orch_checks.items() if k not in special_efficiency_keys}
         if remaining_orch:
             print("\norchestration:")
+            print(f"  orchestra_behavior: {_format_category_score(r, 'orchestra_behavior')}")
             for key in sorted(remaining_orch):
                 value = remaining_orch[key]
                 if isinstance(value, bool):

@@ -1539,8 +1539,20 @@ def grade(
     _docker_exec("rm", "-rf", eval_tmp, env=bench_env)
     _docker_exec("mkdir", "-p", eval_dir, env=bench_env)
 
+    evaluator_host_dir = evaluator_host.parent
+    cp_eval_proc = sp.run(
+        ["docker", "cp", f"{evaluator_host_dir}/.", f"{CONTAINER_NAME}:{eval_dir}/"],
+        capture_output=True,
+        text=True,
+    )
+    if cp_eval_proc.returncode != 0:
+        raise RuntimeError(
+            cp_eval_proc.stderr.strip()
+            or cp_eval_proc.stdout.strip()
+            or f"docker cp failed: {evaluator_host_dir}"
+        )
+
     support_files = {
-        evaluator_host: f"{eval_dir}/run.sh",
         _REPO_ROOT / "capability_helpers.py": f"{eval_dir}/capability_helpers.py",
         _REPO_ROOT / "rubric_helpers.py": f"{eval_dir}/rubric_helpers.py",
     }
@@ -1559,18 +1571,21 @@ def grade(
                 or f"docker cp failed: {host_path.name}"
             )
 
-    # Remove stale result.json before evaluator runs. If the evaluator prints
-    # JSON instead of writing a file, fallback parsing must use this run's
-    # stdout rather than a previous result file.
+    # Move any existing result aside before evaluator runs. This lets fallback
+    # parsing use this run's stdout instead of a stale result file, while still
+    # preserving the old result if the regrade fails before producing JSON.
     pre_result_dir = (_REPO_ROOT / RESULTS_DIR / f"{run_id}-{task_id}").resolve()
     pre_result_path = pre_result_dir / "result.json"
+    backup_result_path = pre_result_dir / ".result.json.previous"
     previous_result: TaskResult | None = None
     if pre_result_path.exists():
         try:
             previous_result = TaskResult.from_json(pre_result_path)
         except Exception:
             previous_result = None
-        pre_result_path.unlink()
+        if backup_result_path.exists():
+            backup_result_path.unlink()
+        pre_result_path.rename(backup_result_path)
 
     eval_cmd = (
         "bench-entrypoint",
@@ -1589,6 +1604,8 @@ def grade(
     task_result: TaskResult
     if result_path.exists():
         task_result = TaskResult.from_json(result_path)
+        if backup_result_path.exists():
+            backup_result_path.unlink()
     else:
         # Fallback — construct from evaluator output. Evaluators commonly print
         # JSON to stdout instead of writing result.json directly.
@@ -1596,14 +1613,20 @@ def grade(
         parsed = _parse_json_object_from_stdout(stdout)
 
         if not parsed and result_proc.returncode != 0:
+            if backup_result_path.exists() and not pre_result_path.exists():
+                backup_result_path.rename(pre_result_path)
             raise RuntimeError(
                 result_proc.stderr.strip()
                 or result_proc.stdout.strip()
                 or f"evaluator failed without JSON for {run_id}-{task_id}"
             )
         if not parsed and previous_result is not None:
+            if backup_result_path.exists() and not pre_result_path.exists():
+                backup_result_path.rename(pre_result_path)
             task_result = previous_result
         else:
+            if backup_result_path.exists():
+                backup_result_path.unlink()
             score = str(parsed.get("score") or ("pass" if result_proc.returncode == 0 else "fail"))
             checks = parsed.get("checks") if isinstance(parsed.get("checks"), dict) else {}
             score_numeric = parsed.get("score_numeric")
@@ -3292,22 +3315,10 @@ def _efficiency_block_for_penalties(efficiency: dict[str, object] | None, metric
     return block if isinstance(block, dict) else None
 
 
-def _collect_process_penalties(result: TaskResult) -> list[tuple[str, float, str]]:
-    """Collect process penalties for orchestration/efficiency signals."""
+def _collect_normal_behavior_penalties(result: TaskResult) -> list[tuple[str, float, str]]:
+    """Collect task/runtime behavior penalties that apply to any run."""
     penalties: list[tuple[str, float, str]] = []
     orchestration_checks = result.orchestration_checks or {}
-    orchestra_enabled = (result.run_meta or {}).get("orchestra") is not False
-
-    if orchestration_checks.get("missing_expected_role") is True:
-        penalties.append(("missing_expected_role", 0.10, "missing expected role"))
-    if orchestration_checks.get("premature_completion") is True:
-        penalties.append(("premature_completion", 0.10, "premature completion"))
-    if orchestration_checks.get("fallback_answer_after_dispatch") is True:
-        penalties.append(("fallback_answer_after_dispatch", 0.08, "fallback answer after dispatch"))
-    if orchestration_checks.get("worker_running_without_exit") is True:
-        penalties.append(("worker_running_without_exit", 0.08, "worker still running / no exit"))
-    if orchestra_enabled and orchestration_checks.get("no_orchestration") is True:
-        penalties.append(("no_orchestration", 0.10, "no orchestration"))
 
     for key, weight, label in (
         ("timeouts", 0.04, "timeout"),
@@ -3329,6 +3340,36 @@ def _collect_process_penalties(result: TaskResult) -> list[tuple[str, float, str
             penalties.append((f"{metric}_new_high", 0.05, f"very high {metric}"))
 
     return penalties
+
+
+def _collect_orchestra_behavior_penalties(result: TaskResult) -> list[tuple[str, float, str]]:
+    """Collect Orchestra-specific behavior penalties for a separate score."""
+    penalties: list[tuple[str, float, str]] = []
+    orchestration_checks = result.orchestration_checks or {}
+    if orchestration_checks.get("orchestra_effective") is not True:
+        return penalties
+    if orchestration_checks.get("missing_expected_role") is True:
+        penalties.append(("missing_expected_role", 0.10, "missing expected role"))
+    if orchestration_checks.get("premature_completion") is True:
+        penalties.append(("premature_completion", 0.10, "premature completion"))
+    if orchestration_checks.get("fallback_answer_after_dispatch") is True:
+        penalties.append(("fallback_answer_after_dispatch", 0.08, "fallback answer after dispatch"))
+    failed = orchestration_checks.get("worker_failed_count")
+    if isinstance(failed, (int, float)) and failed > 0:
+        penalties.append(("worker_failed", min(0.05 * int(failed), 0.15), f"worker failed x{int(failed)}"))
+    reconciled = orchestration_checks.get("worker_reconciled_count")
+    if isinstance(reconciled, (int, float)) and reconciled > 0:
+        penalties.append(("worker_reconciled", min(0.05 * int(reconciled), 0.15), f"worker reconciled x{int(reconciled)}"))
+    if orchestration_checks.get("worker_running_without_exit") is True:
+        penalties.append(("worker_running_without_exit", 0.08, "worker still running / no exit"))
+    if orchestration_checks.get("dispatches_rejected_without_worker") is True:
+        penalties.append(("dispatches_rejected_without_worker", 0.10, "dispatches rejected without worker"))
+    return penalties
+
+
+def _collect_process_penalties(result: TaskResult) -> list[tuple[str, float, str]]:
+    """Backward-compatible normal behavior penalties used for score_numeric."""
+    return _collect_normal_behavior_penalties(result)
 
 
 def _position_score(position: str) -> float | None:
@@ -3376,11 +3417,15 @@ def compute_category_scores(result: TaskResult) -> dict[str, object]:
     if isinstance(token_block, dict):
         efficiency = _position_score(str(token_block.get("position") or ""))
 
-    process = None
-    if (result.run_meta or {}).get("orchestra") is not False:
-        penalties = _collect_process_penalties(result)
-        process_penalty_total = min(sum(weight for name, weight, _ in penalties if not name.startswith("tokens_") and not name.startswith("elapsed_")), 0.25)
-        process = max(0.0, min(1.0, 1.0 - (process_penalty_total / 0.25)))
+    normal_behavior_penalties = _collect_normal_behavior_penalties(result)
+    normal_behavior_total = min(sum(weight for _, weight, _ in normal_behavior_penalties), 0.25)
+    normal_behavior = max(0.0, min(1.0, 1.0 - (normal_behavior_total / 0.25)))
+
+    orchestra_behavior = None
+    if (result.orchestration_checks or {}).get("orchestra_effective") is True:
+        orchestra_penalties = _collect_orchestra_behavior_penalties(result)
+        orchestra_total = min(sum(weight for _, weight, _ in orchestra_penalties), 0.25)
+        orchestra_behavior = max(0.0, min(1.0, 1.0 - (orchestra_total / 0.25)))
 
     def _norm(value: float | None) -> float | None:
         return round(value, 6) if isinstance(value, (int, float)) else None
@@ -3389,7 +3434,9 @@ def compute_category_scores(result: TaskResult) -> dict[str, object]:
         "intelligence": _norm(intelligence),
         "speed": _norm(speed),
         "efficiency": _norm(efficiency),
-        "process": _norm(process),
+        "normal_behavior": _norm(normal_behavior),
+        "orchestra_behavior": _norm(orchestra_behavior),
+        "process": _norm(normal_behavior),
     }
 
 

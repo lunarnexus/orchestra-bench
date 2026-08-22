@@ -818,8 +818,8 @@ class TestDashboardReporting:
         assert "[smoke]" in result.stdout
         assert "[capability-easy]" in result.stdout
         assert "score_numeric: avg=0.6500" in result.stdout
-        assert "- quality:" in result.stdout
-        assert "- compaction_count: total=1 avg=0.50" in result.stdout
+        assert "rubric       : avg=" in result.stdout
+        assert "behaviors    : compaction_count=1" in result.stdout
         assert "- target_role_dispatched:" not in result.stdout
         assert "=== per-test breakdown ===" in result.stdout
         assert "- smoke-a" in result.stdout
@@ -909,6 +909,78 @@ class TestDashboardReporting:
         assert result.returncode == 0, result.stderr
         assert "run-35" in result.stdout
         assert "run-27" not in result.stdout
+
+    def test_runs_view_sorts_by_captured_timestamp_descending(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="zzz-old",
+                score="pass",
+                task_meta={"batch": "smoke"},
+                run_meta={"started_epoch": 100},
+            ),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="aaa-new",
+                score="pass",
+                task_meta={"batch": "smoke"},
+                run_meta={"started_epoch": 200},
+            ),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "runs", "--suite", "smoke", "--limit", "10"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.index("aaa-new") < result.stdout.index("zzz-old")
+
+    def test_timeline_view_sorts_by_captured_timestamp_ascending(self, tmp_path):
+        script = _install_results_script(tmp_path)
+        _write_task_yaml(tmp_path, "task-a", batch="smoke")
+
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="zzz-old",
+                score="pass",
+                task_meta={"batch": "smoke"},
+                run_meta={"started_epoch": 100},
+            ),
+        )
+        _write_result_json(
+            tmp_path,
+            TaskResult(
+                task_id="task-a",
+                run_id="aaa-new",
+                score="pass",
+                task_meta={"batch": "smoke"},
+                run_meta={"started_epoch": 200},
+            ),
+        )
+
+        result = __import__("subprocess").run(
+            ["bash", str(script), "timeline", "--suite", "smoke", "--limit", "10"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.index("zzz-old") < result.stdout.index("aaa-new")
 
     def test_runs_detail_three_shows_config_fields(self, tmp_path):
         script = _install_results_script(tmp_path)
@@ -1869,7 +1941,7 @@ class TestRunDetailReporting:
         assert enriched.orchestration_checks["fallback_answer_after_dispatch"] is False
         assert enriched.orchestration_checks["process_penalty_total"] == 0.0
 
-    def test_process_penalty_for_capability_run_with_zero_dispatches(self, tmp_path):
+    def test_no_orchestration_is_label_not_score_penalty(self, tmp_path):
         from eval_harness import ingest_artifacts
 
         base = tmp_path / "results"
@@ -1895,9 +1967,9 @@ class TestRunDetailReporting:
 
         assert enriched.orchestration_checks["dispatch_count"] == 0
         assert enriched.orchestration_checks["no_orchestration"] is True
-        assert enriched.orchestration_checks["process_penalty_total"] > 0
-        assert "no orchestration" in enriched.orchestration_checks["process_penalty_reasons"]
-        assert enriched.score_numeric == 0.0
+        assert enriched.orchestration_checks["process_penalty_total"] == 0.0
+        assert "no orchestration" not in enriched.orchestration_checks["process_penalty_reasons"]
+        assert enriched.score_numeric == 0.04
         assert enriched.score == "fail"
 
     def test_intentional_no_orchestra_does_not_apply_no_orchestration_penalty(self, tmp_path):
@@ -2002,6 +2074,56 @@ class TestRunDetailReporting:
         assert enriched.orchestration_checks["fallback_answer_after_dispatch"] is True
         assert enriched.orchestration_checks["worker_running_without_exit"] is True
         assert enriched.orchestration_checks["process_penalty_total"] > 0
+        assert enriched.category_scores["normal_behavior"] < 1.0
+        assert enriched.category_scores["orchestra_behavior"] < 1.0
+
+    def test_failed_workers_lower_orchestra_behavior_score(self):
+        from eval_harness import compute_category_scores
+
+        result_obj = TaskResult(
+            task_id="task-pen",
+            run_id="run-failed-worker",
+            score="fail",
+            score_numeric=0.8,
+            rubric={"content": {"score": 0.8, "max": 1.0}},
+            orchestration_checks={
+                "orchestra_effective": True,
+                "worker_failed_count": 2,
+                "worker_failure_reasons": ["terminated", "500 Internal Server Error"],
+            },
+        )
+
+        scores = compute_category_scores(result_obj)
+
+        assert scores["orchestra_behavior"] == 0.6
+        assert scores["normal_behavior"] == 1.0
+
+    def test_no_orchestra_has_no_orchestra_behavior_score(self, tmp_path):
+        from eval_harness import ingest_artifacts
+
+        base = tmp_path / "results"
+        run_dir = base / "run-no-task-pen"
+        artifacts = run_dir / "artifacts"
+        (artifacts / "pi-sessions").mkdir(parents=True)
+        (artifacts / "manifest.json").write_text(json.dumps({"orchestra": {}}))
+        (artifacts / "pi-sessions" / "sess.jsonl").write_text(json.dumps({"type": "session", "id": "sess"}) + "\n")
+
+        result_obj = TaskResult(
+            task_id="task-pen",
+            run_id="run-no",
+            score="pass",
+            score_numeric=1.0,
+            rubric={"content": {"score": 1.0, "max": 1.0}},
+            task_meta={"family": "capability"},
+            run_meta={"orchestra": False},
+        )
+
+        enriched = ingest_artifacts(result_obj, base_dir=base)
+
+        assert enriched.orchestration_checks["no_orchestration"] is True
+        assert enriched.score_numeric == 1.0
+        assert enriched.category_scores["normal_behavior"] == 1.0
+        assert enriched.category_scores["orchestra_behavior"] is None
 
     def test_run_detail_shows_no_rubric_score_for_legacy_results(self, tmp_path):
         script = _install_results_script(tmp_path)
