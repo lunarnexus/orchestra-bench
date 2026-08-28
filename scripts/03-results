@@ -3,7 +3,4 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(dirname -- "$SCRIPT_DIR")
 cd "$REPO_ROOT"
-if [ "$#" -eq 0 ]; then
-  exec python3 -m bench.cli start start
-fi
-exec python3 -m bench.cli start "$@"
+exec python3 -m bench.cli results "$@"

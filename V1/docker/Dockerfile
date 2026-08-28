@@ -9,17 +9,24 @@ ARG PI_CODEGRAPH_PLUGIN_URL="http://git.lunarnexus.local:3000/james/pi-codegraph
 ARG PI_WEB_TOOLS_PLUGIN_URL="http://git.lunarnexus.local:3000/james/pi-web-tools"
 
 ENV ORCHESTRA_HOME=/opt/orchestra
-ENV PYTHONPATH=/opt/orchestra-bench
 
+# Runtime deps
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git curl ca-certificates openssh-client python3 python3-pip python3-venv ruby ruby-dev build-essential libsqlite3-dev pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
+# Preinstall common Python app/task deps for capability workloads.
 RUN python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn pytest httpx django
+
+# Install Pi coding agent and practical Node task deps.
 RUN npm install -g @earendil-works/pi-coding-agent@latest express
 ENV NODE_PATH=/usr/local/lib/node_modules:/usr/lib/node_modules
+
+# Preinstall common Ruby app/task deps for capability workloads.
 RUN gem install --no-document sinatra sqlite3 rack-test minitest
 
+# Apply benchmark-local Pi settings before plugin install, without clobbering
+# unrelated Pi defaults/settings.
 COPY config/pi/settings.json /tmp/bench-pi-settings.json
 RUN mkdir -p /root/.pi/agent && \
     python3 - <<'PY'
@@ -33,12 +40,16 @@ base.update(patch)
 target.write_text(json.dumps(base, indent=2) + '\n')
 PY
 
+# Copy benchmark-local Pi skills into the container runtime.
 COPY config/skills/ /tmp/bench-skills/
 RUN mkdir -p /root/.pi/agent/skills && \
     cp -a /tmp/bench-skills/. /root/.pi/agent/skills/
 
+# Bust cache for source/plugin installs while keeping base OS, Pi, and common
+# dependency layers cached. 01-start supplies a fresh value for each build.
 ARG SOURCE_PLUGIN_CACHE_BUST="manual"
 
+# Install Orchestra from source using the README dev flow.
 RUN echo "source/plugin cache bust: $SOURCE_PLUGIN_CACHE_BUST" && \
     git clone "$ORCHESTRA_REPO_URL" "$ORCHESTRA_HOME/src" && \
     python3 -m venv "$ORCHESTRA_HOME/.venv" && \
@@ -48,21 +59,20 @@ RUN echo "source/plugin cache bust: $SOURCE_PLUGIN_CACHE_BUST" && \
 
 ENV PATH="/opt/orchestra/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-RUN pi install "$PI_LMSTUDIO_PLUGIN_URL"
-#RUN pi install "$PI_CODEGRAPH_PLUGIN_URL"
-#RUN pi install "$PI_WEB_TOOLS_PLUGIN_URL"
+# Install Pi plugins via the official Pi command.
+#RUN pi install "$PI_LMSTUDIO_PLUGIN_URL" && \
+RUN pi install "$PI_LMSTUDIO_PLUGIN_URL" 
+#    pi install "$PI_CODEGRAPH_PLUGIN_URL" 
+#    pi install "$PI_WEB_TOOLS_PLUGIN_URL"
 
-ENV BENCH_TASKS=/bench/task-materials-visible \
+# Working dirs — these are the mount points for the host volumes
+ENV BENCH_TASKS=/bench/tasks \
     BENCH_RESULTS=/bench/results \
     BENCH_ARTIFACTS=/bench/artifacts \
-    BENCH_WORKSPACE=/workspace \
-    BENCH_ORCHESTRA_CONFIG_SRC=/bench/orchestra-config \
-    BENCH_LMSTUDIO_CONFIG_SRC=/bench/pi/lmstudio.json \
-    BENCH_PI_SKILLS_SRC=/bench/skills
+    BENCH_WORKSPACE=/workspace
 
-RUN mkdir -p "$BENCH_TASKS" "$BENCH_RESULTS" "$BENCH_ARTIFACTS" "$BENCH_WORKSPACE" /bench/orchestra-config /bench/skills /bench/pi /root/.pi/agent
+RUN mkdir -p "$BENCH_TASKS" "$BENCH_RESULTS" "$BENCH_ARTIFACTS" "$BENCH_WORKSPACE"
 
-COPY bench/ /opt/orchestra-bench/bench/
 COPY docker/entrypoint.sh /usr/local/bin/bench-entrypoint
 RUN chmod +x /usr/local/bin/bench-entrypoint
 
