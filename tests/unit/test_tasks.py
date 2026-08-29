@@ -161,19 +161,38 @@ def test_load_task_rejects_evaluate_file(tmp_path: Path) -> None:
         load_task(task_dir, tmp_path / "tasks")
 
 
-def test_default_tasks_root_can_load_v1_inventory() -> None:
+def test_default_tasks_root_prefers_repo_tasks_over_v1_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_root = tmp_path / "repo"
+    root_task = repo_root / "tasks" / "smoke-dependent-setup-chain"
+    legacy_task = repo_root / "V1" / "tasks" / "legacy-task"
+    _write_task(
+        root_task,
+        task_yaml="""task_id: smoke-dependent-setup-chain
+description: Smoke task
+family: builder
+batch: smoke
+scoring_type: pass_fail
+timeout_minutes: 7
+evaluator: evaluate/run.sh
+""",
+    )
+    _write_task(
+        legacy_task,
+        task_yaml="""task_id: legacy-task
+description: Legacy task
+family: builder
+batch: role-focused
+scoring_type: pass_fail
+timeout_minutes: 8
+evaluator: evaluate/run.sh
+""",
+    )
+    monkeypatch.setattr("bench.tasks._REPO_ROOT", repo_root)
+
     tasks = discover_tasks()
-    assert tasks, "expected V1/tasks inventory to be discoverable by default"
+
+    assert tasks == [root_task]
     task = load_task(tasks[0])
-    assert task.task_id == tasks[0].name
-    assert task.evaluate_path == tasks[0] / "evaluate"
-
-
-def test_default_tasks_root_lists_public_suites_in_canonical_order() -> None:
-    assert list_suites()[:5] == [
-        "smoke",
-        "role-focused",
-        "capability-easy",
-        "capability-normal",
-        "capability-advanced",
-    ]
+    assert task.task_id == "smoke-dependent-setup-chain"
+    assert task.evaluate_path == root_task / "evaluate"
+    assert list_suites() == ["smoke"]

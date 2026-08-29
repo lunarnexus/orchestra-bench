@@ -269,15 +269,41 @@ def filter_results(
     return filtered
 
 
+def _coerce_sort_value(value: Any) -> tuple[int, Any]:
+    if value is None:
+        return (1, "")
+    if isinstance(value, bool):
+        return (0, int(value))
+    if isinstance(value, (int, float, str)):
+        return (0, value)
+    return (0, str(value))
+
+
+def _entry_value_for_sort(entry: ReportEntry, key: str) -> Any:
+    if key == "finished_at":
+        try:
+            return _parse_iso8601(entry.finished_at) if entry.finished_at else datetime.min.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+    if key == "started_at":
+        try:
+            return _parse_iso8601(entry.started_at) if entry.started_at else datetime.min.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+    if key == "total_tokens":
+        return entry.total_tokens
+    if key == "elapsed_seconds":
+        return entry.elapsed_seconds
+    return getattr(entry, key, None)
+
+
 def sort_results(
     entries: Sequence[ReportEntry],
     *,
     key: str = "finished_at",
     reverse: bool = True,
 ) -> list[ReportEntry]:
-    if key == "finished_at":
-        return sorted(entries, key=_entry_sort_key, reverse=reverse)
-    return sorted(entries, key=lambda entry: getattr(entry, key, None), reverse=reverse)
+    return sorted(entries, key=lambda entry: (_coerce_sort_value(_entry_value_for_sort(entry, key)), entry.run_id, entry.task_id), reverse=reverse)
 
 
 __all__ = [

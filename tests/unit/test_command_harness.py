@@ -55,7 +55,7 @@ class TestCommandHarness:
 
         result = harness.run(request)
 
-        assert captured["command"] == ["tool", "hello world", "--model", "gpt-4.1", "--workdir", run_paths.container_workdir]
+        assert captured["command"] == ["tool", "hello world", "--model", "gpt-4.1", "--workdir", str(workspace_dir(run_paths))]
         assert captured["kwargs"]["capture_output"] is True
         assert captured["kwargs"]["text"] is True
         assert captured["kwargs"]["timeout"] == 3.0
@@ -68,20 +68,20 @@ class TestCommandHarness:
         assert result.status == "ok"
         assert result.exit_code == 0
         assert result.error == ""
-        assert result.details["command"] == ["tool", "hello world", "--model", "gpt-4.1", "--workdir", run_paths.container_workdir]
+        assert result.details["command"] == ["tool", "hello world", "--model", "gpt-4.1", "--workdir", str(workspace_dir(run_paths))]
         assert result.details["returncode"] == 0
         assert result.details["artifacts"]["transcript"] == str(request.artifacts.transcript_path)
         assert request.artifacts.transcript_path.read_text(encoding="utf-8") == "stdout line\n"
         assert request.artifacts.log_path.read_text(encoding="utf-8") == "stderr line\n"
         assert json.loads(request.artifacts.summary_path.read_text(encoding="utf-8")) == {
-            "command": ["tool", "hello world", "--model", "gpt-4.1", "--workdir", run_paths.container_workdir],
+            "command": ["tool", "hello world", "--model", "gpt-4.1", "--workdir", str(workspace_dir(run_paths))],
             "details": {
                 "artifacts": {
                     "stderr": str(request.artifacts.log_path),
                     "summary": str(request.artifacts.summary_path),
                     "transcript": str(request.artifacts.transcript_path),
                 },
-                "command": ["tool", "hello world", "--model", "gpt-4.1", "--workdir", run_paths.container_workdir],
+                "command": ["tool", "hello world", "--model", "gpt-4.1", "--workdir", str(workspace_dir(run_paths))],
                 "returncode": 0,
                 "timeout_seconds": 3.0,
                 "workdir": str(workspace_dir(run_paths)),

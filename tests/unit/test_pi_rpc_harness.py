@@ -8,6 +8,7 @@ import pytest
 
 from bench.harnesses.base import HarnessArtifactPaths, HarnessRequest
 from bench.paths import RunPaths
+from bench.workspace import workspace_dir
 
 
 class _FakeStdin:
@@ -110,7 +111,7 @@ def test_start_uses_request_workdir_and_minimized_env(tmp_path: Path, monkeypatc
     harness = PiRpcHarness(["pi"], process_factory=factory, env={"HARNESS_ONLY": "yes"})
     harness.start(request)
 
-    assert captured["cwd"] == request.run_paths.container_workdir
+    assert captured["cwd"] == workspace_dir(request.run_paths)
     env = captured["env"]
     assert env["HARNESS_ONLY"] == "yes"
     assert env["REQUEST_ONLY"] == "1"

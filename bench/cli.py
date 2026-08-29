@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,24 +15,28 @@ from .harnesses.command import CommandHarness
 from .paths import RepoPaths
 from .reporting import (
     build_debug_report,
-    collect_results,
+    compare_results,
+    describe_filters,
+    format_compare_results,
     format_dashboard,
     format_debug_report,
+    format_delete_preview,
+    format_rescore_report,
     format_run_detail,
     format_runs,
     format_timing,
     format_tokens,
+    delete_results,
+    rescore_results,
+    select_results,
 )
 from .result import TaskResult, load_result
 from .runner import grade_run, run_and_grade
 from .runtime import (
-    RuntimeEnvironment,
-    build_image,
     container_exec,
     doctor as runtime_doctor,
-    init_runtime as runtime_init,
-    recreate_container,
-    start_container,
+    load_runtime_config_summary,
+    prepare_startup,
 )
 from .tasks import TaskLoadError, list_suites, list_tasks, load_task
 
@@ -42,6 +47,37 @@ def _json_dump(payload: Any) -> str:
 
 def _print_json(payload: Any) -> None:
     sys.stdout.write(_json_dump(payload))
+
+
+def _parse_json_summary_from_stdout(stdout: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(stdout):
+        if char != "{":
+            continue
+        try:
+            summary, end = decoder.raw_decode(stdout, index)
+        except ValueError:
+            continue
+        if stdout[end:].strip():
+            continue
+        if not isinstance(summary, dict):
+            raise RuntimeError("in-container runtime config summary must be an object")
+        return {str(key): value for key, value in summary.items()}
+    raise RuntimeError("in-container runtime config sync did not return a JSON summary")
+
+
+def _runtime_env_from_summary(summary: dict[str, Any] | None) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if not summary:
+        return env
+    for summary_key, env_name in (
+        ("pi_runtime_dir", "PI_CODING_AGENT_DIR"),
+        ("orchestra_runtime_dir", "PI_ORCHESTRA_RUNTIME_DIR"),
+    ):
+        value = summary.get(summary_key)
+        if isinstance(value, str) and value:
+            env[env_name] = value
+    return env
 
 
 def _run_ref_parts(run_ref: str) -> tuple[str, str]:
@@ -98,12 +134,82 @@ def _result_summary_line(run_paths) -> str:  # type: ignore[no-untyped-def]
     return f"{run_paths.run_id}\t{run_paths.task_id}\t{result.outcome}\t{result.evaluation.status}"
 
 
-START_ACTIONS = ("build", "start", "recreate", "init")
+def _compact_result_payload(result: TaskResult) -> dict[str, Any]:
+    details = result.details if isinstance(result.details, dict) else {}
+    payload: dict[str, Any] = {
+        "run_id": result.run_id,
+        "task_id": result.task_id,
+        "batch": result.batch,
+        "outcome": result.outcome,
+        "evaluation": {
+            "status": result.evaluation.status,
+            "score": result.evaluation.score,
+        },
+    }
+    result_json = details.get("result_json")
+    if isinstance(result_json, str) and result_json:
+        payload["result_json"] = result_json
+    artifacts = details.get("artifacts")
+    if isinstance(artifacts, dict) and artifacts:
+        payload["artifacts"] = artifacts
+    return payload
+
+
+def _suite_summary_payload(suite_name: str, results: list[TaskResult]) -> dict[str, Any]:
+    failed = sum(1 for result in results if result.outcome != "pass")
+    payload = {
+        "suite": suite_name,
+        "policy": "continue",
+        "task_count": len(results),
+        "passed": len(results) - failed,
+        "failed": failed,
+        "return_code": 1 if failed else 0,
+        "results": [_compact_result_payload(result) for result in results],
+    }
+    return payload
+
+
+def _resolve_auto_target(args: argparse.Namespace):
+    target = str(args.task_id)
+    try:
+        task = load_task(target, args.tasks_root)
+    except TaskLoadError:
+        task = None
+
+    suite_tasks = [task for task in list_tasks(args.tasks_root) if task.batch == target]
+    if task is not None and suite_tasks:
+        raise ValueError(f"target is ambiguous (matches both a task and a suite): {target}")
+    if task is not None:
+        return task
+    if suite_tasks:
+        return suite_tasks
+    raise ValueError(f"unknown target (not a known task or suite): {target}")
+
+
 CONTAINER_CATALOG_PATH = Path("/bench/orchestra-config/agent-catalog.yaml")
 CONTAINER_TASKS_ROOT = Path("/bench/task-materials-visible")
 CONTAINER_ROOT = Path("/bench")
 CONTAINER_CONTEXT_ENV = "BENCH_IN_CONTAINER"
 LEGACY_CONTAINER_CONTEXT_ENV = "BENCH_RUN_CONTEXT"
+RUN_PUBLIC_TARGETS = {"pi", "hermes", "opencode"}
+PROJECT_CATALOG_RELPATH = Path("config") / "orchestra" / "agent-catalog.yaml"
+
+
+def _repo_root() -> Path:
+    cwd = Path.cwd().resolve()
+    if cwd.name == "scripts" and cwd.parent != cwd:
+        return cwd.parent
+    return cwd
+
+
+def _has_interactive_tty() -> bool:
+    return all(bool(getattr(stream, "isatty", lambda: False)()) for stream in (sys.stdin, sys.stdout, sys.stderr))
+
+
+def _passthrough_transcript_path(harness: str) -> Path:
+    safe_harness = "".join(char if char.isalnum() or char in {"-", "_", "."} else "-" for char in harness)
+    filename = f"{time.time_ns()}-{safe_harness}.typescript"
+    return _repo_root() / "artifacts" / "02-run" / filename
 
 
 def _inside_container() -> bool:
@@ -112,7 +218,186 @@ def _inside_container() -> bool:
     ) == "container"
 
 
-PROJECT_CATALOG_RELPATH = Path("config") / "orchestra" / "agent-catalog.yaml"
+def _build_run_help_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="bench run",
+        description="Dispatch a harness passthrough or automatic benchmark target.",
+    )
+    parser.add_argument("--tasks-root", type=Path, default=None)
+    parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument("--catalog", type=Path, default=PROJECT_CATALOG_RELPATH)
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument("--role", default=None)
+    parser.add_argument("--notes", default="")
+    parser.add_argument("--catalog-label", default=None)
+    parser.add_argument("--auto", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    orchestra_group = parser.add_mutually_exclusive_group()
+    orchestra_group.add_argument("--orchestra", dest="orchestra", action="store_true")
+    orchestra_group.add_argument("--no-orchestra", dest="orchestra", action="store_false")
+    parser.set_defaults(orchestra=None)
+    parser.add_argument("target", nargs="?", metavar="target")
+    parser.add_argument("argv", nargs=argparse.REMAINDER, metavar="...")
+    return parser
+
+
+def _print_run_help() -> None:
+    print(
+        "\n".join(
+            [
+                "usage: scripts/02-run [--verbose] [--auto <task-or-suite>] pi|hermes|opencode <args...>",
+                "",
+                "Public operator wrapper for harness passthrough and automatic benchmark runs.",
+                "",
+                "Modes:",
+                "  harness passthrough: scripts/02-run pi config",
+                "  automatic runs:      scripts/02-run --auto smoke",
+                "",
+                "Options:",
+                "  -h, --help              show this help message and exit",
+                "  --auto <task-or-suite>  run and score an automatic task or suite",
+                "  --verbose               stream the full session output",
+                "",
+                "Examples:",
+                "  scripts/02-run pi config",
+                "  scripts/02-run pi --help",
+                "  scripts/02-run hermes --help",
+                "  scripts/02-run opencode --version",
+                "  scripts/02-run --auto smoke-dependent-setup-chain",
+                "  scripts/02-run --auto smoke",
+                "  scripts/02-run --verbose",
+            ]
+        )
+    )
+
+
+def _print_public_results_help() -> None:
+    print(
+        "\n".join(
+            [
+                "usage: scripts/03-results [dashboard|runs|run|tokens|timing|debug|compare|rescore|delete]",
+                "",
+                "Inspect, compare, rescore, and safely delete benchmark results.",
+                "",
+                "supported views: dashboard, list(runs), detail(run), debug, tokens, timing, compare, rescore, delete-preview, delete-confirmation",
+                "",
+                "examples:",
+                "  scripts/03-results",
+                "  scripts/03-results runs",
+                "  scripts/03-results run 20250101T010203-alpha-run",
+                "  scripts/03-results debug 20250101T010203-alpha-run",
+                "  scripts/03-results tokens --task alpha-run",
+                "  scripts/03-results timing --suite smoke",
+                "  scripts/03-results compare --task alpha-run",
+                "  scripts/03-results rescore --task alpha-run",
+                "  scripts/03-results delete --task alpha-run  # delete-preview",
+                "  scripts/03-results delete --task alpha-run --yes  # delete-confirmation",
+            ]
+        )
+    )
+
+
+def _consume_run_option(args: argparse.Namespace, raw_args: Sequence[str], index: int) -> int:
+    token = raw_args[index]
+    if token == "--tasks-root":
+        index += 1
+        if index >= len(raw_args):
+            raise ValueError("--tasks-root requires a path")
+        args.tasks_root = Path(raw_args[index])
+        return index + 1
+    if token == "--root":
+        index += 1
+        if index >= len(raw_args):
+            raise ValueError("--root requires a path")
+        args.root = Path(raw_args[index])
+        return index + 1
+    if token == "--catalog":
+        index += 1
+        if index >= len(raw_args):
+            raise ValueError("--catalog requires a path")
+        args.catalog = Path(raw_args[index])
+        return index + 1
+    if token == "--run-id":
+        index += 1
+        if index >= len(raw_args):
+            raise ValueError("--run-id requires a value")
+        args.run_id = raw_args[index]
+        return index + 1
+    if token == "--role":
+        index += 1
+        if index >= len(raw_args):
+            raise ValueError("--role requires a value")
+        args.role = raw_args[index]
+        return index + 1
+    if token == "--notes":
+        index += 1
+        if index >= len(raw_args):
+            raise ValueError("--notes requires a value")
+        args.notes = raw_args[index]
+        return index + 1
+    if token == "--catalog-label":
+        index += 1
+        if index >= len(raw_args):
+            raise ValueError("--catalog-label requires a value")
+        args.catalog_label = raw_args[index]
+        return index + 1
+    if token == "--auto":
+        args.auto = True
+        index += 1
+        if index < len(raw_args) and args.task_id is None:
+            args.task_id = raw_args[index]
+            return index + 1
+        return index
+    if token == "--dry-run":
+        args.dry_run = True
+        return index + 1
+    if token == "--verbose":
+        args.verbose = True
+        return index + 1
+    if token == "--orchestra":
+        args.orchestra = True
+        return index + 1
+    if token == "--no-orchestra":
+        args.orchestra = False
+        return index + 1
+    raise ValueError(f"unknown option: {token}")
+
+
+def _parse_run_argv(raw_args: Sequence[str]) -> argparse.Namespace:
+    args = argparse.Namespace(
+        tasks_root=None,
+        root=None,
+        catalog=PROJECT_CATALOG_RELPATH,
+        run_id=None,
+        role=None,
+        notes="",
+        catalog_label=None,
+        auto=False,
+        dry_run=False,
+        verbose=False,
+        orchestra=None,
+        task_id=None,
+        argv=[],
+    )
+    index = 0
+    while index < len(raw_args):
+        token = raw_args[index]
+        if token in RUN_PUBLIC_TARGETS and not args.auto and args.task_id is None:
+            args.task_id = token
+            args.argv = list(raw_args[index + 1 :])
+            return args
+        if token.startswith("-") or token == "--auto":
+            index = _consume_run_option(args, raw_args, index)
+            continue
+        if args.task_id is None:
+            args.task_id = token
+            index += 1
+            continue
+        if args.auto:
+            raise ValueError(f"unexpected argument after --auto target: {token}")
+        raise ValueError(f"unexpected argument: {token}")
+    return args
 
 
 def _container_catalog_path(catalog: Path) -> Path:
@@ -133,16 +418,22 @@ def cmd_help(parser: argparse.ArgumentParser, _args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_start_summary(summary: dict[str, object]) -> None:
+    runtime = summary.get("runtime") if isinstance(summary.get("runtime"), dict) else {}
+    print("Setup complete:")
+    print(f"  image: {summary.get('image')}")
+    print(f"  container: {summary.get('container')}")
+    print(f"  pi runtime dir: {runtime.get('pi_runtime_dir')}")
+    print(f"  orchestra runtime dir: {runtime.get('orchestra_runtime_dir')}")
+
+
 def cmd_start(args: argparse.Namespace) -> int:
-    if args.start_action == "build":
-        _print_json(build_image(root=args.root or Path.cwd()))
-    elif args.start_action == "start":
-        _print_json(start_container(root=args.root or Path.cwd()))
-    elif args.start_action == "recreate":
-        _print_json(recreate_container(root=args.root or Path.cwd()))
-    else:
-        # init — configure the live Pi/Orchestra runtime (container-side paths)
-        _print_json(runtime_init(RuntimeEnvironment.from_env()))
+    summary = prepare_startup(
+        root=args.root or Path.cwd(),
+        progress=lambda message: print(message, flush=True),
+        stream_build_output=True,
+    )
+    _print_start_summary(summary)
     return 0
 
 
@@ -191,10 +482,11 @@ def _auto_inner_argv(args: argparse.Namespace) -> list[str]:
 
 
 def _run_auto_inside_container(args: argparse.Namespace):  # type: ignore[no-untyped-def]
+    sync_summary = _sync_runtime_config_inside_container()
     completed = container_exec(
         ["python3", "-m", "bench.cli", *_auto_inner_argv(args)],
         workdir=CONTAINER_ROOT,
-        env={CONTAINER_CONTEXT_ENV: "1"},
+        env={CONTAINER_CONTEXT_ENV: "1", **_runtime_env_from_summary(sync_summary)},
         verbose=getattr(args, "verbose", False),
     )
     if not getattr(args, "verbose", False):
@@ -213,6 +505,11 @@ def _run_single_task(
         (catalog, resolved) if catalog is not None and resolved is not None else _resolve_catalog_and_harness(args)
     )
     harness = CommandHarness.from_resolved_config(resolved_config)
+    runtime_snapshot: dict[str, object] | None = None
+    request_env = dict(resolved_config.get("env") or {})
+    if args.auto:
+        runtime_snapshot = load_runtime_config_summary() or None
+        request_env.update(_runtime_env_from_summary(runtime_snapshot))
     return run_and_grade(
         task,
         harness,
@@ -224,27 +521,34 @@ def _run_single_task(
         auto=args.auto,
         notes=args.notes,
         catalog_label=args.catalog_label,
+        runtime_snapshot=runtime_snapshot,
         model=str(resolved_config.get("model") or ""),
         agent=str(resolved_config.get("agent") or ""),
         profile=str(resolved_config.get("profile") or ""),
-        env=dict(resolved_config.get("env") or {}),
+        env=request_env,
     )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    if not _inside_container():
-        if args.auto:
+    argv = list(getattr(args, "argv", []))
+    if args.auto:
+        if not _inside_container():
             return _run_auto_inside_container(args)
+    elif args.task_id in RUN_PUBLIC_TARGETS:
+        passthrough_args = argparse.Namespace(harness=args.task_id, argv=argv, verbose=getattr(args, "verbose", False))
+        return cmd_exec(passthrough_args)
+    elif not _inside_container():
         if args.task_id:
             raise ValueError(
                 "host-side benchmark runs require --auto; use scripts/02-run --auto <task-or-suite> inside the benchmark container"
             )
     if not args.task_id:
-        raise ValueError("a task or suite target is required")
-    try:
-        task = load_task(args.task_id, args.tasks_root)
-    except TaskLoadError:
-        return cmd_run_suite(args)
+        raise ValueError("a task, suite, or harness target is required")
+    resolved_target = _resolve_auto_target(args)
+    if isinstance(resolved_target, list):
+        return cmd_run_suite(args, tasks=resolved_target)
+
+    task = resolved_target
     if args.dry_run:
         payload: dict[str, Any] = {
             "task": _task_payload(task),
@@ -263,18 +567,46 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     result = _run_single_task(args, task)
-    _print_json(result.to_dict())
+    if args.auto:
+        _print_json(_compact_result_payload(result))
+    else:
+        _print_json(result.to_dict())
     return 0
 
 
+def _sync_runtime_config_inside_container() -> dict[str, Any]:
+    completed = container_exec(
+        ["python3", "-m", "bench.runtime", "init-runtime"],
+        workdir=CONTAINER_ROOT,
+        env={CONTAINER_CONTEXT_ENV: "1"},
+        verbose=False,
+    )
+    if completed.returncode != 0:
+        _emit_completed_process(completed)
+        raise RuntimeError(f"in-container runtime config sync failed ({completed.returncode})")
+    stdout = getattr(completed, "stdout", None) or ""
+    return _parse_json_summary_from_stdout(stdout)
+
+
 def cmd_exec(args: argparse.Namespace) -> int:
+    sync_summary = _sync_runtime_config_inside_container()
+    env = {CONTAINER_CONTEXT_ENV: "1"}
+    if args.harness == "pi":
+        # Point the interactive session at the run-scoped runtime dirs that the
+        # in-container sync just populated from the regular config mounts.
+        env.update(_runtime_env_from_summary(sync_summary))
+    interactive = _has_interactive_tty()
+    transcript_path = _passthrough_transcript_path(args.harness) if interactive else None
     completed = container_exec(
         [args.harness, *args.argv],
         workdir=CONTAINER_ROOT,
-        env={CONTAINER_CONTEXT_ENV: "1"},
+        env=env,
         verbose=getattr(args, "verbose", False),
+        interactive=interactive,
+        tty=interactive,
+        transcript_path=transcript_path,
     )
-    if not getattr(args, "verbose", False):
+    if not getattr(args, "verbose", False) and not interactive:
         payload: dict[str, Any] = {
             "container": "orchestra-bench-runner",
             "command": [args.harness, *args.argv],
@@ -288,25 +620,27 @@ def cmd_exec(args: argparse.Namespace) -> int:
     return int(completed.returncode)
 
 
-def cmd_run_suite(args: argparse.Namespace) -> int:
+def cmd_run_suite(args: argparse.Namespace, tasks: list[Any] | None = None) -> int:
     suite_name = str(args.task_id)
-    tasks = [task for task in list_tasks(args.tasks_root) if task.batch == suite_name]
-    if not tasks:
+    resolved_tasks = tasks if tasks is not None else [task for task in list_tasks(args.tasks_root) if task.batch == suite_name]
+    if not resolved_tasks:
         raise ValueError(f"unknown target (not a known task or suite): {suite_name}")
     if args.dry_run:
         payload: dict[str, Any] = {
             "suite": suite_name,
-            "task_count": len(tasks),
-            "tasks": [_task_payload(task) for task in tasks],
+            "policy": "continue",
+            "task_count": len(resolved_tasks),
+            "tasks": [_task_payload(task) for task in resolved_tasks],
             "dry_run": True,
         }
         _print_json(payload)
         return 0
 
     catalog, resolved = _resolve_catalog_and_harness(args)
-    results = [_run_single_task(args, task, catalog=catalog, resolved=resolved).to_dict() for task in tasks]
-    _print_json({"suite": suite_name, "task_count": len(tasks), "results": results})
-    return 0
+    results = [_run_single_task(args, task, catalog=catalog, resolved=resolved) for task in resolved_tasks]
+    summary = _suite_summary_payload(suite_name, results)
+    _print_json(summary)
+    return int(summary["return_code"])
 
 
 def cmd_grade(args: argparse.Namespace) -> int:
@@ -329,6 +663,80 @@ def cmd_suite(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_results_runtime_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument("--tasks-root", type=Path, default=None)
+
+
+def _add_results_selection_args(parser: argparse.ArgumentParser, *, include_limit: bool = True) -> None:
+    parser.add_argument("--task", default=None)
+    parser.add_argument("--suite", default=None)
+    parser.add_argument("--model", default=None)
+    orchestra_group = parser.add_mutually_exclusive_group()
+    orchestra_group.add_argument("--orchestra", dest="orchestra", action="store_true")
+    orchestra_group.add_argument("--no-orchestra", dest="orchestra", action="store_false")
+    parser.set_defaults(orchestra=None)
+    parser.add_argument("--sort", default="finished_at")
+    parser.add_argument("--ascending", action="store_true")
+    if include_limit:
+        parser.add_argument("--limit", type=int, default=None)
+
+
+def _results_sort_reverse(args: argparse.Namespace) -> bool:
+    return not getattr(args, "ascending", False)
+
+
+def _select_results_for_args(args: argparse.Namespace, *, include_limit: bool = True):
+    return select_results(
+        args.root,
+        tasks_dir=getattr(args, "tasks_root", None),
+        task=getattr(args, "task", None),
+        suite=getattr(args, "suite", None),
+        model=getattr(args, "model", None),
+        orchestra=getattr(args, "orchestra", None),
+        sort=getattr(args, "sort", "finished_at"),
+        reverse=_results_sort_reverse(args),
+        limit=getattr(args, "limit", None) if include_limit else None,
+    )
+
+
+def _results_context_line(args: argparse.Namespace, *, include_limit: bool = True) -> str | None:
+    limit = getattr(args, "limit", None) if include_limit else None
+    sort = getattr(args, "sort", "finished_at")
+    reverse = _results_sort_reverse(args)
+    context = describe_filters(
+        task=getattr(args, "task", None),
+        suite=getattr(args, "suite", None),
+        model=getattr(args, "model", None),
+        orchestra=getattr(args, "orchestra", None),
+        sort=sort,
+        reverse=reverse,
+        limit=limit,
+    )
+    if (
+        getattr(args, "task", None) is None
+        and getattr(args, "suite", None) is None
+        and getattr(args, "model", None) is None
+        and getattr(args, "orchestra", None) is None
+        and sort == "finished_at"
+        and reverse
+        and limit is None
+    ):
+        return None
+    return f"selection: {context}"
+
+
+def _print_results_context(args: argparse.Namespace, *, include_limit: bool = True) -> None:
+    context = _results_context_line(args, include_limit=include_limit)
+    if context is not None:
+        print(context)
+
+
+def _require_results_filter(args: argparse.Namespace, action: str) -> None:
+    if all(getattr(args, name, None) is None for name in ("task", "suite", "model", "orchestra")):
+        raise ValueError(f"{action} requires at least one filter")
+
+
 def _find_report_entry(entries, run_ref: str):  # type: ignore[no-untyped-def]
     run_id, task_id = _run_ref_parts(run_ref)
     for entry in entries:
@@ -338,31 +746,65 @@ def _find_report_entry(entries, run_ref: str):  # type: ignore[no-untyped-def]
 
 
 def cmd_results(args: argparse.Namespace) -> int:
-    entries = collect_results(args.root, tasks_dir=getattr(args, "tasks_root", None))
     view = getattr(args, "results_view", None) or "dashboard"
     if view == "dashboard":
+        entries = _select_results_for_args(args)
+        _print_results_context(args)
         sys.stdout.write(format_dashboard(entries))
         return 0
     if view == "runs":
+        entries = _select_results_for_args(args)
+        _print_results_context(args)
         sys.stdout.write(format_runs(entries))
         return 0
     if view == "run":
+        entries = _select_results_for_args(args, include_limit=False)
         entry = _find_report_entry(entries, args.run_ref)
         if entry is None:
             raise ValueError(f"run not found: {args.run_ref}")
+        _print_results_context(args, include_limit=False)
         sys.stdout.write(format_run_detail(entry))
         return 0
     if view == "tokens":
+        entries = _select_results_for_args(args)
+        _print_results_context(args)
         sys.stdout.write(format_tokens(entries))
         return 0
     if view == "timing":
+        entries = _select_results_for_args(args)
+        _print_results_context(args)
         sys.stdout.write(format_timing(entries))
         return 0
     if view == "debug":
+        entries = _select_results_for_args(args, include_limit=False)
         entry = _find_report_entry(entries, args.run_ref)
+        if entry is None:
+            raise ValueError(f"run not found: {args.run_ref}")
         run_paths = _resolve_run_paths(args.root, args.run_ref)
         report = build_debug_report(run_paths, entry=entry)
+        _print_results_context(args, include_limit=False)
         sys.stdout.write(format_debug_report(report))
+        return 0
+    if view == "compare":
+        entries = _select_results_for_args(args)
+        _print_results_context(args)
+        sys.stdout.write(format_compare_results(compare_results(entries)))
+        return 0
+    if view == "rescore":
+        entries = _select_results_for_args(args)
+        _print_results_context(args)
+        results = rescore_results(entries, root=args.root, tasks_dir=args.tasks_root)
+        sys.stdout.write(format_rescore_report(entries, results, root=args.root))
+        return 0
+    if view == "delete":
+        _require_results_filter(args, "delete")
+        entries = _select_results_for_args(args)
+        _print_results_context(args)
+        if not getattr(args, "yes", False):
+            sys.stdout.write(format_delete_preview(entries, root=args.root, confirmed=False))
+            return 0
+        delete_results(entries, root=args.root, confirmed=True)
+        sys.stdout.write(format_delete_preview(entries, root=args.root, confirmed=True))
         return 0
     raise ValueError(f"unknown results view: {view}")
 
@@ -392,6 +834,13 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return runtime_doctor()
 
 
+def _run_main(raw_args: Sequence[str]) -> int:
+    if raw_args and raw_args[0] in {"-h", "--help", "help"}:
+        _print_run_help()
+        return 0
+    return cmd_run(_parse_run_argv(raw_args))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bench", description="Benchmark CLI")
     subparsers = parser.add_subparsers(dest="command", metavar="{help,start,run,results,debug,doctor}")
@@ -401,13 +850,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     start_parser = subparsers.add_parser(
         "start",
-        help="build/start/recreate benchmark container or configure the live runtime",
-        description=(
-            "Actions: build — docker image; start — reuse/start/create long-lived container; "
-            "recreate — replace the container; init — in-container Pi/Orchestra config sync."
-        ),
+        help="complete benchmark container setup",
+        description="Build the image, recreate the container, and sync runtime config.",
     )
-    start_parser.add_argument("start_action", choices=list(START_ACTIONS), metavar="{build,start,recreate,init}")
     start_parser.add_argument("--root", type=Path, default=None)
     start_parser.set_defaults(_handler=cmd_start)
 
@@ -420,6 +865,7 @@ def build_parser() -> argparse.ArgumentParser:
         "run", help="prepare and run one task or suite target inside the benchmark container"
     )
     run_parser.add_argument("task_id", nargs="?", metavar="target")
+    run_parser.add_argument("argv", nargs=argparse.REMAINDER)
     run_parser.add_argument("--tasks-root", type=Path, default=None)
     run_parser.add_argument("--root", type=Path, default=None)
     run_parser.add_argument("--catalog", type=Path, default=PROJECT_CATALOG_RELPATH)
@@ -454,29 +900,57 @@ def build_parser() -> argparse.ArgumentParser:
     suite_parser.set_defaults(_handler=cmd_suite)
 
     results_parser = subparsers.add_parser("results", help="summarize results")
-    results_parser.add_argument("--root", type=Path, default=None)
-    results_parser.add_argument("--tasks-root", type=Path, default=None)
+    _add_results_runtime_args(results_parser)
+    _add_results_selection_args(results_parser)
     results_subparsers = results_parser.add_subparsers(dest="results_view")
 
     results_dashboard = results_subparsers.add_parser("dashboard", help="show the result dashboard")
+    _add_results_runtime_args(results_dashboard)
+    _add_results_selection_args(results_dashboard)
     results_dashboard.set_defaults(results_view="dashboard")
 
     results_runs = results_subparsers.add_parser("runs", help="list runs")
+    _add_results_runtime_args(results_runs)
+    _add_results_selection_args(results_runs)
     results_runs.set_defaults(results_view="runs")
 
     results_run = results_subparsers.add_parser("run", help="show one run")
     results_run.add_argument("run_ref")
+    _add_results_runtime_args(results_run)
+    _add_results_selection_args(results_run, include_limit=False)
     results_run.set_defaults(results_view="run")
 
     results_tokens = results_subparsers.add_parser("tokens", help="show token summary")
+    _add_results_runtime_args(results_tokens)
+    _add_results_selection_args(results_tokens)
     results_tokens.set_defaults(results_view="tokens")
 
     results_timing = results_subparsers.add_parser("timing", help="show timing summary")
+    _add_results_runtime_args(results_timing)
+    _add_results_selection_args(results_timing)
     results_timing.set_defaults(results_view="timing")
 
     results_debug = results_subparsers.add_parser("debug", help="show a debug artifact summary")
     results_debug.add_argument("run_ref")
+    _add_results_runtime_args(results_debug)
+    _add_results_selection_args(results_debug, include_limit=False)
     results_debug.set_defaults(results_view="debug")
+
+    results_compare = results_subparsers.add_parser("compare", help="compare filtered results")
+    _add_results_runtime_args(results_compare)
+    _add_results_selection_args(results_compare)
+    results_compare.set_defaults(results_view="compare")
+
+    results_rescore = results_subparsers.add_parser("rescore", help="regrade filtered results")
+    _add_results_runtime_args(results_rescore)
+    _add_results_selection_args(results_rescore)
+    results_rescore.set_defaults(results_view="rescore")
+
+    results_delete = results_subparsers.add_parser("delete", help="delete filtered results")
+    _add_results_runtime_args(results_delete)
+    _add_results_selection_args(results_delete)
+    results_delete.add_argument("--yes", action="store_true")
+    results_delete.set_defaults(results_view="delete")
 
     results_parser.set_defaults(_handler=cmd_results)
 
@@ -492,8 +966,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    if raw_argv and raw_argv[0] == "run":
+        try:
+            return _run_main(raw_argv[1:])
+        except Exception as exc:  # pragma: no cover - exercised by CLI smoke on success paths
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    if raw_argv and raw_argv[0] == "results" and len(raw_argv) > 1 and raw_argv[1] in {"-h", "--help", "help"}:
+        _print_public_results_help()
+        return 0
     parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    args = parser.parse_args(raw_argv)
     if not hasattr(args, "_handler"):
         parser.print_help()
         return 0

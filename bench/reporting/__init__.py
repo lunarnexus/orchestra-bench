@@ -2,6 +2,16 @@
 
 from .debug import DebugReport, build_debug_report, format_debug_report
 from .formatters import format_dashboard, format_run_detail, format_runs, format_timing, format_tokens
+from .management import (
+    compare_results,
+    delete_results,
+    describe_filters,
+    format_compare_results,
+    format_delete_preview,
+    format_rescore_report,
+    rescore_results,
+    select_results,
+)
 from .queries import ReportEntry, collect_results, filter_results, sort_results
 
 __all__ = [
@@ -14,6 +24,14 @@ __all__ = [
     "format_run_detail",
     "format_tokens",
     "format_timing",
+    "compare_results",
+    "delete_results",
+    "describe_filters",
+    "format_compare_results",
+    "format_delete_preview",
+    "format_rescore_report",
+    "rescore_results",
+    "select_results",
     "DebugReport",
     "build_debug_report",
     "format_debug_report",

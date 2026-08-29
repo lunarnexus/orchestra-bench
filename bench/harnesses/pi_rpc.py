@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from bench.harnesses.base import BaseHarness, HarnessRequest, LifecycleEvent
 from bench.harnesses.process import build_process_env
+from bench.workspace import workspace_dir
 from bench.result import HarnessResult
 
 
@@ -206,7 +207,7 @@ class PiRpcHarness(BaseHarness):
         request.artifacts.transcript_path.write_text("", encoding="utf-8")
         request.artifacts.log_path.write_text("", encoding="utf-8")
         env = build_process_env(configured_env=self.env, request_env=request.env)
-        self._process = self.process_factory(command=list(self.command), cwd=request.run_paths.container_workdir, env=env)
+        self._process = self.process_factory(command=list(self.command), cwd=workspace_dir(request.run_paths), env=env)
 
     def _require_started(self) -> tuple[HarnessRequest, _JsonlProcess]:
         if self._request is None or self._process is None:

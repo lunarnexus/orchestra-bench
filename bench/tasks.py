@@ -56,9 +56,6 @@ def _default_tasks_root() -> Path:
     env = os.environ.get("BENCH_TASKS")
     if env:
         return Path(env).expanduser()
-    v1_tasks = _REPO_ROOT / "V1" / "tasks"
-    if v1_tasks.is_dir():
-        return v1_tasks
     return _REPO_ROOT / "tasks"
 
 

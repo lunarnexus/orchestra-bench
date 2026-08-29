@@ -17,6 +17,7 @@ from bench.evaluator import EvaluationError, EvaluatorRunner, grade_run as _grad
 from bench.paths import RepoPaths, RunPaths
 from bench.provenance import build_run_metadata
 from bench.result import EvaluationResult, HarnessResult, RunMeta, TaskResult, load_result, write_json_atomic
+from bench.runtime import load_runtime_config_summary
 from bench.tasks import TaskDefinition
 from bench.workspace import prepare_workspace
 
@@ -190,6 +191,10 @@ def prepare_run(
     run_paths.run_dir.mkdir(parents=True, exist_ok=True)
     HarnessArtifactPaths.for_run_paths(run_paths).root.mkdir(parents=True, exist_ok=True)
     EvaluatorArtifactPaths.for_run_paths(run_paths).root.mkdir(parents=True, exist_ok=True)
+    if runtime_snapshot is None:
+        # Merge the last effective regular-config overlay recorded by
+        # `sync_runtime_config` so persisted run metadata names the exact config files.
+        runtime_snapshot = load_runtime_config_summary() or None
     prior_result = _load_prior_result(run_paths)
     workspace = prepare_workspace(task, run_paths)
     started_at = _now_iso()
@@ -228,6 +233,7 @@ def _result_details(prepared: PreparedRun, request: HarnessRequest) -> dict[str,
     return {
         "workspace": str(prepared.run_paths.run_dir / "workspace"),
         "bench_run_json": str(prepared.run_paths.bench_run_json),
+        "result_json": str(prepared.run_paths.result_json),
         "provenance": dict(prepared.provenance),
         "artifacts": {
             "harness": {

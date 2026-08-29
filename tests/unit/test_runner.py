@@ -264,6 +264,7 @@ def test_run_and_grade_success_writes_bench_run_summary_and_final_result(tmp_pat
     assert result.run_meta.started_at
     assert result.run_meta.finished_at
     assert load_result(prepared.run_paths.result_json) == result
+    assert result.details["result_json"] == str(prepared.run_paths.result_json)
     assert json.loads(prepared.run_paths.result_json.read_text(encoding="utf-8"))["run_meta"]["finished_at"]
     assert json.loads(prepared.run_paths.artifacts_dir.joinpath("harness", "summary.json").read_text(encoding="utf-8"))["status"] == "ok"
 
@@ -363,3 +364,32 @@ def test_prepare_run_writes_operator_readable_bench_run(tmp_path: Path) -> None:
     prepared = prepare_run(task, root=tmp_path, run_id="20250101T010203", provenance=provenance)
 
     assert prepared.run_paths.bench_run_json.stat().st_mode & 0o777 == 0o644
+
+
+def test_prepare_run_persists_synced_config_overlay_in_provenance(tmp_path: Path, monkeypatch) -> None:
+    task_dir = tmp_path / "tasks" / "alpha-run"
+    _write_task(task_dir)
+    task = load_task(task_dir, tmp_path / "tasks")
+    catalog_path = tmp_path / "config" / "orchestra" / "agent-catalog.yaml"
+    _write_catalog(catalog_path)
+
+    results_root = tmp_path / "results"
+    results_root.mkdir()
+    overlay = {
+        "pi_config_files": ["lmstudio.json", "settings.json"],
+        "pi_config_sha256": "31d0aa4a8e4c0bf7",
+        "hermes_config_files": ["config.yaml"],
+        "hermes_config_sha256": "9f2cddba",
+        "opencode_config_files": [],
+        "opencode_config_sha256": "",
+    }
+    (results_root / "runtime-config-sync.json").write_text(json.dumps(overlay), encoding="utf-8")
+    monkeypatch.setenv("BENCH_RESULTS", str(results_root))
+
+    prepared = prepare_run(task, root=tmp_path, run_id="20250101T010203", catalog_path=catalog_path)
+
+    for key in overlay:
+        assert prepared.provenance[key] == overlay[key]
+    bench_run = json.loads(prepared.run_paths.bench_run_json.read_text(encoding="utf-8"))
+    assert bench_run["provenance"]["pi_config_files"] == ["lmstudio.json", "settings.json"]
+    assert bench_run["config"]["hermes_config_sha256"] == "9f2cddba"

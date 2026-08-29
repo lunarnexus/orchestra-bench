@@ -1,65 +1,47 @@
 
-## Slice 1.2 — Worktree and cleanup boundary inventory
+## Slice 1.4 — Official harness installation research
 
-This inventory is read-only evidence. It does not authorize deletion, migration, staging, or committing.
+Sources consulted:
 
-### Current worktree evidence
+- Hermes official installation guide: https://hermes-agent.nousresearch.com/docs/getting-started/installation
+- Hermes official CLI reference: https://hermes-agent.nousresearch.com/docs/reference/cli-commands
+- OpenCode official installation guide: https://opencode.ai/docs/
+- OpenCode official config guide: https://opencode.ai/docs/config/
 
-- Tracked deletions: 320 total, including 265 task files, 34 tests, 8 scripts, and 4 bench files.
-- Untracked paths: 415 total, including the 347-path `V1/` reference tree, 22 V2 `bench/` files, 19 V2 tests, 6 scripts, and 16 `.workspace` paths.
-- Tracked modifications include `PLAN.md`, `RESEARCH.md`, `docker/Dockerfile`, `docker/entrypoint.sh`, `pytest.ini`, `scripts/01-start`, `scripts/03-results`, and `config/orchestra/agent-catalog.yaml`.
-- Generated/ignored outputs include caches, `results/`, and `artifacts/`.
+### Hermes
 
-### Keep as current V2
+Official Linux command-line installation:
 
-- `bench/**`
-- `docker/Dockerfile`
-- `docker/entrypoint.sh`
-- `scripts/01-start`, `scripts/02-run`, `scripts/03-results`
-- `config/orchestra/agent-catalog.yaml`
-- `config/pi/{lmstudio.json,settings.json}`
-- `config/skills/**`
-- `tests/unit/**`, `tests/integration/**`
-- `DECISIONS.md`, `PLAN.md`, `RESEARCH.md`, `pytest.ini`
+```bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+```
 
-### Keep as reference-only
+The official installer handles dependencies, repository clone, virtual environment, and the `hermes` command. In root mode it uses `/usr/local/lib/hermes-agent/` for code and `/usr/local/bin/hermes` for the command; per-user mode uses `~/.hermes/hermes-agent/` and `~/.local/bin/hermes`. Normal configuration is under `~/.hermes/`: secrets in `.env`, non-secret settings in `config.yaml`.
 
-- `V1/**`, including `V1/docker/Dockerfile`, `V1/scripts/**`, `V1/tasks/**`, and `V1/tests/**`.
+For the root-run benchmark container, root-mode installation and `/root/.hermes/` runtime/config paths match the documented layout. The Docker build should use the official installer in a cacheable install layer and must not silently copy host credentials into the image.
 
-V1 must not be built, executed, imported, mounted, or used as a V2 runtime dependency. It currently cannot be removed safely because V2 task discovery still falls back to `V1/tasks` and current task tests assert that behavior. That dependency must be removed before deleting the reference tree.
+### OpenCode
 
-### Migrate later
+Official v1 installation options include:
 
-- deleted root `tasks/**` into the future V2 root `tasks/**`
-- deleted flat root tests into `tests/unit/**` and `tests/integration/**`
-- legacy runtime files into their reviewed V2 replacements
-- old operator scripts into the three-script surface only where behavior is explicitly retained
+```bash
+curl -fsSL https://opencode.ai/install | bash
+# or
+npm install -g opencode-ai
+```
 
-### Remove candidates after impact review
+The current V2 Dockerfile already has Node/npm, so the documented npm installation is the simplest Docker build input. The official CLI is `opencode` (not the separate beta `opencode2` documented at `opencode.ai/v2`).
 
-- `.pytest_cache/`, `.ruff_cache/`, `.codegraph/`, Python `__pycache__/`
-- generated `artifacts/`, `results/`, `V1/artifacts/`, and `V1/results/`
-- empty `docs/`
+OpenCode configuration is JSON/JSONC and uses merged precedence. Documented locations include global `/root/.config/opencode/opencode.json`, project `opencode.json`, and a custom directory selected with `OPENCODE_CONFIG_DIR`. The project config tree should therefore override the container's global config through the documented custom-directory or global-config path, without inventing a new OpenCode format.
 
-### Cleanup applied
+### Cache/install conclusion
 
-- Removed stale `.bench-dogfood/` residue.
-- Removed obsolete numbered wrappers `scripts/03-grade`, `scripts/04-suite`, `scripts/05-results`.
-- Removed alias-only `scripts/_collect-results`.
-- Preserved `V1/**`, `config/orchestra` variant files, and `.workspace/`.
+The available evidence supports these implementation choices without guessing package identity:
 
-### Proposed recoverable checkpoint boundary
+- install Hermes with the official installer
+- install OpenCode v1 with the official `opencode-ai` npm package
+- keep both installations in cached Docker layers before the source/plugin cache-bust boundary
+- apply project config overrides after installation, using each harness's documented paths
+- keep Pi RPC/Orchestra lifecycle work deferred until the final feature phase, after ordinary harnesses, task/suite automation, and results management are working
 
-Before further implementation, checkpoint the current V2 source, tests, documentation, Docker files, config, and complete `V1/` reference tree together. Exclude generated outputs, caches, editor residue, and unapproved scratch material. Do not finalize tracked deletions or delete uncertain config variants until the owner approves the boundary.
-
-### Mismatches requiring planned work
-
-- V2 still has a runtime dependency on `V1/tasks`.
-- The regular `config/hermes/` and `config/opencode/` directories do not exist.
-- Deprecated numbered wrappers removed.
-- The stale `.bench-dogfood` residue was removed; it was not a valid project config path.
-- The V2 replacement/deletion boundary is not yet committed or otherwise checkpointed.
-
-### Slice 1.2 conclusion
-
-The inventory is complete, but its gate is intentionally pending owner approval for uncertain deletions and the recoverable checkpoint boundary. No cleanup or checkpoint should proceed until that approval is given.
+Exact version pinning remains an implementation choice to resolve from project reproducibility requirements; do not claim a pinned version unless one is selected and recorded.

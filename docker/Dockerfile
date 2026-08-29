@@ -17,25 +17,10 @@ RUN apt-get update && \
 
 RUN python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn pytest httpx django
 RUN npm install -g @earendil-works/pi-coding-agent@latest express
+RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+RUN npm install -g opencode-ai
 ENV NODE_PATH=/usr/local/lib/node_modules:/usr/lib/node_modules
 RUN gem install --no-document sinatra sqlite3 rack-test minitest
-
-COPY config/pi/settings.json /tmp/bench-pi-settings.json
-RUN mkdir -p /root/.pi/agent && \
-    python3 - <<'PY'
-import json
-from pathlib import Path
-source = Path('/tmp/bench-pi-settings.json')
-target = Path('/root/.pi/agent/settings.json')
-base = json.loads(target.read_text()) if target.exists() else {}
-patch = json.loads(source.read_text()) if source.exists() else {}
-base.update(patch)
-target.write_text(json.dumps(base, indent=2) + '\n')
-PY
-
-COPY config/skills/ /tmp/bench-skills/
-RUN mkdir -p /root/.pi/agent/skills && \
-    cp -a /tmp/bench-skills/. /root/.pi/agent/skills/
 
 ARG SOURCE_PLUGIN_CACHE_BUST="manual"
 
@@ -57,10 +42,14 @@ ENV BENCH_TASKS=/bench/task-materials-visible \
     BENCH_ARTIFACTS=/bench/artifacts \
     BENCH_WORKSPACE=/workspace \
     BENCH_ORCHESTRA_CONFIG_SRC=/bench/orchestra-config \
-    BENCH_LMSTUDIO_CONFIG_SRC=/bench/pi/lmstudio.json \
-    BENCH_PI_SKILLS_SRC=/bench/skills
+    BENCH_PI_CONFIG_SRC=/bench/pi \
+    BENCH_HERMES_CONFIG_SRC=/bench/hermes \
+    BENCH_OPENCODE_CONFIG_SRC=/bench/opencode \
+    BENCH_PI_SKILLS_SRC=/bench/skills \
+    PI_HERMES_RUNTIME_DIR=/root/.hermes \
+    PI_OPENCODE_RUNTIME_DIR=/root/.config/opencode
 
-RUN mkdir -p "$BENCH_TASKS" "$BENCH_RESULTS" "$BENCH_ARTIFACTS" "$BENCH_WORKSPACE" /bench/orchestra-config /bench/skills /bench/pi /root/.pi/agent
+RUN mkdir -p "$BENCH_TASKS" "$BENCH_RESULTS" "$BENCH_ARTIFACTS" "$BENCH_WORKSPACE" /bench/orchestra-config /bench/skills /bench/pi /bench/hermes /bench/opencode /root/.pi/agent /root/.hermes /root/.config/opencode
 
 COPY bench/ /opt/orchestra-bench/bench/
 COPY docker/entrypoint.sh /usr/local/bin/bench-entrypoint

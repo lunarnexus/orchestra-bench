@@ -44,7 +44,7 @@ class CommandHarness(BaseHarness):
         return _TemplateValues(
             prompt=request.prompt,
             model=request.model,
-            workdir=request.run_paths.container_workdir,
+            workdir=str(workspace_dir(request.run_paths)),
             agent=request.agent,
             profile=request.profile,
         )

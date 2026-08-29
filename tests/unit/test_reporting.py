@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
-from bench.result import EvaluationResult, HarnessResult, RunMeta, TaskResult, write_json_atomic
+from bench.evaluator import EvaluationError
+from bench.result import EvaluationResult, HarnessResult, RunMeta, TaskResult, load_result, write_json_atomic
 
 
 def _write_task(task_root: Path, task_id: str, *, batch: str = "smoke") -> None:
@@ -174,3 +174,43 @@ def test_collect_results_ignores_missing_results(tmp_path: Path) -> None:
     from bench.reporting.queries import collect_results
 
     assert collect_results(tmp_path / "results") == []
+
+
+def test_select_compare_and_rescore_preserve_reporting_data(reporting_data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bench.reporting.management import compare_results, describe_filters, rescore_results, select_results, format_compare_results
+
+    entries = select_results(
+        reporting_data / "results",
+        tasks_dir=reporting_data / "tasks",
+        task="task-a",
+        sort="total_tokens",
+        reverse=False,
+        limit=1,
+    )
+    assert [entry.run_id for entry in entries] == ["20250101T010103"]
+    assert describe_filters(task="task-a", sort="total_tokens", reverse=False, limit=1) == "task=task-a, sort=total_tokens asc, limit=1"
+
+    summary = compare_results(select_results(reporting_data / "results", tasks_dir=reporting_data / "tasks", task="task-a"))
+    assert summary["runs"] == 2
+    assert summary["passed"] == 2
+    assert summary["failed"] == 0
+    assert summary["groups"][0]["suite"] == "smoke"
+    assert "suite=smoke" in format_compare_results(summary)
+
+    original_path = reporting_data / "results" / "20250101T010103-task-a" / "result.json"
+    before = load_result(original_path).to_dict()
+
+    def fake_grade_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise EvaluationError("boom", classification="crash")
+
+    monkeypatch.setattr("bench.runner._grade_run", fake_grade_run, raising=False)
+
+    results = rescore_results(
+        select_results(reporting_data / "results", tasks_dir=reporting_data / "tasks", task="task-a"),
+        root=reporting_data,
+        tasks_dir=reporting_data / "tasks",
+    )
+
+    after = load_result(original_path).to_dict()
+    assert after == before
+    assert len(results) == 2
