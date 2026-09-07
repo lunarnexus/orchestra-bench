@@ -75,18 +75,17 @@ def snapshot_aux_skills(skills_dir: Path | str) -> dict[str, object]:
 def snapshot_catalog_runtime(catalog_path: Path | str) -> dict[str, object]:
     catalog = load_catalog(catalog_path)
     role_models: dict[str, str] = {}
-    enabled_roles: list[str] = []
+    catalog_roles: list[str] = []
     for role_name, role_config in sorted(catalog.roles.items()):
+        catalog_roles.append(role_name)
         if role_config.model:
             role_models[role_name] = role_config.model
-        if role_config.enabled:
-            enabled_roles.append(role_name)
     return {
         "role_models": role_models,
         "role_models_summary": _summarize_role_models(role_models),
         "role_models_sha256": _stable_object_sha256(role_models),
-        "enabled_roles": enabled_roles,
-        "enabled_roles_summary": ",".join(enabled_roles) if enabled_roles else "none",
+        "catalog_roles": catalog_roles,
+        "catalog_roles_summary": ",".join(catalog_roles) if catalog_roles else "none",
     }
 
 
@@ -97,6 +96,37 @@ def _summarize_role_models(role_models: dict[str, str]) -> str:
     if len(unique_models) == 1:
         return f"all={next(iter(unique_models))}"
     return ", ".join(f"{role}={model}" for role, model in sorted(role_models.items()))
+
+
+def orchestra_tools_executed_from_events(run_dir: Path | str) -> bool | None:
+    """Observed Orchestra tool execution, derived only from actual harness events.
+
+    True when a non-error ``orch_dispatch`` tool execution completed in the run's
+    harness event log; False when the event log exists but records no such
+    execution; None when there is no readable event source (unproven). Never
+    inferred from CLI flags or configured availability.
+    """
+    events_path = Path(run_dir) / "artifacts" / "harness" / "events.jsonl"
+    if not events_path.is_file():
+        return None
+    for line in events_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("type") or "") != "tool_execution_end":
+            continue
+        if str(event.get("toolName") or "") != "orch_dispatch":
+            continue
+        if event.get("isError"):
+            continue
+        return True
+    return False
 
 
 def build_run_metadata(
@@ -110,12 +140,36 @@ def build_run_metadata(
     notes: str = "",
     catalog_label: str | None = None,
     runtime_snapshot: dict[str, object] | None = None,
+    no_orchestra: bool | None = None,
+    no_orch_on: bool | None = None,
+    orchestra_tools_available: bool | None = None,
+    orchestra_tools_executed: bool | None = None,
 ) -> dict[str, object]:
     meta = {
         "run_id": run_id,
         "task_id": task_id,
         **resolve_harness_for_role(catalog_path, role=role),
         "orchestra": orchestra,
+        # Explicit mode flags so the three auto modes are distinguishable from raw JSON alone.
+        "no_orchestra": bool(no_orchestra) if no_orchestra is not None else None,
+        "no_orch_on": bool(no_orch_on) if no_orch_on is not None else None,
+        # /orch on was requested for this run when Orchestra mode was effective and the skip flag was not set.
+        "orch_on_requested": (
+            (bool(orchestra) and not bool(no_orch_on))
+            if orchestra is not None or no_orch_on is not None
+            else None
+        ),
+        # null when tool availability cannot be determined at provenance construction time
+        "orchestra_tools_available": (
+            bool(orchestra_tools_available) if orchestra_tools_available is not None else None
+        ),
+        # Observed execution, separate from configured availability: true only on an actual
+        # non-error orch_dispatch tool event. Filled in by the runner after grading.
+        "orchestra_tools_executed": (
+            bool(orchestra_tools_executed) if orchestra_tools_executed is not None else None
+        ),
+        # Filled in by the runner after grading when dispatch/tool activity can be inspected.
+        "tool_orchestration_without_orch_on": None,
         "auto": auto,
         "extra_skills": list(extra_skills or []),
         "notes": notes,

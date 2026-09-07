@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -11,6 +12,7 @@ from bench.artifacts import EvaluatorArtifactPaths
 from bench.harnesses.base import HarnessArtifactPaths
 from bench.paths import RunPaths
 from bench.reporting.queries import ReportEntry
+from bench.reporting.usage_metrics import _is_child_session
 from bench.result import TaskResult, load_result
 
 _SNAPSHOT_KEYS = {
@@ -52,6 +54,22 @@ class DebugOrchestrationSnapshot:
 
 
 @dataclass(frozen=True)
+class DebugChildSession:
+    path: Path
+    session_id: str = ""
+    role: str = "worker"
+    provider: str = ""
+    model: str = ""
+    status: str = ""
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["path"] = str(self.path)
+        return payload
+
+
+@dataclass(frozen=True)
 class DebugReport:
     run_id: str
     task_id: str
@@ -72,6 +90,7 @@ class DebugReport:
     evaluator_manifest: dict[str, Any] = field(default_factory=dict)
     artifacts: tuple[DebugArtifactStatus, ...] = ()
     orchestration_snapshots: tuple[DebugOrchestrationSnapshot, ...] = ()
+    child_sessions: tuple[DebugChildSession, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -79,6 +98,7 @@ class DebugReport:
         payload["result_path"] = str(self.result_path)
         payload["artifacts"] = [artifact.to_dict() for artifact in self.artifacts]
         payload["orchestration_snapshots"] = [snapshot.to_dict() for snapshot in self.orchestration_snapshots]
+        payload["child_sessions"] = [session.to_dict() for session in self.child_sessions]
         return payload
 
 
@@ -243,6 +263,233 @@ def _load_orchestration_snapshots(path: Path) -> tuple[DebugOrchestrationSnapsho
     return tuple(snapshots)
 
 
+_CHILD_ROLE_RE = re.compile(r"^orchestra-([a-z]+)-")
+_ORCHESTRA_RUN_ID_RE = re.compile(r"orchestra-[a-z]+-(\S+)")
+_ROLE_META_RE = re.compile(r"^Role:\s*([A-Za-z0-9_-]+)")
+_TERMINAL_SIGNAL_RE = re.compile(r"(?:^|\n)\s*(?:Status|Verdict):\s*([A-Za-z_]+)", re.MULTILINE)
+_CONSOLIDATED_RETURN_RE = re.compile(
+    r"\[orchestra:\s*([a-z][a-z0-9_-]*)\s+([A-Za-z0-9._:-]+)\s+(success|completed|failed|fail|error)\]"
+)
+
+
+def _child_role(path: Path) -> str:
+    match = _CHILD_ROLE_RE.match(path.stem)
+    return match.group(1) if match else "worker"
+
+
+def _message_text(message: Any) -> str:
+    if isinstance(message, str):
+        return message
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(str(block["text"]))
+        return "\n".join(parts)
+    return ""
+
+
+def _first_session_id(path: Path) -> str:
+    try:
+        first_line = next(
+            (line.strip() for line in path.open(encoding="utf-8", errors="replace") if line.strip()),
+            "",
+        )
+    except OSError:
+        return ""
+    try:
+        event = json.loads(first_line) if first_line else {}
+    except json.JSONDecodeError:
+        return ""
+    return str(event.get("id")) if isinstance(event, dict) and event.get("type") == "session" else ""
+
+
+def _consolidated_child_returns(sessions_dir: Path) -> dict[str, tuple[str, str]]:
+    """Map child run id -> (role, status) from parent-session consolidated returns.
+
+    Scans non-child session transcripts for ``[orchestra: <role> <runid> success|failed]``
+    lines injected with the consolidated subagent return. Last occurrence wins per run id.
+    """
+    returns: dict[str, tuple[str, str]] = {}
+    if not sessions_dir.is_dir():
+        return returns
+    for path in sorted(sessions_dir.rglob("*.jsonl")):
+        if not path.is_file():
+            continue
+        session_id = _first_session_id(path)
+        # Parent (non-child) transcripts only; child files are scanned separately.
+        if _is_child_session(path, session_id or path.stem) or _CHILD_ROLE_RE.match(path.stem):
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = event.get("message") if isinstance(event, dict) else None
+            if not isinstance(message, dict):
+                continue
+            for role, run_id, outcome in _CONSOLIDATED_RETURN_RE.findall(_message_text(message)):
+                status = "completed" if outcome in {"success", "completed"} else "failed"
+                returns[run_id] = (role.lower(), status)
+    return returns
+
+
+def _child_run_id_candidates(stem: str, session_id: str) -> set[str]:
+    candidates = {stem}
+    if session_id:
+        candidates.add(session_id)
+    # The run id may sit after a timestamp prefix (e.g. "2026-..._orchestra-worker-<id>").
+    for source in (stem, session_id or ""):
+        match = _ORCHESTRA_RUN_ID_RE.search(source)
+        if match:
+            candidates.add(match.group(1))
+    return {candidate for candidate in candidates if candidate}
+
+
+def _scan_child_session(
+    path: Path,
+    session_id: str,
+    consolidated: tuple[str, str] | None = None,
+) -> DebugChildSession:
+    provider = ""
+    model = ""
+    error_reason = ""
+    failed = False
+    role_meta = ""
+    terminal_signal = ""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "session" and session_id == "" and event.get("id"):
+            session_id = str(event["id"])
+        elif event.get("type") == "model_change":
+            provider = str(event.get("provider") or "")
+            model = str(event.get("modelId") or "")
+
+        message = event.get("message") if isinstance(event.get("message"), dict) else None
+        if message is not None:
+            text = _message_text(message)
+            role = str(message.get("role") or "")
+            if role == "user" and not role_meta:
+                match = _ROLE_META_RE.match(text)
+                if match:
+                    role_meta = match.group(1).lower()
+            elif role == "assistant":
+                matches = _TERMINAL_SIGNAL_RE.findall(text)
+                if matches:
+                    terminal_signal = matches[-1].lower()
+
+        if not failed and (event.get("type") == "error" or _message_is_error(event)):
+            failed = True
+            reason = event.get("message")
+            error_reason = reason if isinstance(reason, str) else json.dumps(event)
+    # Precedence: the child's own terminal signal is authoritative; otherwise a
+    # matching parent consolidated return decides; then error events; else incomplete.
+    if terminal_signal in {"complete", "pass", "passed"}:
+        status = "completed"
+        reason = ""  # terminal success clears intermediate error reasons
+    elif terminal_signal in {"fail", "failed"}:
+        status = "failed"
+        reason = error_reason
+    elif consolidated is not None and consolidated[1] == "completed":
+        # Role/status come from the consolidated return; it was matched by run id.
+        role_meta = consolidated[0]
+        status = "completed"
+        reason = ""
+    elif consolidated is not None:
+        role_meta = consolidated[0]
+        status = "failed"
+        reason = error_reason or f"parent consolidated return reports {consolidated[0]} run as failed"
+    else:
+        status = "failed" if failed else "incomplete"
+        reason = error_reason
+    return DebugChildSession(
+        path=path,
+        session_id=session_id or path.stem,
+        role=role_meta or _child_role(path),
+        provider=provider,
+        model=model,
+        status=status,
+        reason=reason,
+    )
+
+
+def _message_is_error(event: dict[str, Any]) -> bool:
+    message = event.get("message")
+    return isinstance(message, dict) and bool(message.get("isError"))
+
+
+def scan_child_sessions(run_paths: RunPaths) -> tuple[DebugChildSession, ...]:
+    """Parse copied child session transcripts under artifacts/pi-sessions (no fallback entry)."""
+    sessions_dir = run_paths.pi_sessions_dir
+    if not sessions_dir.is_dir():
+        return ()
+    consolidated_returns = _consolidated_child_returns(sessions_dir)
+    children: list[DebugChildSession] = []
+    for path in sorted(sessions_dir.rglob("*.jsonl")):
+        if not path.is_file():
+            continue
+        session_id = _first_session_id(path)
+        # Reuse the usage-metrics child heuristic; additionally treat any
+        # "orchestra-<role>-..." transcript as a child since pi main sessions
+        # are named like "<timestamp>_main.jsonl".
+        if not (_is_child_session(path, session_id or path.stem) or _CHILD_ROLE_RE.match(path.stem)):
+            continue
+        consolidated = next(
+            (
+                entry
+                for run_id, entry in consolidated_returns.items()
+                if run_id in _child_run_id_candidates(path.stem, session_id)
+            ),
+            None,
+        )
+        children.append(_scan_child_session(path, session_id, consolidated))
+    return tuple(children)
+
+
+def build_child_sessions(run_paths: RunPaths) -> tuple[DebugChildSession, ...]:
+    """Child sessions with an explicit unavailable entry when none were collected."""
+    children = scan_child_sessions(run_paths)
+    if children:
+        return children
+    record_path = run_paths.artifacts_dir / "pi-sessions-collection.json"
+    reason = "no child session transcripts under pi-sessions and no collection record"
+    record = _read_json(record_path)
+    if record.get("status") == "collected":
+        reason = "session collection completed; no child session transcripts were present"
+    elif record.get("status") == "unavailable":
+        reason = str(record.get("reason") or record.get("error") or "child sessions explicitly unavailable during collection")
+    return (
+        DebugChildSession(
+            path=run_paths.pi_sessions_dir,
+            role="",
+            status="unavailable",
+            reason=reason,
+        ),
+    )
+
+
 def build_debug_report(run_paths: RunPaths, *, entry: ReportEntry | None = None) -> DebugReport:
     result: TaskResult | None = None
     result_error = ""
@@ -330,6 +577,7 @@ def build_debug_report(run_paths: RunPaths, *, entry: ReportEntry | None = None)
         evaluator_manifest=evaluator_manifest,
         artifacts=artifacts,
         orchestration_snapshots=_load_orchestration_snapshots(run_paths.orchestra_debug_dir),
+        child_sessions=build_child_sessions(run_paths),
     )
 
 
@@ -346,6 +594,29 @@ def _fmt_lines(*items: str) -> str:
 def _artifact_line(artifact: DebugArtifactStatus) -> str:
     suffix = f" ({artifact.note})" if artifact.note else ""
     return f"- {artifact.label}: {artifact.status} -> {artifact.path}{suffix}"
+
+
+def _child_session_line(session: DebugChildSession) -> str:
+    parts = [
+        f"id={session.session_id or 'n/a'}",
+        f"role={session.role or 'n/a'}",
+        f"provider={session.provider or 'n/a'}",
+        f"model={session.model or 'n/a'}",
+        f"status={session.status}",
+    ]
+    if session.reason:
+        parts.append(f"reason={session.reason}")
+    return f"- {session.path}: {' '.join(parts)}"
+
+
+def format_child_session_section(run_paths: RunPaths) -> str:
+    """Rendered child-session evidence for CLI views; empty when nothing was collected."""
+    children = scan_child_sessions(run_paths)
+    if not children and not (run_paths.artifacts_dir / "pi-sessions-collection.json").is_file():
+        return ""
+    body = ["child session evidence:"]
+    body.extend(_child_session_line(session) for session in build_child_sessions(run_paths))
+    return _fmt_lines(*body)
 
 
 def _snapshot_line(snapshot: DebugOrchestrationSnapshot) -> str:
@@ -382,13 +653,19 @@ def format_debug_report(report: DebugReport) -> str:
     if report.orchestration_snapshots:
         body.append("orchestration snapshots:")
         body.extend(_snapshot_line(snapshot) for snapshot in report.orchestration_snapshots)
+    if report.child_sessions:
+        body.append("child session evidence:")
+        body.extend(_child_session_line(session) for session in report.child_sessions)
     return _fmt_lines(*body)
 
 
 __all__ = [
     "DebugArtifactStatus",
+    "DebugChildSession",
     "DebugOrchestrationSnapshot",
     "DebugReport",
+    "build_child_sessions",
     "build_debug_report",
+    "format_child_session_section",
     "format_debug_report",
 ]

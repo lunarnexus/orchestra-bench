@@ -91,20 +91,10 @@ def _optional_str(value: object, context: str) -> str | None:
     return _require_str(value, context)
 
 
-def _require_bool(value: object, context: str, *, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if not isinstance(value, bool):
-        _error(f"{context} must be a boolean")
-    return value
-
-
-def _require_int(value: object, context: str) -> int | None:
-    if value is None:
-        return None
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        _error(f"{context} must be a positive integer")
-    return value
+def _optional_positive_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
 
 
 def _require_str_list(value: object, context: str) -> tuple[str, ...]:
@@ -126,11 +116,6 @@ def _validate_model_limits(value: object, catalog_path: Path) -> dict[str, dict[
     for model_name, model_limit in mapping.items():
         model_key = _require_str(model_name, f"model_limits key in {catalog_path}")
         config = _require_mapping(model_limit, f"model_limits.{model_key} in {catalog_path}")
-        extra = set(config) - _MODEL_LIMIT_KEYS
-        if extra:
-            _error(
-                f"unsupported keys in model_limits.{model_key} in {catalog_path}: {sorted(extra)}"
-            )
         concurrency = config.get("concurrency")
         if not isinstance(concurrency, int) or isinstance(concurrency, bool) or concurrency <= 0:
             _error(f"model_limits.{model_key}.concurrency in {catalog_path} must be a positive integer")
@@ -146,11 +131,6 @@ def _validate_harness_configs(value: object, catalog_path: Path) -> dict[str, Ha
     for name, raw_config in mapping.items():
         config_name = _require_str(name, f"harness_configs key in {catalog_path}")
         config = _require_mapping(raw_config, f"harness_configs.{config_name} in {catalog_path}")
-        extra = set(config) - _HARNESS_CONFIG_KEYS
-        if extra:
-            _error(
-                f"unsupported keys in harness_configs.{config_name} in {catalog_path}: {sorted(extra)}"
-            )
         harness = _require_str(config.get("harness"), f"harness_configs.{config_name}.harness in {catalog_path}")
         command = config.get("command")
         if not isinstance(command, list) or not command:
@@ -175,9 +155,6 @@ def _validate_role_configs(
     for name, raw_config in mapping.items():
         role_name = _require_str(name, f"roles key in {catalog_path}")
         config = _require_mapping(raw_config, f"roles.{role_name} in {catalog_path}")
-        extra = set(config) - _ROLE_KEYS
-        if extra:
-            _error(f"unsupported keys in roles.{role_name} in {catalog_path}: {sorted(extra)}")
         harness_config = _require_str(
             config.get("harness_config"),
             f"roles.{role_name}.harness_config in {catalog_path}",
@@ -204,19 +181,14 @@ def _validate_role_configs(
             agent=_optional_str(config.get("agent"), f"roles.{role_name}.agent in {catalog_path}"),
             env=env,
             skills=_require_str_list(config.get("skills"), f"roles.{role_name}.skills in {catalog_path}"),
-            enabled=_require_bool(config.get("enabled"), f"roles.{role_name}.enabled in {catalog_path}", default=True),
+            enabled=True,
             prompt_addition=_optional_str(
                 config.get("prompt_addition"), f"roles.{role_name}.prompt_addition in {catalog_path}"
             )
             or "",
-            nested_dispatch_depth=_require_int(
-                config.get("nested_dispatch_depth"),
-                f"roles.{role_name}.nested_dispatch_depth in {catalog_path}",
-            ),
-            turn_limit=_require_int(config.get("turn_limit"), f"roles.{role_name}.turn_limit in {catalog_path}"),
-            soft_timeout=_require_int(
-                config.get("soft_timeout"), f"roles.{role_name}.soft_timeout in {catalog_path}"
-            ),
+            nested_dispatch_depth=_optional_positive_int(config.get("nested_dispatch_depth")),
+            turn_limit=_optional_positive_int(config.get("turn_limit")),
+            soft_timeout=_optional_positive_int(config.get("soft_timeout")),
         )
     return roles
 
@@ -235,9 +207,6 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def load_agent_catalog(catalog_path: Path | str) -> dict[str, Any]:
     path = Path(catalog_path)
     data = _load_yaml(path)
-    extra = set(data) - _ROOT_KEYS
-    if extra:
-        _error(f"unsupported top-level keys in {path}: {sorted(extra)}")
     default_role = _require_str(data.get("default_role"), f"default_role in {path}")
     harness_configs = _validate_harness_configs(data.get("harness_configs"), path)
     roles = _validate_role_configs(data.get("roles"), path, harness_configs)

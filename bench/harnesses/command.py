@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -92,6 +94,9 @@ class CommandHarness(BaseHarness):
         env = self._build_env(request)
         cwd = workspace_dir(request.run_paths)
         cwd.mkdir(parents=True, exist_ok=True)
+        if request.metadata.get("stream_output"):
+            return self._run_streaming(request, transcript, command, env, cwd)
+
         try:
             completed = subprocess.run(  # noqa: S603 - intentional command execution boundary
                 command,
@@ -134,6 +139,104 @@ class CommandHarness(BaseHarness):
             status="lifecycle_failed",
             exit_code=completed.returncode,
             error=f"command exited with code {completed.returncode}",
+            details=details,
+        )
+
+    def _run_streaming(
+        self,
+        request: HarnessRequest,
+        transcript: ProcessTranscript,
+        command: list[str],
+        env: dict[str, str],
+        cwd: Path,
+    ) -> HarnessResult:
+        try:
+            process = subprocess.Popen(  # noqa: S603 - intentional command execution boundary
+                command,
+                cwd=cwd,
+                env=env,
+                text=True,
+                bufsize=1,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except Exception as exc:
+            details = self._base_details(request, command)
+            details["reason"] = "exception"
+            details["exception_type"] = type(exc).__name__
+            return transcript.finish(
+                status="lifecycle_failed",
+                exit_code=None,
+                error=f"command failed: {exc}",
+                details=details,
+            )
+
+        def pump(stream: object, write_text, flush, record) -> None:
+            if stream is None:
+                return
+            while True:
+                chunk = stream.readline()
+                if chunk == "":
+                    break
+                write_text(chunk)
+                flush()
+                record(chunk)
+
+        stdout_thread = threading.Thread(
+            target=pump,
+            args=(process.stdout, sys.stdout.write, sys.stdout.flush, transcript.record_stdout),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=pump,
+            args=(process.stderr, sys.stderr.write, sys.stderr.flush, transcript.record_stderr),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        try:
+            returncode = process.wait(timeout=request.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            stdout_thread.join()
+            stderr_thread.join()
+            details = self._base_details(request, command)
+            details["reason"] = "timeout"
+            return transcript.finish(
+                status="lifecycle_failed",
+                exit_code=None,
+                error=f"command timed out after {request.timeout_seconds} seconds",
+                details=details,
+            )
+        except Exception as exc:
+            process.kill()
+            process.wait()
+            stdout_thread.join()
+            stderr_thread.join()
+            details = self._base_details(request, command)
+            details["reason"] = "exception"
+            details["exception_type"] = type(exc).__name__
+            return transcript.finish(
+                status="lifecycle_failed",
+                exit_code=None,
+                error=f"command failed: {exc}",
+                details=details,
+            )
+        finally:
+            stdout_thread.join()
+            stderr_thread.join()
+
+        details = self._base_details(request, command)
+        details["returncode"] = returncode
+        if returncode == 0:
+            return transcript.finish(status="ok", exit_code=0, details=details)
+
+        details["reason"] = "nonzero_exit"
+        return transcript.finish(
+            status="lifecycle_failed",
+            exit_code=returncode,
+            error=f"command exited with code {returncode}",
             details=details,
         )
 

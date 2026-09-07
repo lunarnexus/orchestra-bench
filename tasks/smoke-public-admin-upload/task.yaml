@@ -1,0 +1,11 @@
+task_id: smoke-public-admin-upload
+description: "Accept public uploads and safely expose them for admin approval"
+family: orchestrator
+batch: smoke
+expected_orchestra: true
+required_roles:
+  - builder
+  - verifier
+scoring_type: pass_fail
+timeout_minutes: 15
+evaluator: evaluate/run.sh

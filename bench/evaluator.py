@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping
 
 from .artifacts import EvaluatorArtifactPaths, write_json_manifest
 from .paths import RunPaths
-from .result import EvaluationResult, RunMeta, TaskResult, load_result, write_json_atomic
+from .result import EvaluationResult, ResultSchemaError, RunMeta, TaskResult, load_result, write_json_atomic
 from .tasks import TaskDefinition
 from .workspace import workspace_dir
 
@@ -100,7 +100,7 @@ def _stage_evaluator_sources(task: TaskDefinition, staging_root: Path) -> Path:
     staged_eval = staging_root / "evaluate"
     shutil.copytree(task.evaluate_path, staged_eval)
     support_root = Path(__file__).resolve().parent.parent
-    for support_name in ("capability_helpers.py", "rubric_helpers.py"):
+    for support_name in ("capability_helpers.py", "rubric_helpers.py", "evaluator_helpers.py"):
         support_path = support_root / support_name
         if support_path.is_file():
             shutil.copy2(support_path, staging_root / support_name)
@@ -303,7 +303,23 @@ def grade_run(
                 },
             )
 
-        evaluation = _payload_to_evaluation(payload)
+        try:
+            evaluation = _payload_to_evaluation(payload)
+        except ResultSchemaError as exc:
+            _write_manifest(
+                artifacts,
+                command=command,
+                classification="invalid_result_schema",
+                returncode=getattr(completed, "returncode", None),
+                source=source,
+                result_path=result_file if source == "result_json" else None,
+                error=str(exc),
+            )
+            raise EvaluationError(
+                f"evaluator produced invalid result schema: {exc}",
+                classification="invalid_result_schema",
+                details={"command": command, "workspace": str(workspace), "error": str(exc)},
+            ) from exc
         if evaluation.status == "not_run" and evaluation.score:
             # Graders emit verdicts (score/checks/details) without an explicit
             # status field; a valid verdict means the grading run succeeded.

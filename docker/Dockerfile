@@ -15,7 +15,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git curl ca-certificates openssh-client python3 python3-pip python3-venv ruby ruby-dev build-essential libsqlite3-dev pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn pytest httpx django
+RUN python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn pytest httpx django pyyaml
 RUN npm install -g @earendil-works/pi-coding-agent@latest express
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 RUN npm install -g opencode-ai
@@ -37,7 +37,7 @@ RUN pi install "$PI_LMSTUDIO_PLUGIN_URL"
 #RUN pi install "$PI_CODEGRAPH_PLUGIN_URL"
 #RUN pi install "$PI_WEB_TOOLS_PLUGIN_URL"
 
-ENV BENCH_TASKS=/bench/task-materials-visible \
+ENV BENCH_TASKS=/bench/task-materials-source \
     BENCH_RESULTS=/bench/results \
     BENCH_ARTIFACTS=/bench/artifacts \
     BENCH_WORKSPACE=/workspace \
@@ -46,6 +46,7 @@ ENV BENCH_TASKS=/bench/task-materials-visible \
     BENCH_HERMES_CONFIG_SRC=/bench/hermes \
     BENCH_OPENCODE_CONFIG_SRC=/bench/opencode \
     BENCH_PI_SKILLS_SRC=/bench/skills \
+    BENCH_ORCHESTRA_EXTENSION_SRC=/bench/orchestra-extension \
     PI_HERMES_RUNTIME_DIR=/root/.hermes \
     PI_OPENCODE_RUNTIME_DIR=/root/.config/opencode
 

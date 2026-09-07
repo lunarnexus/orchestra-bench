@@ -1,80 +1,262 @@
-# V2 Rebuild Plan
+# Orchestra Bench V2 — Completion Plan
 
-`DECISIONS.md` is authoritative for semantics. This plan describes the path to the finished product.
+## Goal and Invariants
 
-## The product
+Deliver three reliable Pi auto-run modes with one correctness-only grading path.
 
-A container-isolated benchmark with exactly three public scripts:
+### Required modes
+
+1. `--no-orchestra --no-orch-on`
+   - Orchestra tools are disabled.
+   - `/orch on` is skipped.
+   - No Orchestra dispatch is expected.
+
+2. `--no-orch-on`
+   - Orchestra tools remain available.
+   - `/orch on` is skipped.
+   - If dispatches occur, all descendants and the parent must settle before grading.
+
+3. `--orchestra`
+   - `/orch on` completes before the task prompt.
+   - If dispatches occur, all descendants and the parent must settle before grading.
+
+### Correctness scoring
+
+- Correctness comes only from `evaluation.details.functionality.checks`.
+- Score is `passed required checks / total required checks`.
+- Pass means every required functionality check is true.
+- Reliability, orchestration behavior, usage, context, timing, and performance are diagnostics only.
+- Diagnostics must not increase or reduce correctness score.
+- Contradictory evaluator verdicts are unscored.
+
+### Lifecycle protocol
+
+- Orchestrated auto prompts require the parent to finish with the explicit marker:
+
+  ```text
+  BENCH_PARENT_DONE
+  ```
+
+- Accepted marker forms are case-insensitive and may use spaces, underscores, or hyphens.
+- Fuzzy completion words such as `done`, `complete`, `finished`, or `ready for grading` are not enough.
+- The marker must occur after the latest relevant Orchestra boundary.
+- Direct child-return notifications do not prove all descendants are terminal.
+- The consolidated returned-children prompt is the fallback descendant-completion signal when no authoritative status source is available.
+- A later successful dispatch invalidates an earlier consolidated-return signal.
+- After apparent completion, the harness waits through a quiet window so late dispatches can be observed.
+- The benchmark must not send synthetic continuation prompts.
+- If the parent never emits the marker before the completion timeout, grading is skipped and the result must say so clearly.
+
+### Constraints
+
+- V1 is read-only.
+- Public commands are root commands: `01-start`, `02-run`, `03-results`, `04-debug`.
+- `03-results` subcommands are `dash`, `runs`, and `run`.
+- Do not validate Orchestra-owned catalog schema in the benchmark.
+- Do not change public tasks, suites, commands, fixtures, or timeouts without explicit approval.
+- Do not pin Docker package or tool versions.
+- Do not edit `DECISIONS.md` without explicit authorization.
+- Do not edit `/home/james/workspace/orchestra/BAD_BEHAVIOR.md` without explicit authorization.
+- Inspect live run artifacts directly in the main session; do not delegate artifact inspection.
+
+## Completed Tasks
+
+- [x] Remove role-focused V2 tasks from the active inventory.
+- [x] Keep 13 active V2 tasks: 6 smoke, 3 capability-easy, 3 capability-normal, 1 capability-advanced.
+- [x] Make all active task evaluators emit non-empty boolean `details.functionality.checks`.
+- [x] Stage shared evaluator helpers via `bench/evaluator.py`.
+- [x] Implement correctness-only scoring.
+- [x] Persist correctness-only `category_scores.functionality` for new results.
+- [x] Keep diagnostics separate from correctness.
+- [x] Preserve explicit run-mode provenance.
+- [x] Separate configured tool availability from observed tool execution.
+- [x] Skip `/orch on` in both no-`/orch on` modes.
+- [x] Run `/orch on` before the task prompt in full Orchestra mode.
+- [x] Replace disabled-tools prompt wording with `Proceed until finished.`.
+- [x] Append `BENCH_PARENT_DONE` completion instructions to auto prompts.
+- [x] Require explicit completion marker instead of fuzzy done-ish text.
+- [x] Use a separate child-wait budget.
+- [x] Use a separate parent-finalization budget.
+- [x] Use a quiet-period settle window after apparent completion.
+- [x] Invalidate stale consolidated-return evidence after later dispatches.
+- [x] Fail closed when children, descendants, or parent completion are not proven settled.
+- [x] Persist Orchestra diagnostics and observed execution on lifecycle failure.
+- [x] Collect parent and child Pi sessions for auto runs.
+- [x] Persist explicit session-collection status or unavailable reason.
+- [x] Compute parent, children, and all-session usage separately.
+- [x] Deduplicate repeated usage/session evidence.
+- [x] Avoid labelling parent-only usage as `all` when child evidence is required but unavailable.
+- [x] Deduplicate dispatch evidence across parent sessions and harness events.
+- [x] Count child terminal/active states consistently.
+- [x] Surface child role, provider, model, terminal status, and failure reason in debug evidence when available.
+- [x] Preserve child terminal-success precedence over intermediate tool errors.
+- [x] Fix import-time test leakage in reporting management.
+- [x] Keep `03-results dash`, `03-results runs`, and `03-results run` naming unchanged.
+
+## Local Verification
+
+Run before rebuilding or live proof:
 
 ```bash
-scripts/01-start                        # complete setup: build, start, configure
-scripts/02-run pi|hermes|opencode ...   # interactive harness session inside the container
-scripts/02-run --auto <task-or-suite>   # automatic run and scoring
-scripts/03-results ...                  # inspect, compare, rescore, delete results
+PYTHONPATH=. pytest -q tests/unit tests/integration/test_scripts.py
 ```
 
-Operator experience:
-- Bare `01-start` from root or `scripts/` leaves a running, fully configured container and prints a concise summary.
-- Harness sessions feel native: TTY, stdin, opaque args, exit status all preserved.
-- `--auto` runs default to concise progress output; `--verbose` streams the full session; complete transcripts are always retained as artifacts.
-- Config overrides come from `config/orchestra/`, `config/pi/`, `config/hermes/`, `config/opencode/` and apply to both interactive and automatic runs, with effective-config provenance recorded per run.
-- Tasks live in root `tasks/`. Everything benchmark-related executes inside the container; the host runs only pytest.
-- `V1/` remains a read-only reference library of proven behavior to recreate.
+Current local status:
 
-## Done (proven)
+- [x] `295 passed`
 
-- [x] V1 research inventory, cleanup boundary, recoverable checkpoint (`699d23c723b0e35d3c63a4d804d7c058f0d8fcd0`).
-- [x] Task migration contract: root `tasks/` mount + real graded smoke run `s17r20260828T173608-smoke-dependent-setup-chain` (pass, real evaluator score).
-- [x] Hermes/OpenCode official installs and config layouts (`RESEARCH.md`).
-- [x] Slice 2.1 regular config overrides: mounts, in-container propagation to `/root/.pi/agent`, persisted provenance — verified in a rebuilt container.
-- [x] Public surface reduced to the three scripts; results route through `03-results` only.
-- [x] Pi, Hermes, OpenCode installed and passthrough-checked inside the container.
+## Remaining Tasks
 
-## Remaining slices
+### 1. Rebuild/sync runtime
 
-Work sequentially. Each slice ships with focused tests plus one real container check as its own acceptance evidence.
+Status: pending.
 
-### Slice 2.2 — Bare `01-start` — done
-`scripts/01-start` with no arguments now performs the whole setup: build (cached, one Dockerfile at `docker/Dockerfile`), refresh Orchestra + Pi plugins while keeping cached harness installs, recreate the container, apply runtime config inside it, print a concise summary. Shell wrapper stays thin; Python owns the setup stages. Evidence: builder `a6273635cbe4`; focused tests passed; real `bash scripts/01-start` passed.
+Run:
 
-### Slice 3.1 — Python dispatch for `02-run` — done
-Move argument parsing from shell into Python: passthrough (`pi|hermes|opencode <opaque args>`) versus `--auto <target>`; `--auto pi` is an automatic target. Evidence: focused parser/wrapper tests passed; real `scripts/02-run --help` worked from root and `scripts/`.
+```bash
+./01-start
+```
 
-### Slice 3.2 — Interactive TTY passthrough — done
-Attach stdin, allocate a TTY when the caller has one, propagate signals and exit status, retain the session transcript. `02-run pi config` reaches the configured in-container Pi settings. Evidence: builder `72fd8ff662c6`; focused tests passed; real root and `scripts/` TTY smokes started `pi config` in-container and retained transcripts.
+Accept when:
 
-### Slice 4.1 — One workspace model — done
-Single run-scoped workspace inside the container; catalog `{workdir}` expands to it; evaluator stays hidden until grading; run artifacts host-readable; runtime snapshot includes the effective per-harness config overlay. Evidence: builders `784018c69d48` and `613ca13ca473`; focused workspace/provenance tests passed; real smoke provenance confirmed run-scoped workspace. The smoke harness failure was model availability (`Model "lmstudio/qwen/qwen3.8-27b" not found`), not workspace/provenance.
+- command exits 0;
+- container is ready;
+- runtime uses the current checked-out benchmark code.
 
-### Slice 5.1/5.2 — Automatic task and suite runs — implementation done, real acceptance blocked
-`02-run --auto <task>` runs and grades entirely in the container with concise default output and always-retained artifacts. `02-run --auto <suite>` resolves suites, runs serially, summarizes per-task results with an explicit return code. Evidence: builder `25bbcfc4dae2`; focused auto/task/suite tests passed and compact output/artifact behavior implemented. Real operator acceptance is blocked by external Pi/LM Studio runtime model resolution: runs `20260829T203030` and `20260829T203524` failed before scoring with `Error: Model "lmstudio/qwen/qwen3.8-27b" not found`, while `pi --list-models` later lists the model. Rerun one task and one smoke suite after runtime/model state is stable.
+### 2. Mode 1 live proof
 
-### Slice 6 — `03-results` complete — done
-List/display runs, detail and debug views, filters, comparisons via filters, token/timing summaries, explicit rescoring (prior result preserved until replacement succeeds), filtered deletion with preview + confirmation. Evidence: builders `91d3b00be8fe` and `ef81a4fdcb6b`; focused CLI/reporting/integration tests and ruff passed; deletion safety covered with copied/temp results.
+Status: pending for current completion protocol.
 
-### Slice 7 — Hermes/OpenCode proof — done
-Real interactive smokes for both through the generic `02-run` interface, transcripts retained. Evidence: verifier `984c015d8a9d`; Hermes `--help` and OpenCode `--version` passed from root and `scripts/`, transcripts retained under `artifacts/02-run/`.
+Run once:
 
-### Slice 8 — Pi lifecycle backend + Orchestra settle (final feature phase)
-Research current `PiRpcHarness` and `~/workspace/orchestra/KNOWN_BUGS.md`, propose minimal backend selection, get owner approval, wire it, record backend in provenance. Then production Orchestra settle provider: session identity, grading waits for relevant workers to finish, timeouts classified, status snapshots retained. Acceptance: real Pi lifecycle smoke settles and grades; active-worker test blocks grading, terminal-worker test allows it.
+```bash
+./02-run --auto pi smoke-dependent-setup-chain --no-orchestra --no-orch-on
+```
 
-### Slice 9 — Final polish
-Remove confirmed dead code (legacy env aliases, unused compat helpers, stale workspace residue). Full verification pass across unit/integration/container-contract tests plus one end-to-end operator run of all three scripts. Concise operator README for the three-script workflow. Clean commit.
+Inspect directly:
 
-## Acceptance checklist
+```bash
+./03-results run <run-id>
+./04-debug <run-id> full
+```
 
-- [x] Bare `scripts/01-start` performs complete cached setup from root and `scripts/`.
-- [x] Exactly three public numbered scripts.
-- [x] Pi, Hermes, OpenCode interactive passthrough inside the container with TTY and transcripts.
-- [ ] `--auto <task>` runs and scores a real task; `--auto <suite>` summarizes a real suite.
-- [x] Config overrides effective for all four config dirs, provenance recorded.
-- [ ] Concise default output; `--verbose` full; transcripts always retained.
-- [x] `03-results` delivers display, filtering, comparison, rescoring, safe deletion.
-- [ ] Orchestra grading waits for active work.
-- [ ] Clean commit history from the established V2 boundary.
+Accept when:
 
-## Immediate next action
+- command exits 0;
+- evaluator runs;
+- all required functionality checks pass;
+- score is `100/100`;
+- Orchestra tools are disabled;
+- `/orch on` is skipped;
+- no successful Orchestra dispatch occurs;
+- session collection is collected or explicitly unavailable with reason;
+- usage buckets are truthful;
+- raw result, `03-results`, and `04-debug` agree materially.
 
-Finish the `01-start` progress-output fix currently in flight, then simplify public CLI help by hiding/removing leaked internal `--root` options from operator-facing `01-start`, `02-run`, and `03-results` usage. Wrappers already resolve the repo root automatically; keep root plumbing internal only where tests/functions need it.
+### 3. Mode 2 live proof
 
-After that, proceed with Slice 8.1 — research Pi lifecycle backend and Orchestra settle proposal for owner approval.
+Status: pending.
+
+Run once:
+
+```bash
+./02-run --auto pi smoke-dependent-setup-chain --no-orch-on
+```
+
+Inspect directly:
+
+```bash
+./03-results run <run-id>
+./04-debug <run-id> full
+```
+
+Accept when:
+
+- command exits 0;
+- evaluator runs;
+- all required functionality checks pass;
+- score is `100/100`;
+- `/orch on` is skipped;
+- observed tool execution is recorded if dispatch occurs;
+- every observed child/descendant is terminal before grading;
+- parent integrates returned children;
+- parent final response includes the accepted completion marker;
+- no active child remains at grading;
+- session collection preserves parent and child evidence or explicit unavailable reasons;
+- parent, children, and all usage buckets are truthful and deduplicated;
+- child terminal/active counts are internally consistent;
+- raw result, `03-results`, and `04-debug` agree materially.
+
+### 4. Mode 3 live proof
+
+Status: pending.
+
+Run once:
+
+```bash
+./02-run --auto pi smoke-dependent-setup-chain --orchestra
+```
+
+Inspect directly:
+
+```bash
+./03-results run <run-id>
+./04-debug <run-id> full
+```
+
+Accept when all Mode 2 checks pass, plus:
+
+- `/orch on` activation completes before the task prompt;
+- full-mode orchestration diagnostics are present when applicable.
+
+### 5. Final result views
+
+Status: pending.
+
+Run after all three live proofs pass:
+
+```bash
+./03-results dash
+./03-results runs
+```
+
+Accept when:
+
+- all three modes are visible;
+- run summaries match raw result files;
+- correctness display is based only on functionality checks;
+- diagnostics remain diagnostics.
+
+### 6. Close plan
+
+Status: pending.
+
+Close only after:
+
+- local regression is green;
+- runtime has been rebuilt with current code;
+- all three live modes pass their acceptance checks;
+- final `03-results` views agree with raw evidence.
+
+## Verification Matrix
+
+| Case | Expected result |
+|---|---|
+| Empty check map | evaluator error; no score |
+| Non-boolean check | evaluator error; no score |
+| Contradictory verdict/checks | evaluator error; no score |
+| Partial required checks | fail with proportional correctness score |
+| All required checks | pass, `100/100` |
+| Workflow or reliability diagnostics change | no correctness-score change |
+| Harness-only usage | populate when evidence exists; otherwise explicit unavailable reason |
+| Parent plus children | exact separate buckets and deduplicated aggregate |
+| Duplicate parent session/harness dispatch | count once |
+| Compaction event | counted once according to usage semantics |
+| Direct child notification only | keep waiting; do not grade |
+| Consolidated return without parent marker | fail closed |
+| Consolidated return followed by later dispatch | earlier return no longer clears descendants |
+| Consolidated return plus parent marker and settle | safe to grade when descendants are terminal |
+| Lifecycle failure | evaluator not run; diagnostics still persisted |
+| Active child at grading boundary | no grading |
+| Tool use without `/orch on` | visible diagnostic; no correctness impact |
+| Raw/result/debug views | same material facts |

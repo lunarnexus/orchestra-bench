@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 from pathlib import Path
@@ -132,3 +133,42 @@ class TestCommandHarness:
         assert result.details["reason"] == "timeout"
         assert request.artifacts.transcript_path.read_text(encoding="utf-8") == "partial out\n"
         assert request.artifacts.log_path.read_text(encoding="utf-8") == "partial err\n"
+
+    def test_command_harness_streams_output_when_requested(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        run_paths = RunPaths(tmp_path, "20250101T010203", "task-one")
+        request = HarnessRequest(run_paths=run_paths, prompt="hello world", timeout_seconds=3.0, metadata={"stream_output": True})
+        harness = CommandHarness(["tool", "{prompt}"])
+
+        captured: dict[str, object] = {}
+
+        class _FakePopen:
+            def __init__(self, command, **kwargs):  # type: ignore[no-untyped-def]
+                captured["command"] = list(command)
+                captured["kwargs"] = kwargs
+                self.stdout = io.StringIO("stdout line\n")
+                self.stderr = io.StringIO("stderr line\n")
+                self._returncode = 0
+
+            def wait(self, timeout=None):  # type: ignore[no-untyped-def]
+                return self._returncode
+
+            def kill(self):  # type: ignore[no-untyped-def]
+                self._returncode = 137
+
+        monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: _FakePopen(command, **kwargs))
+
+        result = harness.run(request)
+        output = capsys.readouterr()
+
+        assert captured["command"] == ["tool", "hello world"]
+        assert captured["kwargs"]["stdout"] is subprocess.PIPE
+        assert captured["kwargs"]["stderr"] is subprocess.PIPE
+        assert captured["kwargs"]["text"] is True
+        assert output.out == "stdout line\n"
+        assert output.err == "stderr line\n"
+        assert request.artifacts.transcript_path.read_text(encoding="utf-8") == "stdout line\n"
+        assert request.artifacts.log_path.read_text(encoding="utf-8") == "stderr line\n"
+        assert result.status == "ok"
+        assert result.exit_code == 0

@@ -179,7 +179,7 @@ def load_task(task_path: Path | str, tasks_root: Path | str | None = None) -> Ta
     )
 
 
-_SUITE_ORDER = ["smoke", "role-focused", "capability-easy", "capability-normal", "capability-advanced"]
+_SUITE_ORDER = ["smoke", "capability-easy", "capability-normal", "capability-advanced"]
 
 
 def list_suites(tasks_root: Path | str | None = None) -> list[str]:

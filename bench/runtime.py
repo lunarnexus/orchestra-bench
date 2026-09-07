@@ -10,7 +10,6 @@ import shlex
 import shutil
 import subprocess
 import time
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +17,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
+from bench.ownership import host_ownership_env
 from bench.paths import validate_task_id
 from bench.provenance import snapshot_aux_skills, snapshot_files, snapshot_orchestra_config
 from bench.tasks import TaskDefinition
@@ -30,7 +30,7 @@ DEFAULT_IMAGE_NAME = "orchestra-bench-env"
 CONTAINER_NAME = "orchestra-bench-runner"
 PROJECT_CATALOG_RELPATH = Path("config") / "orchestra" / "agent-catalog.yaml"
 VISIBLE_TASKS_SOURCE_ROOTS = (Path("tasks"),)
-VISIBLE_TASKS_TARGET = Path("/bench/task-materials-visible")
+VISIBLE_TASKS_TARGET = Path("/bench/task-materials-source")
 ORCHESTRA_CONFIG_TARGET = Path("/bench/orchestra-config")
 PI_CONFIG_TARGET = Path("/bench/pi")
 HERMES_CONFIG_TARGET = Path("/bench/hermes")
@@ -38,12 +38,13 @@ OPENCODE_CONFIG_TARGET = Path("/bench/opencode")
 SKILLS_CONFIG_TARGET = Path("/bench/skills")
 HERMES_RUNTIME_DIR = Path("/root/.hermes")
 OPENCODE_RUNTIME_DIR = Path("/root/.config/opencode")
-PI_AGENT_RUNTIME_DIR = Path("/root/.pi/agent")
 CONTAINER_ROOT = Path("/bench")
 CONTAINER_CONTEXT_ENV = "BENCH_IN_CONTAINER"
 # Host-readable record of the last effective regular-config overlay; run
 # provenance merges this summary so persisted metadata names the exact config files.
 RUNTIME_CONFIG_SYNC_FILENAME = "runtime-config-sync.json"
+PI_AGENT_STATE_SRC = Path("/root/.pi/agent")
+DEFAULT_ORCHESTRA_EXTENSION_SRC = Path("/opt/orchestra/src/extensions/pi/orchestra")
 
 
 def _now_run_id() -> str:
@@ -66,6 +67,8 @@ class RuntimeEnvironment:
     orchestra_runtime_dir: Path
     lmstudio_runtime_file: Path
     run_id: str
+    orchestra_extension_src: Path | None = None
+    home_dir: Path | None = None
     pi_config_src: Path | None = None
     hermes_config_src: Path | None = None
     opencode_config_src: Path | None = None
@@ -77,13 +80,14 @@ class RuntimeEnvironment:
         env = os.environ if environ is None else environ
         run_id = str(env.get("BENCH_RUN_ID") or _now_run_id())
         workspace_root = _path(env.get("BENCH_WORKSPACE", "/workspace"))
-        shared_pi_agent_dir = workspace_root / ".pi" / "agent"
-        pi_agent_dir = _path(env.get("PI_CODING_AGENT_DIR", shared_pi_agent_dir / run_id))
-        if pi_agent_dir == shared_pi_agent_dir:
-            raise ValueError(f"PI_CODING_AGENT_DIR must be run-scoped, not shared: {pi_agent_dir}")
+        home_dir = _path(workspace_root / ".pi" / "home" / run_id)
+        expected_pi_agent_dir = home_dir / ".pi" / "agent"
+        pi_agent_dir = _path(env.get("PI_CODING_AGENT_DIR", expected_pi_agent_dir))
+        if pi_agent_dir != expected_pi_agent_dir:
+            raise ValueError(f"PI_CODING_AGENT_DIR must match HOME/.pi/agent: {pi_agent_dir} != {expected_pi_agent_dir}")
         lmstudio_config_src = _path(env.get("BENCH_LMSTUDIO_CONFIG_SRC", "/bench/pi/lmstudio.json"))
         return cls(
-            tasks_root=_path(env.get("BENCH_TASKS", "/bench/task-materials-visible")),
+            tasks_root=_path(env.get("BENCH_TASKS", "/bench/task-materials-source")),
             results_root=_path(env.get("BENCH_RESULTS", "/bench/results")),
             artifacts_root=_path(env.get("BENCH_ARTIFACTS", "/bench/artifacts")),
             workspace_root=workspace_root,
@@ -93,6 +97,8 @@ class RuntimeEnvironment:
             orchestra_runtime_dir=_path(env.get("PI_ORCHESTRA_RUNTIME_DIR", pi_agent_dir / "orchestra")),
             lmstudio_runtime_file=_path(env.get("PI_LMSTUDIO_RUNTIME_FILE", pi_agent_dir / "lmstudio.json")),
             run_id=run_id,
+            orchestra_extension_src=_path(extension_src) if (extension_src := env.get("BENCH_ORCHESTRA_EXTENSION_SRC")) else None,
+            home_dir=home_dir,
             pi_config_src=_path(env.get("BENCH_PI_CONFIG_SRC", lmstudio_config_src.parent)),
             hermes_config_src=_path(env.get("BENCH_HERMES_CONFIG_SRC", "/bench/hermes")),
             opencode_config_src=_path(env.get("BENCH_OPENCODE_CONFIG_SRC", "/bench/opencode")),
@@ -118,11 +124,119 @@ def _copy_file(source: Path, target: Path) -> Path:
     return target
 
 
+def _env_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _copy_sanitized_orchestra_catalog(source: Path, target: Path) -> Path:
+    raw = yaml.safe_load(source.read_text())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not isinstance(raw, dict):
+        shutil.copy2(source, target)
+        return target
+    roles = raw.get("roles")
+    if isinstance(roles, dict):
+        for role_config in roles.values():
+            if isinstance(role_config, dict):
+                role_config.pop("prompt_addition", None)
+    target.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return target
+
+
 def _copy_tree_overlay(source: Path, target: Path) -> Path:
     if not source.exists():
         return target
     target.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, target, dirs_exist_ok=True)
+    return target
+
+
+def _deep_merge(base: object, override: object) -> object:
+    if isinstance(base, dict) and isinstance(override, dict):
+        merged = dict(base)
+        for key, value in override.items():
+            merged[key] = _deep_merge(merged.get(key), value)
+        return merged
+    return override
+
+
+def _load_json_object(path: Path) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _copy_pi_config_overlay(source: Path, target: Path) -> Path:
+    if not source.exists():
+        return target
+    target.mkdir(parents=True, exist_ok=True)
+    settings_source = source / "settings.json"
+    for entry in source.iterdir():
+        if entry.name == "settings.json":
+            continue
+        destination = target / entry.name
+        if entry.is_dir():
+            shutil.copytree(entry, destination, dirs_exist_ok=True)
+        elif entry.is_file():
+            _copy_file(entry, destination)
+    if settings_source.is_file():
+        settings_target = target / "settings.json"
+        merged = _deep_merge(_load_json_object(settings_target), _load_json_object(settings_source))
+        settings_target.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return target
+
+
+def _merge_pi_package_registration(source: Path, target: Path) -> Path:
+    try:
+        if not source.exists():
+            return target
+    except OSError:
+        return target
+    target.mkdir(parents=True, exist_ok=True)
+
+    for entry_name in ("git", "extensions"):
+        entry = source / entry_name
+        if entry.is_dir():
+            shutil.copytree(entry, target / entry_name, dirs_exist_ok=True)
+
+    models_store = source / "models-store.json"
+    if models_store.is_file():
+        _copy_file(models_store, target / "models-store.json")
+
+    source_settings = _load_json_object(source / "settings.json")
+    source_packages = source_settings.get("packages")
+    if not isinstance(source_packages, list):
+        return target
+
+    target_settings_path = target / "settings.json"
+    target_settings = _load_json_object(target_settings_path)
+    target_packages = target_settings.get("packages")
+    merged_packages: list[str] = []
+    seen: set[str] = set()
+
+    for package in target_packages if isinstance(target_packages, list) else []:
+        package_name = str(package).strip()
+        if package_name and package_name not in seen:
+            merged_packages.append(package_name)
+            seen.add(package_name)
+    for package in source_packages:
+        package_name = str(package).strip()
+        if package_name and package_name not in seen:
+            merged_packages.append(package_name)
+            seen.add(package_name)
+
+    if merged_packages:
+        target_settings["packages"] = merged_packages
+        target_settings_path.write_text(json.dumps(target_settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return target
 
 
@@ -175,9 +289,6 @@ def _load_visible_task(task_id: str, tasks_root: Path) -> TaskDefinition:
         raise FileNotFoundError(f"missing PRD.md: {prd_path}")
     if not prompt_path.is_file():
         raise FileNotFoundError(f"missing Prompt.md: {prompt_path}")
-    if evaluate_path.exists():
-        raise ValueError(f"visible task root must not expose evaluate: {evaluate_path}")
-
     return TaskDefinition(
         task_id=validate_task_id(_require_text("task_id")),
         description=_require_text("description", default=""),
@@ -208,8 +319,53 @@ def _require_orchestra_catalog_source(env: RuntimeEnvironment) -> Path:
     return catalog
 
 
+def _require_orchestra_extension_source(env: RuntimeEnvironment) -> Path:
+    candidates = []
+    if env.orchestra_extension_src is not None:
+        candidates.append(env.orchestra_extension_src)
+    else:
+        candidates.extend(
+            [
+                Path("/bench/orchestra-extension"),
+                DEFAULT_ORCHESTRA_EXTENSION_SRC,
+                Path(__file__).resolve().parents[2] / "orchestra" / "extensions" / "pi" / "orchestra",
+            ]
+        )
+    for source in candidates:
+        try:
+            if source.is_dir():
+                return source
+        except OSError:
+            continue
+    if env.orchestra_extension_src is not None:
+        source = env.orchestra_extension_src
+    else:
+        source = candidates[0] if candidates else DEFAULT_ORCHESTRA_EXTENSION_SRC
+    raise FileNotFoundError(f"orchestra extension source not found: {source}")
+
+
 def runtime_config_sync_path(env: RuntimeEnvironment) -> Path:
+    return env.artifacts_root / RUNTIME_CONFIG_SYNC_FILENAME
+
+
+def runtime_config_sync_legacy_path(env: RuntimeEnvironment) -> Path:
     return env.results_root / RUNTIME_CONFIG_SYNC_FILENAME
+
+
+def _apply_orchestra_tools_override(env: RuntimeEnvironment) -> bool | None:
+    enabled = _env_bool(os.environ.get("BENCH_ORCHESTRA_TOOLS_DEFAULT"))
+    if enabled is None:
+        return None
+    config_path = env.orchestra_runtime_dir / "config.yaml"
+    data: dict[str, object] = {}
+    if config_path.is_file():
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            data = dict(loaded)
+    data["tools_enabled_by_default"] = enabled
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return enabled
 
 
 def _persist_runtime_config_summary(env: RuntimeEnvironment, summary: dict[str, object]) -> None:
@@ -229,19 +385,20 @@ def _persist_runtime_config_summary(env: RuntimeEnvironment, summary: dict[str, 
 
 def load_runtime_config_summary(env: RuntimeEnvironment | None = None) -> dict[str, object]:
     runtime = env if env is not None else RuntimeEnvironment.from_env()
-    path = runtime_config_sync_path(runtime)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {str(key): value for key, value in data.items()}
+    for path in (runtime_config_sync_path(runtime), runtime_config_sync_legacy_path(runtime)):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return {str(key): value for key, value in data.items()}
+    return {}
 
 
 def sync_runtime_config(env: RuntimeEnvironment) -> dict[str, object]:
     """Copy benchmark-owned runtime inputs into the live Pi/Orchestra runtime."""
     catalog_source = _require_orchestra_catalog_source(env)
+    home_dir = env.home_dir or (env.workspace_root / ".pi" / "home" / env.run_id)
     pi_runtime_dir = env.pi_runtime_dir
     pi_runtime_dir.mkdir(parents=True, exist_ok=True)
     env.orchestra_runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +409,7 @@ def sync_runtime_config(env: RuntimeEnvironment) -> dict[str, object]:
     init_env = os.environ.copy()
     init_env.update(
         {
+            "HOME": str(home_dir),
             "PI_CODING_AGENT_DIR": str(pi_runtime_dir),
             "PI_ORCHESTRA_RUNTIME_DIR": str(env.orchestra_runtime_dir),
             "PI_LMSTUDIO_RUNTIME_FILE": str(env.lmstudio_runtime_file),
@@ -261,27 +419,56 @@ def sync_runtime_config(env: RuntimeEnvironment) -> dict[str, object]:
 
     pi_source = env.pi_config_src or env.lmstudio_config_src.parent
     orchestra_target = _copy_tree_overlay(env.orchestra_config_src, env.orchestra_runtime_dir)
-    catalog_target = _copy_file(catalog_source, env.orchestra_runtime_dir / "agent-catalog.yaml")
-    pi_target = _copy_tree_overlay(pi_source, pi_runtime_dir)
-    if os.environ.get("BENCH_IN_CONTAINER") in {"1", "true", "yes"} and PI_AGENT_RUNTIME_DIR != pi_runtime_dir:
-        _copy_tree_overlay(pi_runtime_dir, PI_AGENT_RUNTIME_DIR)
+    catalog_target = _copy_sanitized_orchestra_catalog(catalog_source, env.orchestra_runtime_dir / "agent-catalog.yaml")
+    _merge_pi_package_registration(PI_AGENT_STATE_SRC, pi_runtime_dir)
+    pi_target = _copy_pi_config_overlay(pi_source, pi_runtime_dir)
     hermes_target = _copy_tree_overlay(env.hermes_config_src, env.hermes_runtime_dir) if env.hermes_config_src is not None else env.hermes_runtime_dir
     opencode_target = _copy_tree_overlay(env.opencode_config_src, env.opencode_runtime_dir) if env.opencode_config_src is not None else env.opencode_runtime_dir
     skills_target = _copy_tree_overlay(env.pi_skills_src, env.pi_skills_runtime_dir)
 
+    validate_env = os.environ.copy()
+    validate_env.update(
+        {
+            "HOME": str(home_dir),
+            "PI_CODING_AGENT_DIR": str(pi_runtime_dir),
+            "PI_ORCHESTRA_RUNTIME_DIR": str(env.orchestra_runtime_dir),
+            "PI_LMSTUDIO_RUNTIME_FILE": str(env.lmstudio_runtime_file),
+        }
+    )
+    tool_info = subprocess.run(
+        ["orchestra", "_tool-info"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=validate_env,
+        cwd=env.orchestra_runtime_dir,
+    )
+    if tool_info.returncode != 0:
+        detail = (tool_info.stderr or tool_info.stdout or "").strip()
+        raise RuntimeError(f"orchestra _tool-info failed ({tool_info.returncode}){': ' + detail if detail else ''}")
+
+    orchestra_tools_enabled = _apply_orchestra_tools_override(env)
     orchestra_snapshot = snapshot_orchestra_config(env.orchestra_config_src)
+    orchestra_extension_source = _require_orchestra_extension_source(env)
+    orchestra_extension_target = _copy_tree_overlay(orchestra_extension_source, pi_runtime_dir / "extensions" / "orchestra")
+    orchestra_extension_snapshot = _snapshot_tree(orchestra_extension_source)
     pi_snapshot = _snapshot_tree(pi_source)
     hermes_snapshot = _snapshot_tree(env.hermes_config_src)
     opencode_snapshot = _snapshot_tree(env.opencode_config_src)
     skills_snapshot = snapshot_aux_skills(env.pi_skills_src)
 
     summary: dict[str, object] = {
+        "home_dir": str(home_dir),
         "orchestra_runtime_dir": str(env.orchestra_runtime_dir),
+        "orchestra_tools_enabled_by_default": orchestra_tools_enabled,
         "pi_runtime_dir": str(pi_runtime_dir),
         "hermes_runtime_dir": str(env.hermes_runtime_dir),
         "opencode_runtime_dir": str(env.opencode_runtime_dir),
         "catalog_path": str(catalog_target),
         "orchestra_config_dir": str(orchestra_target),
+        "orchestra_extension_dir": str(orchestra_extension_target),
+        "orchestra_extension_files": orchestra_extension_snapshot["files"],
+        "orchestra_extension_sha256": orchestra_extension_snapshot["sha256"],
         **orchestra_snapshot,
         "pi_config_dir": str(pi_target),
         "pi_config_files": pi_snapshot["files"],
@@ -342,9 +529,11 @@ def _build_container_exec_command(
         docker_command.append("-i")
     if tty:
         docker_command.append("-t")
-    if env:
-        for key, value in env.items():
-            docker_command.extend(["-e", f"{key}={value}"])
+    merged_env = dict(env or {})
+    for key, value in host_ownership_env().items():
+        merged_env.setdefault(key, value)
+    for key, value in merged_env.items():
+        docker_command.extend(["-e", f"{key}={value}"])
     if workdir is not None:
         docker_command.extend(["-w", str(workdir)])
     docker_command.append(container_name)
@@ -454,10 +643,11 @@ def _container_mounts(root: Path, catalog: Path) -> list[str]:
     hermes_dir = root / "config" / "hermes"
     opencode_dir = root / "config" / "opencode"
     skills_dir = root / "config" / "skills"
+    orchestra_extension_dir = root.parent / "orchestra" / "extensions" / "pi" / "orchestra"
     tasks_dir = _tasks_mount_source(root)
     for source in (orchestra_dir, pi_dir, hermes_dir, opencode_dir, skills_dir):
         source.mkdir(parents=True, exist_ok=True)
-    return [
+    mounts = [
         "-v", f"{root / 'results'}:/bench/results",
         "-v", f"{root / 'artifacts'}:/bench/artifacts",
         "-v", f"{orchestra_dir}:{ORCHESTRA_CONFIG_TARGET}:ro",
@@ -467,6 +657,9 @@ def _container_mounts(root: Path, catalog: Path) -> list[str]:
         "-v", f"{skills_dir}:{SKILLS_CONFIG_TARGET}:ro",
         "-v", f"{tasks_dir}:{VISIBLE_TASKS_TARGET}:ro",
     ]
+    if orchestra_extension_dir.is_dir():
+        mounts.extend(["-v", f"{orchestra_extension_dir}:/bench/orchestra-extension:ro"])
+    return mounts
 
 
 def _create_container(root: Path, image: str) -> None:
@@ -567,6 +760,7 @@ def prepare_startup(
         "image": build_report["image"],
         "container": container_report["container"],
         "runtime": {
+            "home_dir": runtime_summary.get("home_dir"),
             "pi_runtime_dir": runtime_summary.get("pi_runtime_dir"),
             "orchestra_runtime_dir": runtime_summary.get("orchestra_runtime_dir"),
         },

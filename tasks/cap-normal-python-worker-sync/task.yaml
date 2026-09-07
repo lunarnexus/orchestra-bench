@@ -1,0 +1,11 @@
+task_id: cap-normal-python-worker-sync
+description: "Build a FastAPI document sync API plus Python worker with durable SQLite jobs, retries, stale-job recovery, conflict handling, audit history"
+family: capability
+batch: capability-normal
+required_roles:
+  - builder
+  - verifier
+scoring_type: numeric
+timeout_minutes: 35
+evaluator: evaluate/run.sh
+split: dev

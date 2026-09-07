@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from bench.paths import RepoPaths
-from bench.result import TaskResult, load_result
-from bench.runner import grade_run
+from bench.result import TaskResult, load_result, write_json_atomic
+import bench.runner as runner_module
 from bench.tasks import load_task
 
 from .queries import ReportEntry, collect_results, filter_results, sort_results
@@ -208,11 +210,79 @@ def format_rescore_report(entries: Sequence[ReportEntry], results: Sequence[Task
                     _display_run_dir(entry, root=root),
                     f"outcome={result.outcome or 'n/a'}",
                     f"evaluation={result.evaluation.status or 'n/a'}",
-                    f"score={result.evaluation.score or 'n/a'}",
+                    f"score={entry.score_display or 'n/a'}",
                 ]
             )
         )
     return "\n".join(body) + "\n"
+
+
+def _make_deletable(path: Path) -> None:
+    """Best-effort permission repair so the host user can unlink container-written trees."""
+
+    def _open_up(target: Path, write_bits: int) -> None:
+        try:
+            mode = stat.S_IMODE(target.lstat().st_mode)
+            if (mode & write_bits) != write_bits:
+                os.chmod(target, mode | write_bits)
+        except OSError:
+            pass
+
+    for current, dirnames, filenames in os.walk(path, topdown=False):
+        base = Path(current)
+        for name in [*dirnames, *filenames]:
+            _open_up(base / name, 0o300 if (base / name).is_dir() else 0o200)
+    _open_up(path, 0o300)
+
+
+def _rmtree_with_chmod(run_dir: Path) -> None:
+    def _onerror(func, path, exc_info):  # type: ignore[no-untyped-def]
+        target = Path(path)
+        try:
+            mode = stat.S_IMODE(target.lstat().st_mode)
+            os.chmod(target, mode | (0o300 if target.is_dir() else 0o200))
+            parent = target.parent
+            parent_mode = stat.S_IMODE(parent.lstat().st_mode)
+            os.chmod(parent, parent_mode | 0o300)
+        except OSError:
+            raise exc_info[1]
+        func(path)
+
+    shutil.rmtree(run_dir, onerror=_onerror)
+
+
+def _delete_run_dir_via_container(run_dir: Path) -> None:
+    """Delete through the benchmark container (root) when host permissions are not enough."""
+    if run_dir.parent.name != "results":
+        raise RuntimeError(
+            f"cannot delete {run_dir}: files are owned by another user and this results dir is not the mounted /bench/results path"
+        )
+    from bench.runtime import container_exec
+
+    command = [
+        "python3",
+        "-c",
+        "import shutil, sys; shutil.rmtree(sys.argv[1])",
+        f"/bench/results/{run_dir.name}",
+    ]
+    completed = container_exec(command, workdir="/bench", verbose=False)
+    if completed.returncode != 0:
+        stderr = (getattr(completed, "stderr", None) or "").strip()
+        detail = f" ({stderr})" if stderr else ""
+        raise RuntimeError(f"container-side delete failed for {run_dir.name}{detail}")
+
+
+def _delete_run_dir(run_dir: Path) -> None:
+    run_dir = Path(run_dir)
+    if not run_dir.exists():
+        return
+    _make_deletable(run_dir)
+    try:
+        _rmtree_with_chmod(run_dir)
+    except (PermissionError, OSError):
+        _delete_run_dir_via_container(run_dir)
+    if run_dir.exists() and any(run_dir.iterdir()):
+        raise RuntimeError(f"could not fully delete {run_dir}; re-run with more permission or fix ownership")
 
 
 def delete_results(entries: Sequence[ReportEntry], *, root: Path | str | None = None, confirmed: bool = False) -> list[Path]:
@@ -221,8 +291,19 @@ def delete_results(entries: Sequence[ReportEntry], *, root: Path | str | None = 
         run_dir = entry.path.parent
         deleted.append(run_dir)
         if confirmed:
-            shutil.rmtree(run_dir)
+            _delete_run_dir(run_dir)
     return deleted
+
+
+def delete_all_result_dirs(results_dir: Path | str, *, confirmed: bool = False) -> list[Path]:
+    base = Path(results_dir)
+    if not base.is_dir():
+        return []
+    run_dirs = sorted(path for path in base.iterdir() if path.is_dir())
+    if confirmed:
+        for run_dir in run_dirs:
+            _delete_run_dir(run_dir)
+    return run_dirs
 
 
 def rescore_results(
@@ -238,7 +319,13 @@ def rescore_results(
         run_paths = RepoPaths(repo_root).run(entry.run_id, entry.task_id)
         task = load_task(entry.task_id, tasks_root=resolved_tasks_dir)
         prior_result = load_result(entry.path)
-        results.append(grade_run(task, run_paths, prior_result=prior_result))
+        # Resolve at call time so a test that patches bench.runner.grade_run cannot leak a stale binding here.
+        rescored = runner_module.grade_run(task, run_paths, prior_result=prior_result)
+        if rescored.evaluation.status != "ok":
+            write_json_atomic(entry.path, prior_result)
+            results.append(prior_result)
+        else:
+            results.append(rescored)
     return results
 
 

@@ -1,0 +1,11 @@
+task_id: cap-normal-ts-approval-queue
+description: "Build a TypeScript moderation queue with durable persistence, approval workflow, attachment path safety, public visibility rules, XSS-safe rendering, audit history"
+family: capability
+batch: capability-normal
+required_roles:
+  - builder
+  - verifier
+scoring_type: numeric
+timeout_minutes: 35
+evaluator: evaluate/run.sh
+split: dev

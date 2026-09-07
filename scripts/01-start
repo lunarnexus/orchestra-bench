@@ -8,8 +8,7 @@ usage: 01-start
 Set up the benchmark container (build, recreate, configure).
 
 Examples:
-  scripts/01-start
-  ./01-start
+  01-start
 EOF
     exit 0
     ;;

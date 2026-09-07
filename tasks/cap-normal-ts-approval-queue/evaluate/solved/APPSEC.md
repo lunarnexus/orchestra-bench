@@ -1,0 +1,8 @@
+- threat: untrusted title/body content could become public HTML and execute script if raw output were returned.
+- mitigation: `src/server.ts` escapes title and body into `title_html` and `body_html`, so `<script>` is rendered as text rather than executable markup.
+- threat: `attachment_name` could attempt path traversal or absolute-path writes.
+- mitigation: validation rejects traversal markers and path separators, then uses a generated relative upload path under `APPROVAL_QUEUE_UPLOAD_DIR`.
+- threat: a browser homepage could hide sensitive admin workflow details or suggest unsafe handling of user content.
+- mitigation: `GET /` explicitly documents `X-Admin-Token`, references only the intended moderation routes, and notes that public content is escaped before rendering.
+- threat: moderation endpoints could be altered without authorization or traceability.
+- mitigation: `X-Admin-Token` gates `/admin/*`, and audit history records each submitted, approved, or rejected transition.

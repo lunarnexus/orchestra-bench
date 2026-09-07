@@ -2,6 +2,10 @@ task_id: smoke-dependent-setup-chain
 description: "Create prerequisite data then perform checkout and verify derived order state"
 family: orchestrator
 batch: smoke
+expected_orchestra: true
+required_roles:
+  - builder
+  - verifier
 scoring_type: pass_fail
 timeout_minutes: 12
 evaluator: evaluate/run.sh

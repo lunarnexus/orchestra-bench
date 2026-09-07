@@ -41,7 +41,8 @@ def test_static_runtime_contract_files_encode_thin_entrypoint_and_image_contract
     assert "exec tail -f /dev/null" in entrypoint
     assert "COPY bench/ /opt/orchestra-bench/bench/" in dockerfile
     assert "ENV PYTHONPATH=/opt/orchestra-bench" in dockerfile
-    assert "BENCH_TASKS=/bench/task-materials-visible" in dockerfile
+    assert "BENCH_TASKS=/bench/task-materials-source" in dockerfile
+    assert "BENCH_ORCHESTRA_EXTENSION_SRC=/bench/orchestra-extension" in dockerfile
     assert "PI_CODING_AGENT_DIR=/workspace/.pi/agent" not in dockerfile
     assert "PI_ORCHESTRA_RUNTIME_DIR=/workspace/.pi/agent/orchestra" not in dockerfile
     assert "PI_LMSTUDIO_RUNTIME_FILE=/workspace/.pi/agent/lmstudio.json" not in dockerfile
@@ -67,12 +68,15 @@ def test_runtime_environment_uses_run_scoped_pi_agent_dir_by_default() -> None:
         }
     )
 
-    assert runtime.orchestra_runtime_dir == Path("/workspace/.pi/agent/20250101T010203/orchestra")
-    assert runtime.lmstudio_runtime_file == Path("/workspace/.pi/agent/20250101T010203/lmstudio.json")
+    assert runtime.tasks_root == Path("/bench/task-materials-source")
+    assert runtime.home_dir == Path("/workspace/.pi/home/20250101T010203")
+    assert runtime.pi_runtime_dir == Path("/workspace/.pi/home/20250101T010203/.pi/agent")
+    assert runtime.orchestra_runtime_dir == Path("/workspace/.pi/home/20250101T010203/.pi/agent/orchestra")
+    assert runtime.lmstudio_runtime_file == Path("/workspace/.pi/home/20250101T010203/.pi/agent/lmstudio.json")
 
 
 def test_runtime_environment_rejects_shared_pi_agent_dir() -> None:
-    with pytest.raises(ValueError, match="run-scoped"):
+    with pytest.raises(ValueError, match="HOME/.pi/agent"):
         RuntimeEnvironment.from_env(
             {
                 "BENCH_WORKSPACE": "/workspace",
@@ -129,7 +133,7 @@ def test_prepare_workdir_copies_only_agent_visible_task_files(tmp_path: Path) ->
     assert not (workdir / "secret.txt").exists()
 
 
-def test_prepare_workdir_rejects_exposed_evaluate_directory(tmp_path: Path) -> None:
+def test_prepare_workdir_uses_hidden_task_source_without_copying_evaluate(tmp_path: Path) -> None:
     tasks_root = tmp_path / "tasks"
     task_dir = tasks_root / "runtime-task"
     fixture_dir = task_dir / "fixture"
@@ -146,6 +150,7 @@ def test_prepare_workdir_rejects_exposed_evaluate_directory(tmp_path: Path) -> N
     )
     (task_dir / "PRD.md").write_text("prd\n")
     (task_dir / "Prompt.md").write_text("prompt\n")
+    (fixture_dir / "seed.txt").write_text("fixture\n")
 
     runtime = RuntimeEnvironment(
         tasks_root=tasks_root,
@@ -160,25 +165,53 @@ def test_prepare_workdir_rejects_exposed_evaluate_directory(tmp_path: Path) -> N
         run_id="20250101T010203",
     )
 
-    with pytest.raises(ValueError, match="must not expose evaluate"):
-        prepare_workdir("runtime-task", runtime)
+    workdir = prepare_workdir("runtime-task", runtime)
+
+    assert workdir == tmp_path / "workspace" / "20250101T010203-runtime-task"
+    assert (workdir / "Prompt.md").read_text(encoding="utf-8") == "prompt\n"
+    assert (workdir / "seed.txt").read_text(encoding="utf-8") == "fixture\n"
+    assert not (workdir / "evaluate").exists()
 
 
 def test_init_runtime_overlays_catalog_without_requiring_orchestra_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "orchestra-config"
+    extension_source = tmp_path / "orchestra-extension-src"
     skills = tmp_path / "skills"
-    runtime_dir = tmp_path / "runtime" / "orchestra"
+    home_dir = tmp_path / "home" / "20250101T010203"
+    runtime_dir = home_dir / ".pi" / "agent" / "orchestra"
+    extension_runtime = home_dir / ".pi" / "agent" / "extensions" / "orchestra"
     lmstudio_source = tmp_path / "config" / "pi" / "lmstudio.json"
-    lmstudio_runtime = tmp_path / "runtime" / "lmstudio.json"
+    lmstudio_runtime = home_dir / ".pi" / "agent" / "lmstudio.json"
     bin_dir = tmp_path / "bin"
     log = tmp_path / "orchestra.log"
 
     source.mkdir(parents=True)
+    extension_source.mkdir(parents=True)
     skills.mkdir(parents=True)
     lmstudio_source.parent.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir()
-    (source / "agent-catalog.yaml").write_text("default_role: builder\n")
+    (source / "agent-catalog.yaml").write_text(
+        "default_role: builder\n"
+        "harness_configs:\n"
+        "  pi:\n"
+        "    harness: pi\n"
+        "    command: ['pi']\n"
+        "roles:\n"
+        "  builder:\n"
+        "    harness_config: pi\n"
+        "    model: example/model\n"
+        "    prompt_addition: keep me out of runtime sync\n"
+    )
     (skills / "builder.md").write_text("skill\n")
+    (extension_source / "index.ts").write_text(
+        'ctx.ui.setStatus("orchestra", "current source")\n',
+        encoding="utf-8",
+    )
+    extension_runtime.mkdir(parents=True, exist_ok=True)
+    (extension_runtime / "index.ts").write_text(
+        'ctx.ui.setWidget("orchestra", { text })\n',
+        encoding="utf-8",
+    )
     lmstudio_source.write_text('{"url": "http://localhost:1234"}\n')
 
     _write_executable(
@@ -206,6 +239,7 @@ def test_init_runtime_overlays_catalog_without_requiring_orchestra_defaults(tmp_
         orchestra_config_src=source,
         lmstudio_config_src=lmstudio_source,
         pi_skills_src=skills,
+        orchestra_extension_src=extension_source,
         orchestra_runtime_dir=runtime_dir,
         lmstudio_runtime_file=lmstudio_runtime,
         hermes_runtime_dir=tmp_path / "hermes-runtime",
@@ -220,12 +254,17 @@ def test_init_runtime_overlays_catalog_without_requiring_orchestra_defaults(tmp_
     summary = init_runtime(runtime)
 
     assert summary["catalog_path"] == str(runtime_dir / "agent-catalog.yaml")
-    assert (runtime_dir / "agent-catalog.yaml").read_text(encoding="utf-8") == "default_role: builder\n"
+    catalog_text = (runtime_dir / "agent-catalog.yaml").read_text(encoding="utf-8")
+    assert "prompt_addition" not in catalog_text
+    assert "example/model" in catalog_text
+    extension_text = (extension_runtime / "index.ts").read_text(encoding="utf-8")
+    assert "setWidget(\"orchestra\", { text }" not in extension_text
+    assert "setStatus(\"orchestra\"" in extension_text
     assert not (runtime_dir / "config.yaml").exists()
     assert not (runtime_dir / "prompts.yaml").exists()
     assert lmstudio_runtime.read_text(encoding="utf-8") == '{"url": "http://localhost:1234"}\n'
     assert (runtime.pi_skills_runtime_dir / "builder.md").read_text(encoding="utf-8") == "skill\n"
-    assert log.read_text(encoding="utf-8").splitlines() == ["init pi --copy --force"]
+    assert log.read_text(encoding="utf-8").splitlines() == ["init pi --copy --force", "_tool-info"]
 
 
 def test_init_runtime_overlays_regular_config_directories_and_records_provenance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,10 +273,11 @@ def test_init_runtime_overlays_regular_config_directories_and_records_provenance
     hermes_src = tmp_path / "hermes-config"
     opencode_src = tmp_path / "opencode-config"
     skills = tmp_path / "skills"
-    # Pi agent dir (PI_CODING_AGENT_DIR) is the parent of the Orchestra runtime
-    # dir, matching RuntimeEnvironment.pi_runtime_dir and the production layout.
-    runtime_dir = tmp_path / "runtime" / "orchestra"
-    pi_runtime = tmp_path / "runtime"
+    # Pi runtime lives under a run-scoped HOME so HOME/.pi/agent becomes the
+    # active Pi agent dir.
+    home_dir = tmp_path / "home" / "20250101T010203"
+    pi_runtime = home_dir / ".pi" / "agent"
+    runtime_dir = pi_runtime / "orchestra"
     hermes_runtime = tmp_path / "runtime" / "hermes"
     opencode_runtime = tmp_path / "runtime" / "opencode"
     bin_dir = tmp_path / "bin"
@@ -283,12 +323,22 @@ def test_init_runtime_overlays_regular_config_directories_and_records_provenance
         hermes_config_src=hermes_src,
         opencode_config_src=opencode_src,
         pi_skills_src=skills,
+        home_dir=home_dir,
         orchestra_runtime_dir=runtime_dir,
         lmstudio_runtime_file=pi_runtime / "lmstudio.json",
         hermes_runtime_dir=hermes_runtime,
         opencode_runtime_dir=opencode_runtime,
         run_id="20250101T010203",
     )
+
+    monkeypatch.setattr("bench.runtime.PI_AGENT_STATE_SRC", tmp_path / "root-agent", raising=False)
+    (tmp_path / "root-agent" / "settings.json").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "root-agent" / "settings.json").write_text(
+        '{"packages": ["http://git.lunarnexus.local:3000/james/pi-lmstudio"]}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "root-agent" / "git" / "git.lunarnexus.local" / "james" / "pi-lmstudio").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "root-agent" / "git" / "git.lunarnexus.local" / "james" / "pi-lmstudio" / "marker.txt").write_text("installed\n", encoding="utf-8")
 
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setenv("ORCHESTRA_LOG", str(log))
@@ -302,20 +352,25 @@ def test_init_runtime_overlays_regular_config_directories_and_records_provenance
     assert summary["opencode_config_files"] == ["opencode.json"]
     assert (runtime_dir / "agent-catalog.yaml").read_text(encoding="utf-8") == "default_role: builder\n"
     assert (runtime_dir / "config.yaml").read_text(encoding="utf-8") == "version: one\n"
-    assert (pi_runtime / "settings.json").read_text(encoding="utf-8") == '{"enableInstallTelemetry": false}\n'
+    assert json.loads((pi_runtime / "settings.json").read_text(encoding="utf-8")) == {
+        "enableInstallTelemetry": False,
+        "packages": ["http://git.lunarnexus.local:3000/james/pi-lmstudio"],
+    }
+    assert (pi_runtime / "git" / "git.lunarnexus.local" / "james" / "pi-lmstudio" / "marker.txt").read_text(encoding="utf-8") == "installed\n"
     assert (pi_runtime / "lmstudio.json").read_text(encoding="utf-8") == '{"url": "http://localhost:1234"}\n'
     assert (hermes_runtime / "config.yaml").read_text(encoding="utf-8") == "model: hermes-test\n"
     assert (opencode_runtime / "opencode.json").read_text(encoding="utf-8") == '{"model": "opencode-test"}\n'
     assert (runtime.pi_skills_runtime_dir / "builder" / "SKILL.md").read_text(encoding="utf-8") == "skill\n"
-    assert log.read_text(encoding="utf-8").splitlines() == ["init pi --copy --force"]
+    assert log.read_text(encoding="utf-8").splitlines() == ["init pi --copy --force", "_tool-info"]
 
 
 def test_init_runtime_mirrors_run_scoped_pi_config_without_clobbering_existing_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     orchestra_src = tmp_path / "orchestra-config"
     pi_src = tmp_path / "pi-config"
     skills = tmp_path / "skills"
-    runtime_dir = tmp_path / "runtime" / "orchestra"
-    pi_runtime = tmp_path / "runtime"
+    home_dir = tmp_path / "home" / "20250101T010203"
+    pi_runtime = home_dir / ".pi" / "agent"
+    runtime_dir = pi_runtime / "orchestra"
     hermes_runtime = tmp_path / "runtime" / "hermes"
     opencode_runtime = tmp_path / "runtime" / "opencode"
     mirrored_pi_runtime = tmp_path / "root" / ".pi" / "agent"
@@ -330,6 +385,8 @@ def test_init_runtime_mirrors_run_scoped_pi_config_without_clobbering_existing_s
     (skills / "builder" / "SKILL.md").parent.mkdir(parents=True, exist_ok=True)
     (skills / "builder" / "SKILL.md").write_text("skill\n")
     (mirrored_pi_runtime / "keep.txt").write_text("keep me\n")
+    (mirrored_pi_runtime / "extensions" / "lmstudio" / "plugin.json").parent.mkdir(parents=True, exist_ok=True)
+    (mirrored_pi_runtime / "extensions" / "lmstudio" / "plugin.json").write_text('{"enabled": true}\n')
 
     _write_executable(
         bin_dir / "orchestra",
@@ -345,6 +402,7 @@ def test_init_runtime_mirrors_run_scoped_pi_config_without_clobbering_existing_s
         lmstudio_config_src=pi_src / "lmstudio.json",
         pi_config_src=pi_src,
         pi_skills_src=skills,
+        home_dir=home_dir,
         orchestra_runtime_dir=runtime_dir,
         lmstudio_runtime_file=pi_runtime / "lmstudio.json",
         hermes_runtime_dir=hermes_runtime,
@@ -361,11 +419,16 @@ def test_init_runtime_mirrors_run_scoped_pi_config_without_clobbering_existing_s
 
     summary = init_runtime(runtime)
 
+    assert summary["home_dir"] == str(tmp_path / "home" / "20250101T010203")
     assert summary["pi_runtime_dir"] == str(pi_runtime)
     assert (mirrored_pi_runtime / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
-    assert (mirrored_pi_runtime / "lmstudio.json").read_text(encoding="utf-8") == '{"url": "http://localhost:1234"}\n'
-    assert (mirrored_pi_runtime / "settings.json").read_text(encoding="utf-8") == '{"enableInstallTelemetry": false}\n'
-    assert (mirrored_pi_runtime / "orchestra" / "agent-catalog.yaml").read_text(encoding="utf-8") == "default_role: builder\n"
+    assert not (mirrored_pi_runtime / "lmstudio.json").exists()
+    assert not (mirrored_pi_runtime / "settings.json").exists()
+    assert not (mirrored_pi_runtime / "orchestra").exists()
+    assert (mirrored_pi_runtime / "extensions" / "lmstudio" / "plugin.json").read_text(encoding="utf-8") == '{"enabled": true}\n'
+    assert (pi_runtime / "lmstudio.json").read_text(encoding="utf-8") == '{"url": "http://localhost:1234"}\n'
+    assert (pi_runtime / "settings.json").read_text(encoding="utf-8") == '{\n  "enableInstallTelemetry": false\n}\n'
+    assert (pi_runtime / "orchestra" / "agent-catalog.yaml").read_text(encoding="utf-8") == "default_role: builder\n"
 
 
 def test_init_runtime_command_prints_json_summary_for_host_passthrough(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -405,9 +468,11 @@ def test_init_runtime_command_prints_json_summary_for_host_passthrough(tmp_path:
 
     assert runtime_main(["init-runtime"]) == 0
     summary = json.loads(capsys.readouterr().out)
-    pi_runtime_dir = workspace_root / ".pi" / "agent" / "20250101T010203"
+    home_dir = workspace_root / ".pi" / "home" / "20250101T010203"
+    pi_runtime_dir = home_dir / ".pi" / "agent"
     # The host-side interactive passthrough parses these keys to point the
     # session at the run-scoped dirs populated by the in-container sync.
+    assert summary["home_dir"] == str(home_dir)
     assert summary["pi_runtime_dir"] == str(pi_runtime_dir)
     assert summary["orchestra_runtime_dir"] == str(pi_runtime_dir / "orchestra")
     assert (pi_runtime_dir / "orchestra" / "agent-catalog.yaml").read_text(encoding="utf-8") == "default_role: builder\n"
@@ -420,8 +485,9 @@ def test_init_runtime_persists_effective_overlay_summary_for_run_metadata(tmp_pa
     opencode_src = tmp_path / "opencode-config"
     skills = tmp_path / "skills"
     results_root = tmp_path / "results"
-    runtime_dir = tmp_path / "runtime" / "orchestra"
-    pi_runtime = tmp_path / "runtime"
+    home_dir = tmp_path / "home" / "20250101T010203"
+    pi_runtime = home_dir / ".pi" / "agent"
+    runtime_dir = pi_runtime / "orchestra"
     bin_dir = tmp_path / "bin"
     log = tmp_path / "orchestra.log"
 
@@ -440,10 +506,11 @@ def test_init_runtime_persists_effective_overlay_summary_for_run_metadata(tmp_pa
         "printf '%s\\n' \"$*\" >> \"$ORCHESTRA_LOG\"\n",
     )
 
+    artifacts_root = tmp_path / "artifacts"
     runtime = RuntimeEnvironment(
         tasks_root=tmp_path / "tasks",
         results_root=results_root,
-        artifacts_root=tmp_path / "artifacts",
+        artifacts_root=artifacts_root,
         workspace_root=tmp_path / "workspace",
         orchestra_config_src=orchestra_src,
         lmstudio_config_src=pi_src / "lmstudio.json",
@@ -451,6 +518,7 @@ def test_init_runtime_persists_effective_overlay_summary_for_run_metadata(tmp_pa
         hermes_config_src=hermes_src,
         opencode_config_src=opencode_src,
         pi_skills_src=skills,
+        home_dir=home_dir,
         orchestra_runtime_dir=runtime_dir,
         lmstudio_runtime_file=pi_runtime / "lmstudio.json",
         hermes_runtime_dir=tmp_path / "hermes-runtime",
@@ -463,8 +531,9 @@ def test_init_runtime_persists_effective_overlay_summary_for_run_metadata(tmp_pa
 
     summary = init_runtime(runtime)
 
-    record_path = results_root / "runtime-config-sync.json"
+    record_path = artifacts_root / "runtime-config-sync.json"
     assert record_path.is_file()
+    assert not (results_root / "runtime-config-sync.json").exists()
     record = json.loads(record_path.read_text(encoding="utf-8"))
     for key in (
         "orchestra_config_files",
@@ -710,7 +779,7 @@ def test_start_container_creates_fresh_with_v2_mounts(tmp_path: Path, monkeypatc
         f"{root / 'config' / 'hermes'}:/bench/hermes:ro",
         f"{root / 'config' / 'opencode'}:/bench/opencode:ro",
         f"{root / 'config' / 'skills'}:/bench/skills:ro",
-        f"{root / 'tasks'}:/bench/task-materials-visible:ro",
+        f"{root / 'tasks'}:/bench/task-materials-source:ro",
     ]
     for expected in expected_mounts:
         assert "-v" in mounts and expected in mounts
@@ -775,7 +844,7 @@ def test_prepare_startup_builds_recreates_and_syncs_in_order(tmp_path: Path, mon
 
     def fake_sync_runtime_config_inside_container():
         calls.append(("sync",))
-        return {"pi_runtime_dir": "/workspace/.pi/agent/20250101T010203", "orchestra_runtime_dir": "/workspace/.pi/agent/20250101T010203/orchestra"}
+        return {"home_dir": "/workspace/.pi/home/20250101T010203", "pi_runtime_dir": "/workspace/.pi/home/20250101T010203/.pi/agent", "orchestra_runtime_dir": "/workspace/.pi/home/20250101T010203/.pi/agent/orchestra"}
 
     monkeypatch.setattr("bench.runtime.build_image", fake_build_image)
     monkeypatch.setattr("bench.runtime.recreate_container", fake_recreate_container)
@@ -794,8 +863,9 @@ def test_prepare_startup_builds_recreates_and_syncs_in_order(tmp_path: Path, mon
         "image": "orchestra-bench-env",
         "container": CONTAINER_NAME,
         "runtime": {
-            "pi_runtime_dir": "/workspace/.pi/agent/20250101T010203",
-            "orchestra_runtime_dir": "/workspace/.pi/agent/20250101T010203/orchestra",
+            "home_dir": "/workspace/.pi/home/20250101T010203",
+            "pi_runtime_dir": "/workspace/.pi/home/20250101T010203/.pi/agent",
+            "orchestra_runtime_dir": "/workspace/.pi/home/20250101T010203/.pi/agent/orchestra",
         },
     }
 
@@ -816,7 +886,9 @@ def test_container_exec_builds_docker_exec_command(tmp_path: Path, monkeypatch: 
 
     assert completed.returncode == 0
     log_line = log.read_text(encoding="utf-8").splitlines()[-1]
-    assert log_line.startswith("exec -e BENCH_IN_CONTAINER=1 -w /bench orchestra-bench-runner python3 -m bench.cli run --auto alpha-run")
+    assert log_line.startswith(
+        f"exec -e BENCH_IN_CONTAINER=1 -e BENCH_HOST_UID={os.getuid()} -e BENCH_HOST_GID={os.getgid()} -w /bench orchestra-bench-runner python3 -m bench.cli run --auto alpha-run"
+    )
 
 
 def test_container_exec_uses_script_wrapper_for_interactive_tty_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -850,8 +922,13 @@ def test_container_exec_uses_script_wrapper_for_interactive_tty_sessions(tmp_pat
     assert completed.returncode == 0
     assert transcript.read_text(encoding="utf-8") == "transcript from script wrapper\n"
     assert script_log.read_text(encoding="utf-8").splitlines()[-1].startswith("-qefc ")
-    assert "docker exec -i -t -e BENCH_IN_CONTAINER=1 -w /bench orchestra-bench-runner pi config" in script_log.read_text(encoding="utf-8")
-    assert docker_log.read_text(encoding="utf-8").splitlines()[-1].startswith("exec -i -t -e BENCH_IN_CONTAINER=1 -w /bench orchestra-bench-runner pi config")
+    assert (
+        f"docker exec -i -t -e BENCH_IN_CONTAINER=1 -e BENCH_HOST_UID={os.getuid()} -e BENCH_HOST_GID={os.getgid()} -w /bench orchestra-bench-runner pi config"
+        in script_log.read_text(encoding="utf-8")
+    )
+    assert docker_log.read_text(encoding="utf-8").splitlines()[-1].startswith(
+        f"exec -i -t -e BENCH_IN_CONTAINER=1 -e BENCH_HOST_UID={os.getuid()} -e BENCH_HOST_GID={os.getgid()} -w /bench orchestra-bench-runner pi config"
+    )
 
 
 @pytest.mark.skipif(os.environ.get("BENCH_RUN_DOCKER") != "1", reason="set BENCH_RUN_DOCKER=1 to enable real Docker smoke")
@@ -869,8 +946,8 @@ def test_real_docker_smoke_is_gated(tmp_path: Path) -> None:
     results_root = tmp_path / "results"
     artifacts_root = tmp_path / "artifacts"
     lmstudio_source = tmp_path / "config" / "pi" / "lmstudio.json"
-    runtime_dir = workspace_root / ".pi" / "agent" / "20250101T010203" / "orchestra"
-    lmstudio_runtime = workspace_root / ".pi" / "agent" / "20250101T010203" / "lmstudio.json"
+    runtime_dir = workspace_root / ".pi" / "home" / "20250101T010203" / ".pi" / "agent" / "orchestra"
+    lmstudio_runtime = workspace_root / ".pi" / "home" / "20250101T010203" / ".pi" / "agent" / "lmstudio.json"
     task_dir = task_materials_root / "runtime-task"
 
     orchestra_src.mkdir(parents=True)
@@ -903,14 +980,14 @@ def test_real_docker_smoke_is_gated(tmp_path: Path) -> None:
         "-v", f"{orchestra_src}:/bench/orchestra-config:ro",
         "-v", f"{lmstudio_source}:/bench/pi/lmstudio.json:ro",
         "-v", f"{skills_src}:/bench/skills:ro",
-        "-v", f"{task_materials_root}:/bench/task-materials-visible:ro",
+        "-v", f"{task_materials_root}:/bench/task-materials-source:ro",
         "-v", f"{workspace_root}:/workspace",
         "-v", f"{results_root}:/bench/results",
         "-v", f"{artifacts_root}:/bench/artifacts",
     ]
     env = [
         "-e", "BENCH_RUN_ID=20250101T010203",
-        "-e", "BENCH_TASKS=/bench/task-materials-visible",
+        "-e", "BENCH_TASKS=/bench/task-materials-source",
         "-e", "BENCH_RESULTS=/bench/results",
         "-e", "BENCH_ARTIFACTS=/bench/artifacts",
         "-e", "BENCH_WORKSPACE=/workspace",

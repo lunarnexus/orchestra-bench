@@ -1,0 +1,12 @@
+task_id: cap-advanced-url-shortener-review
+description: Build ShortLink Desk, a small URL shortener with review queue, stats, audit history, and URL safety checks
+family: capability
+batch: capability-advanced
+required_roles:
+  - builder
+  - verifier
+scoring_type: numeric
+timeout_minutes: 30
+evaluator: evaluate/run.sh
+split: dev
+source_benchmark: SaaSBench+SWE-bench-inspired

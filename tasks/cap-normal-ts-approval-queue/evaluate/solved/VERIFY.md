@@ -1,0 +1,4 @@
+- command: `node --test --experimental-strip-types tests/api.test.ts`
+- result: passed. The run exercised `src/server.ts`, the browser `GET /` homepage, approved moderation flow, public visibility, escaped body_html/title_html output, and attachment validation.
+- command: evaluator integration flow for `GET /`, `POST /submissions`, `POST /admin/submissions/:id/decision`, `GET /public/submissions`, and `GET /admin/submissions/:id/history`.
+- result: passed with homepage coverage, file-backed persistence, restart coverage, and pagination/filtering checks against `src/server.ts`.

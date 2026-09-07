@@ -1,0 +1,11 @@
+task_id: cap-normal-ruby-billing-ledger
+description: "Build a Ruby Sinatra billing ledger with durable SQLite persistence, idempotency, reconciliation, export"
+family: capability
+batch: capability-normal
+required_roles:
+  - builder
+  - verifier
+scoring_type: numeric
+timeout_minutes: 35
+evaluator: evaluate/run.sh
+split: dev

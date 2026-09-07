@@ -1,0 +1,11 @@
+task_id: cap-easy-django-reports
+description: "Build a Django reporting app with SQLite persistence, grouped summaries, exports, report history"
+family: capability
+batch: capability-easy
+required_roles:
+  - builder
+  - verifier
+scoring_type: numeric
+timeout_minutes: 25
+evaluator: evaluate/run.sh
+split: dev

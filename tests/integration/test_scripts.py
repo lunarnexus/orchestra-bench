@@ -36,20 +36,40 @@ def test_shell_wrappers_dispatch_owned_subcommands(tmp_path: Path) -> None:
 
     start = _run_script("scripts/01-start", "--help", cwd=tmp_path)
     assert start.returncode == 0, start.stderr
-    assert start.stdout.startswith("usage:")
+    assert start.stdout.splitlines() == [
+        "usage: 01-start",
+        "",
+        "Set up the benchmark container (build, recreate, configure).",
+        "",
+        "Examples:",
+        "  01-start",
+    ]
 
     run = _run_script("scripts/02-run", "--help", cwd=tmp_path)
     assert run.returncode == 0, run.stderr
-    assert run.stdout.startswith("usage:")
+    assert run.stdout.splitlines()[0] == "usage:"
+    assert "02-run" in run.stdout
+    assert "./scripts/" not in run.stdout
 
     results = _run_script("scripts/03-results", "--help", cwd=tmp_path)
     assert results.returncode == 0, results.stderr
-    assert results.stdout.splitlines()[0] == "usage: scripts/03-results [dashboard|runs|run|tokens|timing|debug|compare|rescore|delete]"
+    assert results.stdout.splitlines()[0] == "usage: 03-results [command] [run-id]"
+    for command in ("dash", "runs", "run <id>", "tokens", "timing", "compare", "rescore", "delete"):
+        assert command in results.stdout
     assert "bench results" not in results.stdout
     assert "--root" not in results.stdout
     assert "--tasks-root" not in results.stdout
-    assert "delete-preview" in results.stdout
-    assert "delete-confirmation" in results.stdout
+    assert "03-results debug" not in results.stdout
+    assert "  03-results list" not in results.stdout
+
+
+def test_debug_wrapper_help_exposes_positional_modes_only(tmp_path: Path) -> None:
+    result = _run_script("scripts/04-debug", "--help", cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    for mode in ("orch", "full", "raw"):
+        assert mode in result.stdout
+    for flag in ("--no-tools", "--no-color", "--plain"):
+        assert flag not in result.stdout
 
 
 def test_run_wrapper_rejects_host_side_non_auto_runs(tmp_path: Path) -> None:
@@ -128,11 +148,18 @@ def test_start_wrapper_help_is_public_and_concise(tmp_path: Path) -> None:
         "Set up the benchmark container (build, recreate, configure).",
         "",
         "Examples:",
-        "  scripts/01-start",
-        "  ./01-start",
+        "  01-start",
     ]
     assert "bench start" not in result.stdout
     assert "--root" not in result.stdout
+
+
+def test_root_shims_work_from_repo_root(tmp_path: Path) -> None:
+    for script in ("./01-start", "./02-run", "./03-results"):
+        result = _run_script(script, "--help", cwd=REPO_ROOT)
+        assert result.returncode == 0, result.stderr
+        assert "scripts/" not in result.stdout
+        assert "./scripts/" not in result.stdout
 
 
 def test_public_wrappers_work_when_invoked_from_scripts_directory() -> None:
@@ -149,11 +176,13 @@ def test_public_wrappers_work_when_invoked_from_scripts_directory() -> None:
         )
         assert result.returncode == 0, f"{script} failed\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         if script == "02-run":
-            assert result.stdout.startswith("usage: scripts/02-run"), result.stdout
+            assert result.stdout.splitlines()[0] == "usage:"
+            assert "02-run" in result.stdout
             assert "bench run" not in result.stdout
             assert "--root" not in result.stdout
         else:
-            assert result.stdout.startswith("usage: scripts/03-results"), result.stdout
+            assert result.stdout.startswith("usage: 03-results"), result.stdout
+            assert "./scripts/" not in result.stdout
 
 
 

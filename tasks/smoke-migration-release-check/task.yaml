@@ -1,0 +1,11 @@
+task_id: smoke-migration-release-check
+description: "Migrate user records, preserve compatibility, and write safe release notes"
+family: orchestrator
+batch: smoke
+expected_orchestra: true
+required_roles:
+  - builder
+  - verifier
+scoring_type: pass_fail
+timeout_minutes: 15
+evaluator: evaluate/run.sh

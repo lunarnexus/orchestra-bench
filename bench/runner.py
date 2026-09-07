@@ -8,18 +8,22 @@ import tempfile
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from bench.artifacts import EvaluatorArtifactPaths
 from bench.auto import CompletionPolicy, wait_until_safe_to_grade
+from bench.orchestration import OrchestrationSettleResult, coerce_status_snapshot
+from bench.ownership import normalize_run_ownership
 from bench.harnesses.base import Harness, HarnessArtifactPaths, HarnessRequest
 from bench.evaluator import EvaluationError, EvaluatorRunner, grade_run as _grade_run
 from bench.paths import RepoPaths, RunPaths
-from bench.provenance import build_run_metadata
+from bench.provenance import build_run_metadata, orchestra_tools_executed_from_events
 from bench.result import EvaluationResult, HarnessResult, RunMeta, TaskResult, load_result, write_json_atomic
 from bench.runtime import load_runtime_config_summary
 from bench.tasks import TaskDefinition
 from bench.workspace import prepare_workspace
+
+extract_orchestra_metrics = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,7 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> Path:
             os.fsync(handle.fileno())
         os.chmod(tmp_path, 0o644)  # container runs as root; host operators must read run outputs
         os.replace(tmp_path, dest)
+        normalize_run_ownership(dest.parent)
         return dest
     except Exception:
         if tmp_path is not None:
@@ -151,6 +156,9 @@ def _build_provenance(
     notes: str = "",
     catalog_label: str | None = None,
     runtime_snapshot: dict[str, object] | None = None,
+    no_orchestra: bool | None = None,
+    no_orch_on: bool | None = None,
+    orchestra_tools_available: bool | None = None,
 ) -> dict[str, Any]:
     if provenance is not None:
         return dict(provenance)
@@ -167,6 +175,9 @@ def _build_provenance(
         notes=notes,
         catalog_label=catalog_label,
         runtime_snapshot=runtime_snapshot,
+        no_orchestra=no_orchestra,
+        no_orch_on=no_orch_on,
+        orchestra_tools_available=orchestra_tools_available,
     )
 
 
@@ -184,6 +195,9 @@ def prepare_run(
     notes: str = "",
     catalog_label: str | None = None,
     runtime_snapshot: dict[str, object] | None = None,
+    no_orchestra: bool | None = None,
+    no_orch_on: bool | None = None,
+    orchestra_tools_available: bool | None = None,
 ) -> PreparedRun:
     repo = RepoPaths(Path.cwd() if root is None else root)
     effective_run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
@@ -210,6 +224,9 @@ def prepare_run(
         notes=notes,
         catalog_label=catalog_label,
         runtime_snapshot=runtime_snapshot,
+        no_orchestra=no_orchestra,
+        no_orch_on=no_orch_on,
+        orchestra_tools_available=orchestra_tools_available,
     )
     bench_run = _bench_run_payload(
         task,
@@ -254,6 +271,68 @@ def _result_details(prepared: PreparedRun, request: HarnessRequest) -> dict[str,
     }
 
 
+def _orchestra_metrics_have_activity(metrics: Mapping[str, Any]) -> bool:
+    dispatch = metrics.get("dispatch") if isinstance(metrics.get("dispatch"), dict) else {}
+    roles = metrics.get("roles") if isinstance(metrics.get("roles"), dict) else {}
+    child_sessions = metrics.get("child_sessions") if isinstance(metrics.get("child_sessions"), dict) else {}
+    if any(
+        value > 0
+        for value in (
+            dispatch.get("attempts"),
+            dispatch.get("accepted"),
+            dispatch.get("rejected"),
+            child_sessions.get("completed"),
+            child_sessions.get("failed"),
+            child_sessions.get("timed_out"),
+            child_sessions.get("reconciled"),
+            child_sessions.get("active"),
+            child_sessions.get("inferred_active"),
+        )
+        if isinstance(value, (int, float))
+    ):
+        return True
+    for key in ("requested", "returned", "started"):
+        values = roles.get(key)
+        if isinstance(values, list) and any(str(value).strip() for value in values):
+            return True
+    return bool(metrics.get("tool_activity_without_orch_on") or metrics.get("tool_orchestration_without_orch_on"))
+
+
+def _persist_orchestra_metrics(result: TaskResult, run_paths: RunPaths) -> dict[str, Any]:
+    global extract_orchestra_metrics
+
+    extractor = extract_orchestra_metrics
+    if not callable(extractor):
+        from bench.reporting.orchestra_metrics import extract_orchestra_metrics as loaded_extractor
+
+        extract_orchestra_metrics = loaded_extractor
+        extractor = loaded_extractor
+    metrics = extractor(run_paths.run_dir)
+    details = result.details if isinstance(result.details, dict) else {}
+    provenance = details.get("provenance")
+    if not isinstance(provenance, dict):
+        # Ensure a persisted container exists so the observed-execution fact is
+        # recorded even when no earlier provenance section was present.
+        provenance = {}
+        details["provenance"] = provenance
+    activity_observed = _orchestra_metrics_have_activity(metrics)
+    orch_on_requested = provenance.get("orch_on_requested")
+    if isinstance(orch_on_requested, bool):
+        # A false value is an observed-mode claim: only report contamination when
+        # the extracted metrics also show dispatch/child activity.
+        provenance["tool_orchestration_without_orch_on"] = (
+            activity_observed if not orch_on_requested else False
+        )
+    # Observed execution is its own fact, derived from actual non-error dispatch tool
+    # events (never from CLI flags or configured availability); None when unproven.
+    provenance["orchestra_tools_executed"] = orchestra_tools_executed_from_events(run_paths.run_dir)
+    if provenance.get("orchestra") is True or activity_observed:
+        payload = dict(metrics)
+        result.orchestra = payload
+        details["orchestra_metrics"] = payload
+    return metrics
+
+
 def _make_request(
     prepared: PreparedRun,
     *,
@@ -262,6 +341,8 @@ def _make_request(
     profile: str | None = None,
     env: Mapping[str, str] | None = None,
     timeout_seconds: float | None = None,
+    stream_output: bool = False,
+    request_metadata: Mapping[str, Any] | None = None,
 ) -> HarnessRequest:
     provenance = prepared.provenance
     request_env = dict(provenance.get("env") or {})
@@ -270,9 +351,18 @@ def _make_request(
     request_model = model if model is not None else str(provenance.get("model") or "")
     request_agent = agent if agent is not None else str(provenance.get("agent") or "")
     request_profile = profile if profile is not None else str(provenance.get("profile") or "")
+    prompt = prepared.task.prompt_path.read_text(encoding="utf-8")
+    if provenance.get("auto") is True and provenance.get("no_orchestra") is True:
+        prompt = prompt.replace("Dispatch and proceed until finished.", "Proceed until finished.")
+    if provenance.get("auto") is True:
+        prompt = prompt.rstrip() + (
+            "\n\nBenchmark completion protocol:\n"
+            "You must finish by saying BENCH_PARENT_DONE.\n"
+            "Do not stop before writing BENCH_PARENT_DONE.\n"
+        )
     return HarnessRequest(
         run_paths=prepared.run_paths,
-        prompt=prepared.task.prompt_path.read_text(encoding="utf-8"),
+        prompt=prompt,
         model=request_model,
         agent=request_agent,
         profile=request_profile,
@@ -282,6 +372,8 @@ def _make_request(
             "bench_run": prepared.bench_run,
             "provenance": dict(prepared.provenance),
             "run_meta": asdict(prepared.run_meta),
+            "stream_output": stream_output,
+            **dict(request_metadata or {}),
         },
     )
 
@@ -299,7 +391,7 @@ def _partial_result(prepared: PreparedRun, request: HarnessRequest, harness: Har
         run_meta=run_meta,
         harness=harness,
         evaluation=EvaluationResult(status="not_run"),
-        outcome="not_run",
+        outcome="error" if harness.status != "ok" else "not_run",
         details=details,
     )
 
@@ -318,6 +410,21 @@ def _write_harness_summary_if_missing(request: HarnessRequest, prepared: Prepare
             "task_id": prepared.task.task_id,
         },
     )
+
+
+def _persist_usage_metrics(result: TaskResult, run_paths: RunPaths) -> None:
+    from bench.reporting.usage_metrics import extract_usage_metrics
+
+    metrics = extract_usage_metrics(run_paths.run_dir)
+    result.tokens = metrics
+    result.context = {}
+    for label, key in (("parent", "parent_session"), ("children", "children_sessions")):
+        bucket = metrics.get(key)
+        if isinstance(bucket, dict):
+            result.context[label] = {
+                "final": bucket.get("final_context_tokens"),
+                "max": bucket.get("max_context_tokens"),
+            }
 
 
 def run_task(
@@ -341,6 +448,12 @@ def run_task(
     profile: str | None = None,
     env: Mapping[str, str] | None = None,
     timeout_seconds: float | None = None,
+    stream_output: bool = False,
+    request_metadata: Mapping[str, Any] | None = None,
+    no_orchestra: bool | None = None,
+    no_orch_on: bool | None = None,
+    orchestra_tools_available: bool | None = None,
+    on_settled: Callable[[PreparedRun], None] | None = None,
 ) -> TaskResult:
     prepared = prepared or prepare_run(
         task,
@@ -355,6 +468,9 @@ def run_task(
         notes=notes,
         catalog_label=catalog_label,
         runtime_snapshot=runtime_snapshot,
+        no_orchestra=no_orchestra,
+        no_orch_on=no_orch_on,
+        orchestra_tools_available=orchestra_tools_available,
     )
     request = _make_request(
         prepared,
@@ -363,6 +479,8 @@ def run_task(
         profile=profile,
         env=env,
         timeout_seconds=timeout_seconds,
+        stream_output=stream_output,
+        request_metadata=request_metadata,
     )
     try:
         harness_result = harness.run(request)
@@ -375,13 +493,15 @@ def run_task(
         )
 
     _write_harness_summary_if_missing(request, prepared, harness_result)
+    if on_settled is not None:
+        on_settled(prepared)
     result = _partial_result(prepared, request, harness_result)
-    if harness_result.status == "ok":
-        write_json_atomic(prepared.run_paths.result_json, result)
-        return result
-
-    if prepared.prior_result is None:
-        write_json_atomic(prepared.run_paths.result_json, result)
+    _persist_usage_metrics(result, prepared.run_paths)
+    # Persist observed Orchestra execution/metrics for every run (including lifecycle
+    # failures and evaluator-not-run results) before result.json is written; the later
+    # grade_run persistence re-derives from the same artifacts and overwrites idempotently.
+    _persist_orchestra_metrics(result, prepared.run_paths)
+    write_json_atomic(prepared.run_paths.result_json, result)
     return result
 
 
@@ -390,7 +510,10 @@ def _failure_result_from_current(task: TaskDefinition, run_paths: RunPaths, exc:
         run_meta=RunMeta(run_id=run_paths.run_id, task_id=task.task_id, batch=task.batch)
     )
     current.evaluation = EvaluationResult(status="failed", error=str(exc), details=exc.details)
-    current.outcome = "not_run"
+    current.outcome = "error"
+    current.score_numeric = None
+    current.score_display = ""
+    current.category_scores = {}
     if not current.run_meta.finished_at:
         current.run_meta.finished_at = _now_iso()
     return current
@@ -407,14 +530,26 @@ def grade_run(
         result = _grade_run(task, run_paths, runner=runner)
     except EvaluationError as exc:
         failure = _failure_result_from_current(task, run_paths, exc)
-        if prior_result is None:
-            write_json_atomic(run_paths.result_json, failure)
-        else:
-            write_json_atomic(run_paths.result_json, prior_result)
+        write_json_atomic(run_paths.result_json, failure)
         return failure
 
     if not result.run_meta.finished_at:
         result.run_meta.finished_at = _now_iso()
+
+    _persist_orchestra_metrics(result, run_paths)
+
+    from bench.reporting.scoring import score_task_result
+
+    scored = score_task_result(result)
+    if scored.available:
+        result.score_numeric = scored.score_numeric
+        result.score_display = scored.score_display
+        result.category_scores = scored.category_scores
+    else:
+        result.score_numeric = None
+        result.score_display = ""
+        result.category_scores = {}
+
     write_json_atomic(run_paths.result_json, result)
     return result
 
@@ -424,6 +559,9 @@ class _SettlingHarnessAdapter:
         self._harness = harness
 
     def wait_for_settled(self, timeout: float | None = None) -> bool:
+        last_status = str(getattr(self._harness, "last_settle_status", "") or "")
+        if last_status == "settled":
+            return True
         waiter = getattr(self._harness, "wait_for_settled", None)
         if callable(waiter):
             return bool(waiter(timeout=timeout))
@@ -432,6 +570,15 @@ class _SettlingHarnessAdapter:
     @property
     def last_settle_status(self) -> str:
         return str(getattr(self._harness, "last_settle_status", "not_started") or "not_started")
+
+
+def _auto_gate_session_id(harness: Harness, prepared: PreparedRun) -> str:
+    session_id = getattr(harness, "session_id", "")
+    if callable(session_id):
+        session_id = session_id()
+    if isinstance(session_id, str) and session_id.strip():
+        return session_id.strip()
+    return str(prepared.provenance.get("session_id") or "")
 
 
 def _auto_gate_status_provider(harness: Harness):
@@ -454,11 +601,12 @@ def run_and_grade(
     harness: Harness,
     *,
     runner: EvaluatorRunner | None = None,
+    on_settled: Callable[[PreparedRun], None] | None = None,
     prepared: PreparedRun | None = None,
     root: Path | str | None = None,
     run_id: str | None = None,
     provenance: Mapping[str, Any] | None = None,
-    catalog_path: Path | str | None = None,
+    catalog_path: Path | None = None,
     role: str | None = None,
     orchestra: bool | None = None,
     auto: bool | None = None,
@@ -471,6 +619,11 @@ def run_and_grade(
     profile: str | None = None,
     env: Mapping[str, str] | None = None,
     timeout_seconds: float | None = None,
+    stream_output: bool = False,
+    request_metadata: Mapping[str, Any] | None = None,
+    no_orchestra: bool | None = None,
+    no_orch_on: bool | None = None,
+    orchestra_tools_available: bool | None = None,
 ) -> TaskResult:
     prepared = prepared or prepare_run(
         task,
@@ -485,6 +638,9 @@ def run_and_grade(
         notes=notes,
         catalog_label=catalog_label,
         runtime_snapshot=runtime_snapshot,
+        no_orchestra=no_orchestra,
+        no_orch_on=no_orch_on,
+        orchestra_tools_available=orchestra_tools_available,
     )
     result = run_task(
         task,
@@ -495,19 +651,55 @@ def run_and_grade(
         profile=profile,
         env=env,
         timeout_seconds=timeout_seconds,
+        stream_output=stream_output,
+        request_metadata=request_metadata,
+        no_orchestra=no_orchestra,
+        no_orch_on=no_orch_on,
+        orchestra_tools_available=orchestra_tools_available,
+        on_settled=on_settled,
     )
     if result.harness.status != "ok":
         return result
     effective_auto = auto if auto is not None else bool(prepared.provenance.get("auto"))
     effective_orchestra = orchestra if orchestra is not None else bool(prepared.provenance.get("orchestra"))
     if effective_auto:
-        gate_result = wait_until_safe_to_grade(
-            _SettlingHarnessAdapter(harness),
-            session_id=str(prepared.provenance.get("session_id") or ""),
-            status_provider=_auto_gate_status_provider(harness),
-            policy=CompletionPolicy(orchestra_enabled=bool(effective_orchestra)),
-            timeout_seconds=timeout_seconds,
-        )
+        gate_session_id = _auto_gate_session_id(harness, prepared)
+        gate_status_provider = _auto_gate_status_provider(harness)
+        if effective_orchestra and hasattr(harness, "session_id") and not gate_session_id:
+            gate_result = OrchestrationSettleResult(
+                safe_to_grade=False,
+                reason="missing_session_id",
+                harness_status=getattr(harness, "last_settle_status", "unknown") or "unknown",
+                session_id=gate_session_id,
+                snapshots=(),
+            )
+        else:
+            if effective_orchestra and gate_status_provider is not None and str(getattr(harness, "last_settle_status", "") or "") == "settled":
+                snapshot = coerce_status_snapshot(gate_session_id, gate_status_provider(gate_session_id))
+                if snapshot.state == "running" or (snapshot.active_runs is not None and snapshot.active_runs > 0):
+                    gate_result = OrchestrationSettleResult(
+                        safe_to_grade=False,
+                        reason="children_active_after_parent_exit",
+                        harness_status=getattr(harness, "last_settle_status", "unknown") or "unknown",
+                        session_id=gate_session_id,
+                        snapshots=(snapshot,),
+                    )
+                else:
+                    gate_result = wait_until_safe_to_grade(
+                        _SettlingHarnessAdapter(harness),
+                        session_id=gate_session_id,
+                        status_provider=gate_status_provider,
+                        policy=CompletionPolicy(orchestra_enabled=bool(effective_orchestra)),
+                        timeout_seconds=timeout_seconds,
+                    )
+            else:
+                gate_result = wait_until_safe_to_grade(
+                    _SettlingHarnessAdapter(harness),
+                    session_id=gate_session_id,
+                    status_provider=gate_status_provider,
+                    policy=CompletionPolicy(orchestra_enabled=bool(effective_orchestra)),
+                    timeout_seconds=timeout_seconds,
+                )
         _attach_auto_gate(result, gate_result)
         write_json_atomic(prepared.run_paths.result_json, result)
         if not gate_result.safe_to_grade:

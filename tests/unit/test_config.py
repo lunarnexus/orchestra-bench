@@ -60,6 +60,34 @@ def test_resolve_harness_for_role_uses_default_role_and_resolves_backend_fields(
     assert resolved["command"] == ["pi", "--model", "{model}", "-p", "{prompt}"]
 
 
+def test_catalog_parser_ignores_orchestra_owned_unknown_keys(tmp_path: Path) -> None:
+    catalog = tmp_path / "agent-catalog.yaml"
+    catalog.write_text(
+        "catalog_format: future\n"
+        "default_role: builder\n"
+        "harness_configs:\n"
+        "  pi:\n"
+        "    harness: pi\n"
+        "    command: ['pi', '--model', '{model}', '-p', '{prompt}']\n"
+        "    runtime_hint: ignored by bench\n"
+        "roles:\n"
+        "  builder:\n"
+        "    harness_config: pi\n"
+        "    model: example/model\n"
+        "    dispatch_hint: Dispatch and proceed until finished.\n"
+        "model_limits:\n"
+        "  example/model:\n"
+        "    concurrency: 2\n"
+        "    scheduling_hint: ignored by bench\n"
+    )
+
+    resolved = resolve_harness_for_role(catalog)
+
+    assert resolved["role"] == "builder"
+    assert resolved["model"] == "example/model"
+    assert resolved["command"] == ["pi", "--model", "{model}", "-p", "{prompt}"]
+
+
 def test_resolve_catalog_model_uses_explicit_role(tmp_path: Path) -> None:
     catalog = tmp_path / "agent-catalog.yaml"
     catalog.write_text(
@@ -91,20 +119,6 @@ def test_resolve_catalog_model_uses_explicit_role(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("catalog_text", "error_type", "error_text"),
     [
-        (
-            "default_role: builder\n"
-            "harness_configs:\n"
-            "  pi:\n"
-            "    harness: pi\n"
-            "    command: ['pi']\n"
-            "roles:\n"
-            "  builder:\n"
-            "    harness_config: pi\n"
-            "    model: example/model\n"
-            "bogus: true\n",
-            CatalogConfigError,
-            "unsupported top-level keys",
-        ),
         (
             "default_role: builder\n"
             "harness_configs:\n"

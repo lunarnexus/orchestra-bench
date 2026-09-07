@@ -1,9 +1,11 @@
 """Read-only reporting helpers for benchmark results."""
 
 from .debug import DebugReport, build_debug_report, format_debug_report
+from .session_debug import SessionTranscript, classify_session, discover_session_transcripts, format_session_debug, format_session_raw, render_session_transcript
 from .formatters import format_dashboard, format_run_detail, format_runs, format_timing, format_tokens
 from .management import (
     compare_results,
+    delete_all_result_dirs,
     delete_results,
     describe_filters,
     format_compare_results,
@@ -25,6 +27,7 @@ __all__ = [
     "format_tokens",
     "format_timing",
     "compare_results",
+    "delete_all_result_dirs",
     "delete_results",
     "describe_filters",
     "format_compare_results",
@@ -35,4 +38,10 @@ __all__ = [
     "DebugReport",
     "build_debug_report",
     "format_debug_report",
+    "SessionTranscript",
+    "classify_session",
+    "discover_session_transcripts",
+    "format_session_debug",
+    "format_session_raw",
+    "render_session_transcript",
 ]

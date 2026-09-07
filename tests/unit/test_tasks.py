@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from bench.tasks import TaskDefinition, TaskLoadError, discover_tasks, load_task, list_suites
 
@@ -196,3 +197,37 @@ evaluator: evaluate/run.sh
     assert task.task_id == "smoke-dependent-setup-chain"
     assert task.evaluate_path == root_task / "evaluate"
     assert list_suites() == ["smoke"]
+
+
+def test_smoke_task_declares_orchestra_scoring_metadata() -> None:
+    task_yaml_path = Path(__file__).resolve().parents[2] / "tasks" / "smoke-dependent-setup-chain" / "task.yaml"
+    data = yaml.safe_load(task_yaml_path.read_text(encoding="utf-8"))
+
+    assert data["expected_orchestra"] is True
+    assert data["required_roles"] == ["builder", "verifier"]
+
+
+@pytest.mark.parametrize(
+    "task_id, timeout_minutes, requires_kb",
+    [
+        ("smoke-public-admin-handoff", 12, False),
+        ("smoke-interactive-progress", 12, False),
+        ("smoke-billing-webhook-lifecycle", 15, True),
+        ("smoke-public-admin-upload", 15, True),
+        ("smoke-migration-release-check", 15, True),
+    ],
+)
+def test_smoke_orchestration_tasks_have_v2_metadata(task_id: str, timeout_minutes: int, requires_kb: bool) -> None:
+    task_yaml_path = Path(__file__).resolve().parents[2] / "tasks" / task_id / "task.yaml"
+    data = yaml.safe_load(task_yaml_path.read_text(encoding="utf-8"))
+
+    assert data["family"] == "orchestrator"
+    assert data["batch"] == "smoke"
+    assert data["expected_orchestra"] is True
+    assert data["required_roles"] == ["builder", "verifier"]
+    assert data["scoring_type"] == "pass_fail"
+    assert data["timeout_minutes"] == timeout_minutes
+    assert data["evaluator"] == "evaluate/run.sh"
+    if requires_kb:
+        task_dir = task_yaml_path.parent
+        assert (task_dir / "kb").exists() or (task_dir / "kb.md").exists()

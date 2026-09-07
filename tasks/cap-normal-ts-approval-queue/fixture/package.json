@@ -1,0 +1,9 @@
+{
+  "name": "approval-queue",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/server.ts",
+    "test": "node --test --experimental-strip-types tests/api.test.ts"
+  }
+}

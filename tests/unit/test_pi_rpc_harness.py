@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ class _FakeJsonlProcess:
         stderr_chunks: list[str] | None = None,
         exit_code: int = 0,
         wait_timeout: bool = False,
+        event_log: list[str] | None = None,
     ) -> None:
         self.stdin = _FakeStdin(self)
         self.chunks = list(chunks or [])
@@ -45,10 +47,19 @@ class _FakeJsonlProcess:
         self.alive = True
         self.killed = False
         self.sent_commands: list[dict[str, object]] = []
+        self.event_log = event_log
 
     def read_chunk(self, timeout: float | None = None) -> str | None:
         if self.chunks:
-            return self.chunks.pop(0)
+            chunk = self.chunks.pop(0)
+            if self.event_log is not None:
+                try:
+                    payload = json.loads(chunk)
+                except json.JSONDecodeError:
+                    self.event_log.append(f"read:raw:{chunk.strip()}")
+                else:
+                    self.event_log.append(f"read:{payload.get('type')}")
+            return chunk
         if self.alive:
             return ""
         return None
@@ -76,6 +87,9 @@ class _FakeJsonlProcess:
 
     def on_send(self, command: dict[str, object]) -> None:
         self.sent_commands.append(command)
+        if self.event_log is not None:
+            message = str(command.get("message") or "")
+            self.event_log.append(f"send:{command.get('type')}:{message}")
 
 
 def _request(
@@ -224,6 +238,7 @@ def test_run_captures_stderr_to_run_log_and_classifies_timeout_missing_settled_a
         process.stderr_chunks.append("stderr line\n")
         process.chunks.append('{"type":"response","command":"prompt","success":true}\n')
         process.chunks.append('{"type":"agent_start","message":"boot"}\n')
+        process.chunks.append('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"All set."}]}}\n')
         process.chunks.append('{"type":"agent_settled","message":"done"}\n')
         process.alive = False
 
@@ -232,11 +247,819 @@ def test_run_captures_stderr_to_run_log_and_classifies_timeout_missing_settled_a
     nonzero_result = nonzero_harness.run(nonzero_request)
 
     assert timeout_result.status == "lifecycle_failed"
-    assert "timeout" in timeout_result.error.lower()
+    assert timeout_result.error == "timeout waiting for agent_settled"
     assert missing_result.status == "lifecycle_failed"
     assert "agent_settled" in missing_result.error
     assert nonzero_result.status == "lifecycle_failed"
-    assert "exit 3" in nonzero_result.error.lower()
+    assert nonzero_result.error == "process exited with exit 3"
     assert timeout_request.artifacts.log_path.read_text(encoding="utf-8") == "stderr line\n"
     assert nonzero_request.artifacts.log_path.read_text(encoding="utf-8") == "stderr line\n"
+
+
+class _GatedJsonlProcess(_FakeJsonlProcess):
+    """Fake process that only releases gated chunks after a monotonic offset."""
+
+    def __init__(self, *, gates: list[tuple[float, list[str]]], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._gates = [(time.monotonic() + offset, list(chunks)) for offset, chunks in gates]
+
+    def read_chunk(self, timeout: float | None = None) -> str | None:
+        if not self.chunks:
+            now = time.monotonic()
+            while self._gates and now >= self._gates[0][0]:
+                _, gated = self._gates.pop(0)
+                self.chunks.extend(gated)
+        return super().read_chunk(timeout)
+
+
+def _sent_prompt_messages(process: _FakeJsonlProcess) -> list[str]:
+    messages: list[str] = []
+    for raw in process.stdin.writes:
+        payload = json.loads(raw.decode("utf-8"))
+        if payload.get("type") == "prompt":
+            messages.append(str(payload.get("message") or ""))
+    return messages
+
+
+def test_run_sends_orch_on_before_task_prompt_when_requested(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+    event_log: list[str] = []
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        _FakeJsonlProcess.on_send(process, command)
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        if command.get("message") == "/orch on":
+            process.chunks.extend(
+                [
+                    '{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n',
+                    '{"type":"agent_settled","message":"orch on settled"}\n',
+                ]
+            )
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_end","message":"wrap"}\n',
+                '{"type":"agent_settled","message":"task settled"}\n',
+                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+                json.dumps({"type": "tool_execution_end", "toolName": "orch_status", "result": {"content": [{"text": json.dumps({"active_runs": 1, "descendants_terminal": False, "session_report_available": True, "session_report_delivered": False})}]}}) + "\n",
+                json.dumps({"type": "tool_execution_end", "toolName": "orch_status", "result": {"content": [{"text": json.dumps({"active_runs": 0, "descendants_terminal": True, "session_report_available": True, "session_report_delivered": True})}]}}) + "\n",
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess(event_log=event_log)
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "orch-on", timeout_seconds=0.5, metadata={"orch_on": True})
+
+    result = harness.run(request)
+
+    assert result.status == "ok"
+    assert _sent_prompt_messages(process) == ["/orch on", "Build the thing."]
+    assert event_log.index("read:agent_settled") < event_log.index("send:prompt:Build the thing.")
+
+
+def test_run_fails_when_orch_on_activation_success_is_missing(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    request = _request(tmp_path / "orch-on-missing", timeout_seconds=0.01, metadata={"orch_on": True})
+    process = _FakeJsonlProcess()
+    process.alive = False
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+
+    result = harness.run(request)
+
+    assert result.status == "lifecycle_failed"
+    assert result.error == "/orch on activation did not arrive"
+    assert result.details["last_settle_status"] == "missing_activation"
+    assert _sent_prompt_messages(process) == ["/orch on"]
+
+
+def test_run_fails_when_orch_on_activation_arrives_but_never_settles(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") == "prompt" and command.get("message") == "/orch on":
+            process.chunks.append('{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n')
+            process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "orch-on-missing-settle", timeout_seconds=0.5, metadata={"orch_on": True})
+
+    result = harness.run(request)
+
+    assert result.status == "lifecycle_failed"
+    assert result.error == "/orch on activation did not settle"
+    assert result.details["last_settle_status"] == "missing_settled"
+    assert _sent_prompt_messages(process) == ["/orch on"]
+
+
+def test_run_skips_orch_on_when_not_requested(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") == "prompt":
+            process.chunks.append('{"type":"agent_settled","message":"task settled"}\n')
+            process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "no-orch-on", timeout_seconds=0.5)
+
+    result = harness.run(request)
+
+    assert result.status == "ok"
+    assert _sent_prompt_messages(process) == ["Build the thing."]
+
+
+def test_run_without_dispatch_does_not_require_doneish_even_when_status_snapshot_exists(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_status","result":{"content":[{"text":"{\\"active_runs\\":0,\\"descendants_terminal\\":true}"}]}}\n',
+                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"All acceptance criteria are implemented and verified."}]}}\n',
+                '{"type":"agent_settled","message":"idle"}\n',
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "no-dispatch-status", timeout_seconds=0.5, metadata={"orch_on": False})
+
+    result = harness.run(request)
+
+    assert result.status == "ok"
+    assert result.details["last_settle_status"] == "settled"
+
+
+def test_run_accepts_doneish_text_before_final_agent_settled(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+                '{"type":"agent_settled","message":"idle"}\n',
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "done-before-settle", timeout_seconds=0.5)
+
+    result = harness.run(request)
+
+    assert result.status == "ok"
+    assert result.details["last_settle_status"] == "settled"
+
+
+def test_run_without_orch_on_fails_closed_when_no_authoritative_status_after_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_end","message":"wrap"}\n',
+                '{"type":"agent_settled","message":"idle"}\n',
+                '{"type":"raw","line":"builder returned done"}\n',
+                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "no-orch-on-children", timeout_seconds=0.5, metadata={"orch_on": False})
+
+    result = harness.run(request)
+
+    assert result.status == "lifecycle_failed"
+    assert result.details["last_settle_status"] == "authoritative_status_unavailable"
+    assert "no authoritative orchestra status available after dispatch" in result.error
+    assert _sent_prompt_messages(process) == ["Build the thing."]
+
+
+def test_run_keeps_session_open_until_doneish_parent_and_children_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        if command.get("message") == "/orch on":
+            process.chunks.append('{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n')
+            process.chunks.append('{"type":"agent_settled","message":"orch on settled"}\n')
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_end","message":"wrap"}\n',
+                '{"type":"agent_settled","message":"idle"}\n',
+                json.dumps(
+                    {
+                        "type": "tool_execution_end",
+                        "toolName": "orch_status",
+                        "result": {
+                            "content": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "active_runs": 1,
+                                            "descendants_terminal": False,
+                                            "session_report_available": True,
+                                            "session_report_delivered": False,
+                                        }
+                                    )
+                                }
+                            ]
+                        },
+                    }
+                )
+                + "\n",
+                '{"type":"raw","line":"completed subagent"}\n',
+                json.dumps(
+                    {
+                        "type": "tool_execution_end",
+                        "toolName": "orch_status",
+                        "result": {
+                            "content": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "active_runs": 0,
+                                            "descendants_terminal": True,
+                                            "session_report_available": True,
+                                            "session_report_delivered": True,
+                                        }
+                                    )
+                                }
+                            ]
+                        },
+                    }
+                )
+                + "\n",
+                '{"type":"agent_settled","message":"done"}\n',
+                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "success", timeout_seconds=0.5, metadata={"orch_on": True})
+
+    result = harness.run(request)
+
+    assert result.status == "ok"
+    assert result.details["last_settle_status"] == "settled"
+    assert process.killed is False
+    assert harness.agent_settled_seen is True
+    assert _sent_prompt_messages(process) == ["/orch on", "Build the thing."]
+
+
+def test_status_provider_fails_closed_without_authoritative_status_after_dispatch(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    harness = PiRpcHarness(["pi"])
+    harness._state["sessionId"] = "sess-1"
+    harness.events = [
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+        {"type": "extension_ui_request", "message": "orchestra: builder run-123 returned done (1/1)"},
+    ]
+
+    snapshot = harness.status_provider("sess-1")
+
+    assert snapshot["state"] == "status_unavailable"
+    assert snapshot.get("descendants_terminal") is not True
+    assert harness._children_cleared(snapshot) is False
+
+
+def test_children_cleared_requires_terminal_descendants_or_delivered_report(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    harness = PiRpcHarness(["pi"])
+
+    assert harness._children_cleared(None) is True
+    assert harness._children_cleared({"active_runs": 0, "descendants_terminal": True}) is True
+    assert harness._children_cleared({"active_runs": 0, "descendants_terminal": False, "session_report_delivered": True}) is True
+    assert harness._children_cleared({"active_runs": 0, "descendants_terminal": False, "session_report_delivered": None}) is False
+    assert harness._children_cleared({"active_runs": 1, "descendants_terminal": True}) is False
+
+
+def test_status_provider_fallback_terminal_on_consolidated_return_prompt(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    harness = PiRpcHarness(["pi"])
+    harness._state["sessionId"] = "sess-1"
+    harness.events = [
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+        {"type": "extension_ui_request", "message": "orchestra: builder run-123 returned done (1/1)"},
+        {"type": "agent_start", "message": "return integration turn"},
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 1 subagents returned]"}]},
+        },
+    ]
+
+    snapshot = harness.status_provider("sess-1")
+
+    assert snapshot["state"] == "settled"
+    assert snapshot.get("descendants_terminal") is True
+    assert snapshot.get("session_report_delivered") is True
+    assert harness._children_cleared(snapshot) is True
+
+
+def test_parent_doneish_requires_explicit_bench_sentinel() -> None:
+    from bench.harnesses.pi_rpc import _text_is_doneish
+
+    assert _text_is_doneish("Implementation complete and ready for grading.") is False
+    assert _text_is_doneish("BENCH_PARENT_DONE") is True
+    assert _text_is_doneish("bench_parent_done") is True
+    assert _text_is_doneish("Bench Parent Done") is True
+    assert _text_is_doneish("bench-parent-done.") is True
+
+
+def test_parent_doneish_before_later_dispatch_does_not_count_as_final_completion() -> None:
+    from bench.harnesses.pi_rpc import _parent_doneish_seen
+
+    events = [
+        {"type": "agent_settled", "message": "first parent turn settled"},
+        {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "Builder completed; dispatching review."}]}},
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+    ]
+
+    assert _parent_doneish_seen(events) is False
+
+
+def test_status_provider_invalidates_consolidated_return_after_later_dispatch(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    harness = PiRpcHarness(["pi"])
+    harness._state["sessionId"] = "sess-1"
+    harness.events = [
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 1 subagents returned]"}]},
+        },
+        {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "Dispatching final review."}]}},
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+    ]
+
+    snapshot = harness.status_provider("sess-1")
+
+    assert snapshot["state"] == "status_unavailable"
+    assert snapshot.get("descendants_terminal") is False
+    assert snapshot.get("session_report_delivered") is False
+    assert "post_report_dispatches=1" in snapshot.get("raw_text", "")
+    assert harness._children_cleared(snapshot) is False
+
+
+def test_run_settles_via_consolidated_return_prompt_without_cli_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        consolidated = json.dumps(
+            {
+                "type": "message",
+                "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 1 subagents returned]"}]},
+            }
+        )
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_settled","message":"parent settled after dispatch"}\n',
+                '{"type":"extension_ui_request","message":"orchestra: builder run-123 returned done (1/1)"}\n',
+                '{"type":"agent_start","message":"return integration turn"}\n',
+                consolidated + "\n",
+                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "consolidated", timeout_seconds=0.5, metadata={"orch_on": False})
+
+    result = harness.run(request)
+
+    assert result.status == "ok"
+    assert result.details["last_settle_status"] == "settled"
+    assert process.killed is False
+    assert _sent_prompt_messages(process) == ["Build the thing."]
+
+
+def test_run_quiet_window_catches_dispatch_after_apparent_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_AUTO_CHILD_WAIT_SECONDS", "0.5")
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+    monkeypatch.setenv("BENCH_ORCHESTRA_QUIET_SECONDS", "0.3")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"[orchestra: 1 subagents returned]"}]}}\n',
+                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+                '{"type":"agent_settled","message":"final settled"}\n',
+            ]
+        )
+
+    process = _GatedJsonlProcess(
+        gates=[
+            (
+                0.1,
+                ['{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n'],
+            ),
+        ],
+    )
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "quiet-catches-late-dispatch", timeout_seconds=1.0, metadata={"orch_on": False})
+
+    result = harness.run(request)
+
+    assert result.status == "lifecycle_failed"
+    assert result.details["last_settle_status"] == "authoritative_status_unavailable"
+
+
+def test_run_grants_parent_finalize_window_when_consolidated_report_arrives_near_child_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    # Child deadline expires at ~0.35s; the consolidated report arrives first and the
+    # parent's final model turn only completes after the child deadline would have expired.
+    monkeypatch.setenv("BENCH_AUTO_CHILD_WAIT_SECONDS", "0.35")
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+    monkeypatch.setenv("BENCH_ORCHESTRA_QUIET_SECONDS", "0")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_settled","message":"parent settled after dispatch"}\n',
+            ]
+        )
+
+    consolidated = json.dumps(
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 2 subagents returned]"}]},
+        }
+    )
+    process = _GatedJsonlProcess(
+        gates=[
+            (
+                0.1,
+                [
+                    consolidated + "\n",
+                    '{"type":"agent_start","message":"return integration turn"}\n',
+                ],
+            ),
+            # Final parent turn lands after the exhausted child deadline.
+            (
+                0.6,
+                [
+                    '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+                    '{"type":"agent_settled","message":"final settled"}\n',
+                ],
+            ),
+        ]
+    )
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "finalize-window", timeout_seconds=5.0, metadata={"orch_on": False})
+
+    result = harness.run(request)
+
+    assert result.status == "ok"
+    assert result.details["last_settle_status"] == "settled"
+    assert process.killed is False
+    # No synthetic prompt: only the original task prompt was sent.
+    assert _sent_prompt_messages(process) == ["Build the thing."]
+
+
+def test_run_fails_parent_not_done_when_no_doneish_by_finalize_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_AUTO_CHILD_WAIT_SECONDS", "0.4")
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+    monkeypatch.setenv("BENCH_PARENT_FINALIZE_WINDOW_SECONDS", "0.15")
+
+    consolidated = json.dumps(
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 2 subagents returned]"}]},
+        }
+    )
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_settled","message":"parent settled after dispatch"}\n',
+            ]
+        )
+
+    process = _GatedJsonlProcess(gates=[(0.1, [consolidated + "\n", '{"type":"agent_start","message":"return integration turn"}\n'])])
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "finalize-timeout", timeout_seconds=5.0, metadata={"orch_on": False})
+
+    result = harness.run(request)
+
+    # Children are terminal via the consolidated report; only the parent final turn is missing.
+    assert result.status == "lifecycle_failed"
+    assert result.details["last_settle_status"] == "parent_not_done"
+    assert result.error == "parent did not emit BENCH_PARENT_DONE before the completion timeout"
+    assert _sent_prompt_messages(process) == ["Build the thing."]
+
+
+def test_orchestra_status_preserves_authoritative_cli_despite_direct_returns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    harness = PiRpcHarness(["pi"])
+    harness._state["sessionId"] = "sess-1"
+    monkeypatch.setattr(
+        harness,
+        "_status_from_orchestra_cli",
+        lambda session_id: {
+            "state": "running",
+            "parsed": True,
+            "active_runs": 1,
+            "descendants_terminal": False,
+            "raw_text": '{"active_runs":1}',
+        },
+    )
+    harness.events = [
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+        {"type": "extension_ui_request", "message": "builder returned done (1/1)"},
+        {"type": "agent_settled", "message": "parent settled"},
+    ]
+
+    snapshot = harness._orchestra_status_snapshot()
+
+    assert snapshot is not None
+    assert snapshot["active_runs"] == 1
+    assert snapshot["descendants_terminal"] is False
+    assert snapshot["state"] == "running"
+
+
+def test_run_does_not_settle_when_cli_status_shows_active_descendant_after_direct_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_settled","message":"idle"}\n',
+                '{"type":"raw","line":"builder returned done"}\n',
+                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    monkeypatch.setattr(
+        harness,
+        "_status_from_orchestra_cli",
+        lambda session_id: {
+            "state": "running",
+            "parsed": True,
+            "active_runs": 1,
+            "descendants_terminal": False,
+            "session_report_available": True,
+            "session_report_delivered": False,
+            "raw_text": '{"active_runs":1}',
+        },
+    )
+    request = _request(tmp_path / "cli-active", timeout_seconds=0.5)
+
+    result = harness.run(request)
+
+    assert result.status == "lifecycle_failed"
+    assert result.details["last_settle_status"] == "children_active_timeout"
+    assert result.error == "children still active after parent wait timeout"
+    assert _sent_prompt_messages(process) == ["Build the thing."]
+
+
+def test_run_times_out_when_children_stay_active_after_parent_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        if command.get("message") == "/orch on":
+            process.chunks.append('{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n')
+            process.chunks.append('{"type":"agent_settled","message":"orch on settled"}\n')
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_end","message":"wrap"}\n',
+                '{"type":"agent_settled","message":"idle"}\n',
+                json.dumps(
+                    {
+                        "type": "tool_execution_end",
+                        "toolName": "orch_status",
+                        "result": {
+                            "content": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "active_runs": 1,
+                                            "descendants_terminal": False,
+                                            "session_report_available": True,
+                                            "session_report_delivered": False,
+                                        }
+                                    )
+                                }
+                            ]
+                        },
+                    }
+                )
+                + "\n",
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "timeout", timeout_seconds=0.01, metadata={"orch_on": True})
+
+    result = harness.run(request)
+
+    assert result.status == "lifecycle_failed"
+    assert result.details["last_settle_status"] == "children_active_timeout"
+    assert result.error == "children still active after parent wait timeout"
+
+
+def test_run_fails_closed_when_parent_settles_without_doneish_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        if command.get("message") == "/orch on":
+            process.chunks.append('{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n')
+            process.chunks.append('{"type":"agent_settled","message":"orch on settled"}\n')
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Still working."}]}}\n',
+                '{"type":"agent_settled","message":"idle"}\n',
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "fail", timeout_seconds=0.5, metadata={"orch_on": True})
+
+    result = harness.run(request)
+
+    assert result.status == "lifecycle_failed"
+    assert result.details["last_settle_status"] == "parent_not_done"
+    assert "BENCH_PARENT_DONE" in result.error
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from bench.provenance import (
     collect_aux_skills_snapshot,
     collect_catalog_runtime_snapshot,
     collect_orchestra_config_snapshot,
+    orchestra_tools_executed_from_events,
     snapshot_aux_skills,
     snapshot_catalog_runtime,
     snapshot_files,
@@ -106,8 +108,8 @@ def test_snapshot_catalog_runtime_and_run_metadata_merge_provenance(tmp_path: Pa
 
     assert snapshot["role_models"] == {"builder": "qwen/big", "reviewer": "qwen/big", "verifier": "qwen/small"}
     assert snapshot["role_models_summary"] == "builder=qwen/big, reviewer=qwen/big, verifier=qwen/small"
-    assert snapshot["enabled_roles"] == ["builder", "verifier"]
-    assert snapshot["enabled_roles_summary"] == "builder,verifier"
+    assert snapshot["catalog_roles"] == ["builder", "reviewer", "verifier"]
+    assert snapshot["catalog_roles_summary"] == "builder,reviewer,verifier"
 
     assert metadata["task_id"] == "smoke"
     assert metadata["run_id"] == "run-1"
@@ -123,3 +125,146 @@ def test_snapshot_catalog_runtime_and_run_metadata_merge_provenance(tmp_path: Pa
     assert metadata["catalog_sha256"]
 
     assert collect_catalog_runtime_snapshot(catalog) == snapshot
+
+
+def _write_mode_catalog(catalog: Path) -> None:
+    catalog.write_text(
+        "default_role: builder\n"
+        "harness_configs:\n"
+        "  pi:\n"
+        "    harness: pi\n"
+        "    command:\n"
+        "    - pi\n"
+        "    - --model\n"
+        "    - '{model}'\n"
+        "    - -p\n"
+        "    - '{prompt}'\n"
+        "roles:\n"
+        "  builder:\n"
+        "    harness_config: pi\n"
+        "    model: qwen/big\n",
+    )
+
+
+MODE_FACTS = [
+    # full Orchestra auto run (--orchestra)
+    {"orchestra": True, "no_orchestra": False, "no_orch_on": False, "tools_available": None, "requested": True},
+    # tools available but /orch on skipped (--no-orch-on)
+    {"orchestra": False, "no_orchestra": False, "no_orch_on": True, "tools_available": None, "requested": False},
+    # Orchestra tools disabled and /orch on skipped (--no-orchestra --no-orch-on)
+    {"orchestra": False, "no_orchestra": True, "no_orch_on": True, "tools_available": False, "requested": False},
+]
+
+
+def test_build_run_metadata_persists_explicit_mode_flags(tmp_path: Path) -> None:
+    catalog = tmp_path / "agent-catalog.yaml"
+    _write_mode_catalog(catalog)
+
+    signatures = []
+    for facts in MODE_FACTS:
+        metadata = build_run_metadata(
+            task_id="smoke",
+            run_id="run-1",
+            catalog_path=catalog,
+            orchestra=facts["orchestra"],
+            no_orchestra=facts["no_orchestra"],
+            no_orch_on=facts["no_orch_on"],
+            orchestra_tools_available=facts["tools_available"],
+        )
+
+        # Existing meaning of `orchestra` is preserved.
+        assert metadata["orchestra"] == facts["orchestra"]
+        assert metadata["no_orchestra"] == facts["no_orchestra"]
+        assert isinstance(metadata["no_orchestra"], bool)
+        assert metadata["no_orch_on"] == facts["no_orch_on"]
+        assert isinstance(metadata["no_orch_on"], bool)
+        assert metadata["orch_on_requested"] == facts["requested"]
+        assert metadata["orchestra_tools_available"] == facts["tools_available"]
+        signatures.append(
+            (metadata["no_orchestra"], metadata["no_orch_on"], metadata["orch_on_requested"])
+        )
+
+    # The three auto modes are distinguishable from the flags alone.
+    assert len(set(signatures)) == 3
+
+
+def test_build_run_metadata_mode_flags_are_null_when_not_supplied(tmp_path: Path) -> None:
+    catalog = tmp_path / "agent-catalog.yaml"
+    _write_mode_catalog(catalog)
+
+    metadata = build_run_metadata(task_id="smoke", run_id="run-1", catalog_path=catalog)
+
+    assert metadata["no_orchestra"] is None
+    assert metadata["no_orch_on"] is None
+    assert metadata["orch_on_requested"] is None
+    assert metadata["orchestra_tools_available"] is None
+    assert metadata["orchestra_tools_executed"] is None
+
+
+def test_build_run_metadata_persists_observed_execution_separately_from_availability(tmp_path: Path) -> None:
+    catalog = tmp_path / "agent-catalog.yaml"
+    _write_mode_catalog(catalog)
+
+    # Configured availability stays unknown (no runtime proof) while observed
+    # execution is proven by an actual non-error dispatch tool event.
+    metadata = build_run_metadata(
+        task_id="smoke",
+        run_id="run-1",
+        catalog_path=catalog,
+        orchestra=False,
+        no_orchestra=False,
+        no_orch_on=True,
+        orchestra_tools_available=None,
+        orchestra_tools_executed=True,
+    )
+
+    assert metadata["orchestra_tools_available"] is None
+    assert metadata["orchestra_tools_executed"] is True
+
+
+def _write_harness_events(run_dir: Path, *events: dict) -> None:
+    harness_dir = run_dir / "artifacts" / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_orchestra_tools_executed_from_events_true_on_non_error_dispatch(tmp_path: Path) -> None:
+    _write_harness_events(
+        tmp_path,
+        {"type": "tool_execution_start", "toolName": "orch_dispatch"},
+        {
+            "type": "tool_execution_end",
+            "toolName": "orch_dispatch",
+            "isError": False,
+            "result": {"text": "Orchestra dispatched: builder"},
+        },
+    )
+
+    assert orchestra_tools_executed_from_events(tmp_path) is True
+
+
+def test_orchestra_tools_executed_from_events_false_when_no_successful_dispatch(tmp_path: Path) -> None:
+    # Error-only dispatch attempts are not observed execution.
+    _write_harness_events(
+        tmp_path,
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": True},
+    )
+    assert orchestra_tools_executed_from_events(tmp_path) is False
+
+    # Event log with other tool activity but no orch_dispatch at all.
+    _write_harness_events(
+        tmp_path,
+        {"type": "tool_execution_end", "toolName": "bash", "isError": False},
+        {"type": "tool_execution_start", "toolName": "orch_dispatch"},
+    )
+    assert orchestra_tools_executed_from_events(tmp_path) is False
+
+
+def test_orchestra_tools_executed_from_events_null_without_event_source(tmp_path: Path) -> None:
+    (tmp_path / "artifacts").mkdir(parents=True)
+
+    # No readable harness event log means the fact is unproven, not false.
+    assert orchestra_tools_executed_from_events(tmp_path) is None

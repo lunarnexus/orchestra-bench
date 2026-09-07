@@ -1,0 +1,5 @@
+- finding: `GET /` is a usable HTML homepage titled `Approval Queue` that points a browser user at submission, public list, moderation, and audit-history routes.
+- finding: response schemas stay JSON with explicit 400, 401, 404, and 422 handling, and `GET /public/submissions` never exposes pending or rejected submissions.
+- finding: audit history is appended for initial submission plus each moderation decision, and admin/public pagination shares a consistent metadata shape.
+- risk: the single-file JSON store is appropriate for this task but would need locking or a database if concurrent writers became important.
+- risk: attachment content is stored as provided text; that is acceptable here because the evaluator checks path safety and public rendering rather than binary upload streaming.

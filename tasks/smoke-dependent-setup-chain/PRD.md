@@ -10,5 +10,6 @@ Implement `checkout()` in `shop.py` so callers can create products, create custo
 - `checkout` requires an existing customer with a non-empty cart.
 - It fails clearly for missing customers, unknown products, and empty carts.
 - It returns an order dict containing `order_id`, `customer_id`, `items`, and `total`.
+- Each returned item includes at least `sku` and `quantity`, in the same order the items were added to the cart.
 - It clears the customer cart after success.
 - Existing setup helpers keep working.
