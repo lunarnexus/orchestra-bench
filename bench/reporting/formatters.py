@@ -368,15 +368,16 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
     )
     if rows:
         for row in rows[:10]:
+            run_ref = f"{row.run_id}-{row.task_id}"
             body.append(
-                f"{_status(row):<16} {row.run_id:<18} {row.task_id:<34} "
+                f"{_status(row):<16} ref={run_ref:<54} "
                 f"suite={row.batch or 'unlabeled':<10} time={_fmt_seconds(row.elapsed_seconds):<8} "
                 f"model={_short_model(row.model)}"
             )
     else:
         body.append("no runs found")
     body.append("")
-    body.append("tip: 03-results run <run-id> | 04-debug <run-id> orch|full|raw")
+    body.append("tip: 03-results run <ref> | 04-debug <ref> orch|full|raw")
     return _lines(*body)
 
 
@@ -387,8 +388,9 @@ def format_runs(entries: Iterable[ReportEntry]) -> str:
         body.append("no runs found")
         return _lines(*body)
     for row in rows:
+        run_ref = f"{row.run_id}-{row.task_id}"
         body.append(
-            f"{_status(row):<16} {row.run_id:<18} {row.task_id:<34} "
+            f"{_status(row):<16} ref={run_ref:<54} "
             f"suite={row.batch or 'unlabeled':<10} time={_fmt_seconds(row.elapsed_seconds):<8} "
             f"model={_short_model(row.model)}"
         )
