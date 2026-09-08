@@ -110,6 +110,70 @@ def _request(
     )
 
 
+def test_verbose_send_prompt_prints_prompt(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    process = _FakeJsonlProcess()
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    harness.start(_request(tmp_path, metadata={"stream_output": True}))
+
+    harness.send_prompt("Line one\nLine two")
+
+    output = capsys.readouterr().out
+    assert output == "[bench:pi] prompt >>>\nLine one\nLine two\n[bench:pi] <<< prompt\n"
+    assert {"type": "prompt", "message": "Line one\nLine two"} in process.sent_commands
+
+
+def test_verbose_tool_events_show_input_and_output_previews(capsys: pytest.CaptureFixture[str]) -> None:
+    from bench.harnesses import pi_rpc
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(pi_rpc, "_VERBOSE_PREVIEW_LINES", 2)
+    try:
+        harness = PiRpcHarness(["pi"])
+        harness._emit_verbose_event(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "toolcall_end",
+                    "toolCall": {"name": "orch_dispatch", "arguments": {"goal": "line1\nline2\nline3"}},
+                },
+            }
+        )
+        harness._emit_verbose_event(
+            {
+                "type": "tool_execution_end",
+                "toolName": "orch_dispatch",
+                "isError": False,
+                "result": {"content": [{"text": "out1\nout2\nout3"}]},
+            }
+        )
+    finally:
+        monkeypatch.undo()
+
+    output = capsys.readouterr().out
+    assert "[bench:pi] tool ready: orch_dispatch\n" in output
+    assert "line1\nline2\n[bench:pi] ... tool input truncated ...\n" in output
+    assert "[bench:pi] tool done: orch_dispatch (ok)\n" in output
+    assert "out1\nout2\n[bench:pi] ... tool output truncated ...\n" in output
+
+
+def test_verbose_stream_does_not_insert_blank_spacer_lines(capsys: pytest.CaptureFixture[str]) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    harness = PiRpcHarness(["pi"])
+    harness._emit_verbose_event({"type": "agent_start"})
+    harness._emit_verbose_event({"type": "turn_start"})
+    harness._emit_verbose_event({"type": "message_update", "assistantMessageEvent": {"type": "thinking_delta", "delta": "Thinking"}})
+    harness._emit_verbose_event({"type": "tool_execution_start", "toolName": "bash"})
+    harness._emit_verbose_event({"type": "tool_execution_end", "toolName": "bash", "isError": False})
+
+    output = capsys.readouterr().out
+    assert output == "[bench:pi] agent_start\n[bench:pi] turn_start\nThinking\n[bench:pi] tool exec: bash\n[bench:pi] tool done: bash (ok)\n"
+    assert "\n\n" not in output
+
+
 def test_start_uses_request_workdir_and_minimized_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from bench.harnesses.pi_rpc import PiRpcHarness
 
@@ -834,6 +898,73 @@ def test_run_grants_parent_finalize_window_when_consolidated_report_arrives_near
     assert _sent_prompt_messages(process) == ["Build the thing."]
 
 
+def test_run_grants_parent_finalize_window_when_cli_status_misses_delivered_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_AUTO_CHILD_WAIT_SECONDS", "0.35")
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+    monkeypatch.setenv("BENCH_PARENT_FINALIZE_WINDOW_SECONDS", "1.0")
+    monkeypatch.setenv("BENCH_ORCHESTRA_QUIET_SECONDS", "0")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_settled","message":"parent settled after dispatch"}\n',
+            ]
+        )
+
+    consolidated = json.dumps(
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 2 subagents returned]"}]},
+        }
+    )
+    process = _GatedJsonlProcess(
+        gates=[
+            (0.1, [consolidated + "\n", '{"type":"agent_start","message":"return integration turn"}\n']),
+            (
+                0.6,
+                [
+                    '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+                    '{"type":"agent_settled","message":"final settled"}\n',
+                ],
+            ),
+        ]
+    )
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    monkeypatch.setattr(
+        harness,
+        "_status_from_orchestra_cli",
+        lambda session_id: {
+            "state": "settled",
+            "parsed": True,
+            "active_runs": 0,
+            "descendants_terminal": True,
+            "session_report_available": False,
+            "session_report_delivered": False,
+            "raw_text": '{"active_runs":{"count":0},"descendants_terminal":true,"session_report_delivered":false}',
+        },
+    )
+    request = _request(tmp_path / "cli-report-mismatch", timeout_seconds=5.0, metadata={"orch_on": False})
+
+    result = harness.run(request)
+
+    assert result.status == "ok"
+    assert result.details["last_settle_status"] == "settled"
+
+
 def test_run_fails_parent_not_done_when_no_doneish_by_finalize_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -878,6 +1009,51 @@ def test_run_fails_parent_not_done_when_no_doneish_by_finalize_deadline(
     assert result.details["last_settle_status"] == "parent_not_done"
     assert result.error == "parent did not emit BENCH_PARENT_DONE before the completion timeout"
     assert _sent_prompt_messages(process) == ["Build the thing."]
+
+
+def test_child_wait_default_follows_orchestra_config_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+    import bench.harnesses.pi_rpc as pi_rpc
+
+    harness = PiRpcHarness(["pi"])
+    harness._request = _request(tmp_path / "wait-config")
+
+    monkeypatch.delenv("BENCH_AUTO_CHILD_WAIT_SECONDS", raising=False)
+    monkeypatch.delenv("BENCH_PARENT_FINALIZE_WINDOW_SECONDS", raising=False)
+    monkeypatch.setattr(pi_rpc.Path, "is_file", lambda self: str(self).endswith("config.yaml"))
+    monkeypatch.setattr(pi_rpc.Path, "read_text", lambda self, encoding=None: "default_timeout: 1800\nsoft_timeout: 1500\n")
+
+    assert harness._child_wait_seconds(None) == 1920.0
+    assert harness._parent_finalize_window_seconds() == 1920.0
+
+
+def test_orchestra_status_cli_uses_supported_status_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+    import bench.harnesses.pi_rpc as pi_rpc
+
+    harness = PiRpcHarness(["pi"])
+    harness._request = _request(tmp_path / "status-args")
+    harness._state["sessionId"] = "sess-1"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(pi_rpc.Path, "is_dir", lambda self: str(self).endswith("/.pi/agent/orchestra"))
+
+    def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, stdout='{"active_runs":{"count":0},"descendants_terminal":true}', stderr="")
+
+    monkeypatch.setattr(pi_rpc.subprocess, "run", fake_run)
+
+    snapshot = harness._status_from_orchestra_cli("sess-1")
+
+    command = captured["command"]
+    assert "--agent-catalog" not in command
+    assert command[:4] == ["python3", "-m", "orchestra", "--config"]
+    assert command[4].endswith("/.pi/agent/orchestra")
+    assert not command[4].endswith("config.yaml")
+    assert command[-3:] == ["--session-id", "pi:sess-1", "--json"]
+    assert snapshot is not None
+    assert snapshot["state"] == "settled"
 
 
 def test_orchestra_status_preserves_authoritative_cli_despite_direct_returns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

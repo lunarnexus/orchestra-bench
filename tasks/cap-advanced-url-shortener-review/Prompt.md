@@ -1,4 +1,5 @@
 # Run Prompt
+Work in the current directory. Edit the task files here.
 
 Read `PRD.md` and `kb/url_safety.md`, inspect the fixture, and finish ShortLink Desk.
 Dispatch and proceed until finished.

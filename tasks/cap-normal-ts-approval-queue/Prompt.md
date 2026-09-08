@@ -1,4 +1,5 @@
 # Run Prompt
+Work in the current directory. Edit the task files here.
 Read `PRD.md`, inspect the fixture and KB files, and finish the TypeScript approval queue.
 Dispatch and proceed until finished.
 

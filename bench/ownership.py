@@ -37,13 +37,19 @@ def normalize_run_ownership(root: Path | str) -> None:
     uid_int = int(uid)
     gid_int = int(gid)
 
-    def _chown(path: Path) -> None:
+    def _repair(path: Path) -> None:
         os.chown(path, uid_int, gid_int, follow_symlinks=False)
+        if path.is_symlink():
+            return
+        if path.is_dir():
+            os.chmod(path, 0o755)
+        else:
+            os.chmod(path, 0o644)
 
-    _chown(run_root)
+    _repair(run_root)
     for current, _dirnames, filenames in os.walk(run_root, topdown=False, followlinks=False):
         current_path = Path(current)
         if current_path != run_root:
-            _chown(current_path)
+            _repair(current_path)
         for filename in filenames:
-            _chown(current_path / filename)
+            _repair(current_path / filename)

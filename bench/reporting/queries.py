@@ -715,10 +715,19 @@ def _summarize_reason(value: Any) -> str:
 
 
 def _extract_failure_reason(result: TaskResult) -> str:
+    details = getattr(result.evaluation, "details", None)
+    if isinstance(details, dict):
+        functionality = details.get("functionality")
+        if isinstance(functionality, dict):
+            checks = functionality.get("checks")
+            if isinstance(checks, dict):
+                failed = sorted(name for name, value in checks.items() if isinstance(name, str) and value is False)
+                if failed:
+                    return "failed checks: " + ", ".join(failed)
     candidates: list[Any] = []
-    candidates.append(getattr(result.evaluation, "details", None))
     candidates.append(getattr(result.evaluation, "error", None))
     candidates.append(getattr(result.harness, "error", None))
+    candidates.append(details)
     for candidate in candidates:
         text = _summarize_reason(candidate)
         if text:

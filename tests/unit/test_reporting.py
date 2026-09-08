@@ -429,7 +429,7 @@ def test_run_detail_shows_configured_availability_and_observed_execution_indepen
         )
         return ReportEntry(path=tmp_path / "result.json", result=result, batch="smoke", provenance=provenance)
 
-    # --no-orch-on: configured availability unknown while observed execution is true.
+    # --no-orch-on skips activation; observed execution is still reported when it happens.
     independent = format_run_detail(
         entry(
             {
@@ -441,7 +441,7 @@ def test_run_detail_shows_configured_availability_and_observed_execution_indepen
             }
         )
     )
-    assert "tools         : unknown" in independent
+    assert "tools         : observed" in independent
     assert "tools-exec    : yes" in independent
 
     # Configured available while observed execution is false.
@@ -463,6 +463,55 @@ def test_run_detail_shows_configured_availability_and_observed_execution_indepen
     unknown = format_run_detail(entry({"orchestra": None}))
     assert "tools         : unknown" in unknown
     assert "tools-exec    : unknown" in unknown
+
+
+def test_failure_reason_summarizes_failed_functionality_checks() -> None:
+    from bench.reporting.queries import _extract_failure_reason
+
+    result = TaskResult(
+        run_meta=RunMeta(run_id="20250101T010105", task_id="task-c"),
+        evaluation=EvaluationResult(
+            status="ok",
+            details={
+                "functionality": {
+                    "checks": {
+                        "functional_a": True,
+                        "functional_b": False,
+                        "functional_c": False,
+                    },
+                    "evidence": {"large": "payload"},
+                }
+            },
+        ),
+        outcome="fail",
+    )
+
+    assert _extract_failure_reason(result) == "failed checks: functional_b, functional_c"
+
+
+def test_run_detail_tools_display_uses_observed_execution(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_run_detail
+    from bench.reporting.queries import ReportEntry
+
+    result = TaskResult(
+        run_meta=RunMeta(run_id="20250101T010106", task_id="task-d", batch="smoke"),
+        harness=HarnessResult(status="ok"),
+        evaluation=EvaluationResult(status="ok", score="pass", details={"functionality": {"checks": {"functional_a": True}}}),
+        outcome="pass",
+    )
+    entry = ReportEntry(
+        path=tmp_path / "result.json",
+        result=result,
+        batch="smoke",
+        model="model-a",
+        orchestra=False,
+        provenance={"harness": "pi", "model": "model-a", "orchestra_tools_executed": True},
+    )
+
+    detail = format_run_detail(entry)
+
+    assert "tools         : observed" in detail
+    assert "tools-exec    : yes" in detail
 
 
 def test_reporting_formatters_render_dashboard_runs_detail_tokens_and_timing(reporting_data: Path) -> None:
@@ -603,7 +652,6 @@ def test_reporting_formatters_render_dashboard_runs_detail_tokens_and_timing(rep
     detail_fail = format_run_detail(detail_fail_entry)
 
     assert "orchestra-bench dashboard" in dashboard
-    assert "smoke" in dashboard
     assert "runs       : 3" in dashboard
     assert "passed     : 3" in dashboard
     assert "failed     : 0" in dashboard
@@ -1010,8 +1058,9 @@ def test_reporting_formatters_render_dashboard_aggregates_and_recent_runs(tmp_pa
     assert "elapsed    : avg=15.0s high=30.0s low=5.0s" in dashboard
     assert "dispatches : attempts=3 accepted=3 rejected=0" in dashboard
     assert "children   : completed=3 failed=1 timed_out=0 reconciled=0 active=0 inferred_active=0" in dashboard
-    assert "20250101T010103" in dashboard
-    assert "20250101T010102" in dashboard
+    assert "20250101T010103" not in dashboard
+    assert "20250101T010102" not in dashboard
+    assert "03-results runs" in dashboard
 
 
 def test_reporting_formatters_surface_tool_activity_without_orch_on_without_scoring_it(tmp_path: Path) -> None:
@@ -1525,9 +1574,9 @@ def test_failure_paths_report_error_states_without_bogus_success_scores(tmp_path
     def _line(text: str, run_id: str) -> str:
         return next(line for line in text.splitlines() if run_id in line)
 
-    assert _line(runs, "20250101T090001").startswith("lifecycle_failed")
-    assert _line(runs, "20250101T090002").startswith("error")
-    assert _line(runs, "20250101T090003").startswith("PASS")
+    assert _line(runs, "20250101T090001").startswith("lifecycle_failed 20250101T090001-task-a")
+    assert _line(runs, "20250101T090002").startswith("error            20250101T090002-task-a")
+    assert _line(runs, "20250101T090003").startswith("PASS             20250101T090003-task-a")
 
     by_id = {entry.run_id: entry for entry in entries}
     lifecycle_detail = format_run_detail(by_id["20250101T090001"])

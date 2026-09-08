@@ -1,4 +1,5 @@
 # Run Prompt
+Work in the current directory. Edit the task files here.
 Read `PRD.md`, inspect the fixture and KB files, and finish the Python sync workspace.
 Dispatch and proceed until finished.
 

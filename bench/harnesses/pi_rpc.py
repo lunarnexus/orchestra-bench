@@ -129,6 +129,16 @@ def _orchestra_dispatch_seen(events: Sequence[dict[str, Any]]) -> bool:
     return any(event.get("type") == "tool_execution_end" and event.get("toolName") == "orch_dispatch" and not event.get("isError") for event in events)
 
 
+def _current_epoch_consolidated_report_seen(events: Sequence[dict[str, Any]]) -> bool:
+    report_seen = False
+    for event in events:
+        if event.get("type") == "tool_execution_end" and event.get("toolName") == "orch_dispatch" and not event.get("isError"):
+            report_seen = False
+        if any(_CONSOLIDATED_RETURN_PATTERN.search(text) for text in _event_text_fragments(event)):
+            report_seen = True
+    return report_seen
+
+
 # Fallback completion contract: Orchestra injects this consolidated parent
 # user prompt listing all returned children/auto-verifiers, then starts a new
 # parent turn. Without CLI status it is the evidence that descendants are
@@ -145,6 +155,45 @@ _ORCH_ON_ACTIVATION_PATTERNS = (
     re.compile(r"Orchestra orchestrator skill refreshed for this session\.", re.IGNORECASE),
     re.compile(r"Orchestra orchestrator skill (?:refreshed|loaded|activated)\b", re.IGNORECASE),
 )
+_VERBOSE_PREVIEW_LINES = 8
+_VERBOSE_PREVIEW_CHARS = 1200
+
+
+def _preview_text(value: Any) -> tuple[str, bool]:
+    if value is None:
+        return "", False
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, dict):
+        text = ""
+        for key in ("command", "goal", "path", "text"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip():
+                text = item.strip()
+                break
+        if not text:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).strip()
+    else:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).strip()
+    if not text:
+        return "", False
+    truncated = len(text) > _VERBOSE_PREVIEW_CHARS
+    text = text[:_VERBOSE_PREVIEW_CHARS]
+    lines = text.splitlines()
+    if len(lines) > _VERBOSE_PREVIEW_LINES:
+        truncated = True
+        lines = lines[:_VERBOSE_PREVIEW_LINES]
+    return "\n".join(lines), truncated
+
+
+def _tool_result_preview(result: Any) -> tuple[str, bool]:
+    if isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, list):
+            parts = [item.get("text") for item in content if isinstance(item, dict) and isinstance(item.get("text"), str)]
+            if parts:
+                return _preview_text("\n".join(parts))
+    return _preview_text(result)
 
 
 def _event_text_fragments(event: dict[str, Any]) -> list[str]:
@@ -324,6 +373,7 @@ class PiRpcHarness(BaseHarness):
     _pending_events: deque[dict[str, Any]] = field(default_factory=deque, init=False, repr=False)
     _state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _last_settle_status: str = field(default="not_started", init=False, repr=False)
+    _verbose_at_line_start: bool = field(default=True, init=False, repr=False)
 
     @property
     def running(self) -> bool:
@@ -346,9 +396,8 @@ class PiRpcHarness(BaseHarness):
         if request is None or not session_id:
             return None
         run_id = request.run_paths.run_id
-        config_path = Path(f"/workspace/.pi/home/{run_id}/.pi/agent/orchestra/config.yaml")
-        catalog_path = Path(f"/workspace/.pi/home/{run_id}/.pi/agent/orchestra/agent-catalog.yaml")
-        if not config_path.is_file() or not catalog_path.is_file():
+        config_path = Path(f"/workspace/.pi/home/{run_id}/.pi/agent/orchestra")
+        if not config_path.is_dir():
             return None
         try:
             completed = subprocess.run(
@@ -358,8 +407,6 @@ class PiRpcHarness(BaseHarness):
                     "orchestra",
                     "--config",
                     str(config_path),
-                    "--agent-catalog",
-                    str(catalog_path),
                     "status",
                     "--session-id",
                     session_id if session_id.startswith("pi:") else f"pi:{session_id}",
@@ -396,6 +443,11 @@ class PiRpcHarness(BaseHarness):
         # notifications must never override authoritative active descendants.
         cli_snapshot = self._status_from_orchestra_cli(self.session_id)
         if cli_snapshot is not None:
+            if _current_epoch_consolidated_report_seen(self.events):
+                cli_snapshot = dict(cli_snapshot)
+                cli_snapshot["session_report_available"] = True
+                cli_snapshot["session_report_delivered"] = True
+                cli_snapshot["event_stream_consolidated_report_delivered"] = True
             return cli_snapshot
         for event in reversed(self.events):
             if event.get("type") != "tool_execution_end" or event.get("toolName") != "orch_status":
@@ -505,14 +557,38 @@ class PiRpcHarness(BaseHarness):
         except ValueError:
             return 10.0
 
+    def _orchestra_default_timeout_seconds(self) -> float | None:
+        request = self._request
+        if request is None:
+            return None
+        config_path = Path(f"/workspace/.pi/home/{request.run_paths.run_id}/.pi/agent/orchestra/config.yaml")
+        if not config_path.is_file():
+            return None
+        match = re.search(r"^default_timeout:\s*(\d+)\s*$", config_path.read_text(encoding="utf-8"), re.MULTILINE)
+        if match is None:
+            return None
+        return float(match.group(1))
+
+    def _orchestra_wait_floor_seconds(self) -> float:
+        # Bench must outwait Orchestra workers plus report-watcher/final-turn slack.
+        default_timeout = self._orchestra_default_timeout_seconds()
+        if default_timeout is None and self._request is not None:
+            default_timeout = self._request.timeout_seconds
+        if default_timeout is None:
+            default_timeout = 0.0
+        return default_timeout + 120.0
+
     def _parent_finalize_window_seconds(self) -> float:
         # Separate budget for the parent's final model turn after the consolidated
         # session report is delivered; sized to permit a normal final turn.
-        configured = os.environ.get("BENCH_PARENT_FINALIZE_WINDOW_SECONDS", "300")
+        floor = self._orchestra_wait_floor_seconds()
+        configured = os.environ.get("BENCH_PARENT_FINALIZE_WINDOW_SECONDS")
+        if configured is None:
+            return floor
         try:
             return max(0.0, float(configured))
         except ValueError:
-            return 300.0
+            return floor
 
     def _orchestra_quiet_seconds(self) -> float:
         # Settle observation window after apparent completion. This catches late
@@ -553,6 +629,7 @@ class PiRpcHarness(BaseHarness):
         self._state.clear()
         self._framer = JsonlEventFramer()
         self._last_settle_status = "running"
+        self._verbose_at_line_start = True
         request.artifacts.events_path.parent.mkdir(parents=True, exist_ok=True)
         request.artifacts.summary_path.parent.mkdir(parents=True, exist_ok=True)
         request.artifacts.transcript_path.parent.mkdir(parents=True, exist_ok=True)
@@ -591,6 +668,20 @@ class PiRpcHarness(BaseHarness):
             self._state = dict(normalized.get("data") or {})
         return normalized
 
+    def _emit_verbose_line(self, line: str) -> None:
+        if not self._verbose_at_line_start:
+            sys.stdout.write("\n")
+        sys.stdout.write(line.rstrip() + "\n")
+        sys.stdout.flush()
+        self._verbose_at_line_start = True
+
+    def _emit_verbose_delta(self, text: str) -> None:
+        if not text:
+            return
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        self._verbose_at_line_start = text.endswith("\n")
+
     def _emit_verbose_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
         if event_type == "message_update":
@@ -599,24 +690,36 @@ class PiRpcHarness(BaseHarness):
                 return
             update_type = str(update.get("type") or "")
             if update_type in {"text_delta", "thinking_delta"}:
-                delta = str(update.get("delta") or "")
-                if delta:
-                    sys.stdout.write(delta)
-                    sys.stdout.flush()
+                self._emit_verbose_delta(str(update.get("delta") or ""))
             elif update_type == "toolcall_start":
-                print(f"\n[bench:pi] tool start: {update.get('toolName') or 'unknown'}", flush=True)
+                self._emit_verbose_line(f"[bench:pi] tool start: {update.get('toolName') or 'unknown'}")
             elif update_type == "toolcall_end":
                 tool = update.get("toolCall")
                 name = tool.get("name") if isinstance(tool, dict) else "unknown"
-                print(f"\n[bench:pi] tool ready: {name}", flush=True)
+                self._emit_verbose_line(f"[bench:pi] tool ready: {name}")
+                preview, truncated = _preview_text(tool.get("arguments") if isinstance(tool, dict) else None)
+                if preview:
+                    self._emit_verbose_line(preview)
+                    if truncated:
+                        self._emit_verbose_line("[bench:pi] ... tool input truncated ...")
             return
         if event_type == "tool_execution_start":
-            print(f"\n[bench:pi] tool exec: {event.get('toolName') or 'unknown'}", flush=True)
+            self._emit_verbose_line(f"[bench:pi] tool exec: {event.get('toolName') or 'unknown'}")
+            preview, truncated = _preview_text(event.get("args"))
+            if preview:
+                self._emit_verbose_line(preview)
+                if truncated:
+                    self._emit_verbose_line("[bench:pi] ... tool input truncated ...")
         elif event_type == "tool_execution_end":
             marker = "error" if event.get("isError") else "ok"
-            print(f"\n[bench:pi] tool done: {event.get('toolName') or 'unknown'} ({marker})", flush=True)
+            self._emit_verbose_line(f"[bench:pi] tool done: {event.get('toolName') or 'unknown'} ({marker})")
+            preview, truncated = _tool_result_preview(event.get("result"))
+            if preview:
+                self._emit_verbose_line(preview)
+                if truncated:
+                    self._emit_verbose_line("[bench:pi] ... tool output truncated ...")
         elif event_type in {"agent_start", "agent_settled", "agent_end", "turn_start", "turn_end"}:
-            print(f"\n[bench:pi] {event_type}", flush=True)
+            self._emit_verbose_line(f"[bench:pi] {event_type}")
 
     def _record_stderr(self, text: str) -> None:
         request = self._request
@@ -676,6 +779,12 @@ class PiRpcHarness(BaseHarness):
             handle.write(json.dumps(command, sort_keys=True) + "\n")
 
     def send_prompt(self, prompt: str) -> None:
+        request, _ = self._require_started()
+        if request.metadata.get("stream_output"):
+            self._emit_verbose_line("[bench:pi] prompt >>>")
+            for line in str(prompt).splitlines() or [""]:
+                self._emit_verbose_line(line)
+            self._emit_verbose_line("[bench:pi] <<< prompt")
         self.send({"type": "prompt", "message": prompt})
 
     def query_state(self, timeout: float | None = None) -> dict[str, Any]:
@@ -757,11 +866,15 @@ class PiRpcHarness(BaseHarness):
                 break
 
     def _child_wait_seconds(self, timeout: float | None) -> float:
-        configured = os.environ.get("BENCH_AUTO_CHILD_WAIT_SECONDS", "300")
-        try:
-            child_wait = max(0.0, float(configured))
-        except ValueError:
-            child_wait = 60.0
+        floor = self._orchestra_wait_floor_seconds()
+        configured = os.environ.get("BENCH_AUTO_CHILD_WAIT_SECONDS")
+        if configured is None:
+            child_wait = floor
+        else:
+            try:
+                child_wait = max(0.0, float(configured))
+            except ValueError:
+                child_wait = floor
         grace_seconds = self._parent_done_grace_seconds()
         if timeout is not None:
             child_wait = min(child_wait, max(0.0, float(timeout)))
@@ -861,11 +974,6 @@ class PiRpcHarness(BaseHarness):
                     last_wait_announcement = now
             else:
                 self._last_settle_status = "parent_not_done"
-                # With the consolidated report delivered, wait out the finalization
-                # window for the parent's done-ish turn instead of failing early;
-                # expiry below then fails closed as parent_not_done.
-                if snapshot is not None and children_cleared and not finalize_granted:
-                    return False
 
             remaining = self._remaining_timeout(deadline)
             if remaining == 0:

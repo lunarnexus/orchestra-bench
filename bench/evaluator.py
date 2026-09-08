@@ -166,16 +166,17 @@ def grade_run(
             )
             result_file_handle.close()
             result_json_path = Path(result_file_handle.name)
-            # Inherit the process environment (PATH, HOME, ...): graders and their
-            # child interpreters break when spawned with a bare BENCH_*-only env.
+            # Inherit the process environment, but run evaluators with the app/runtime
+            # toolchain instead of Orchestra's agent virtualenv.
             env = os.environ.copy()
             env.update(
                 {
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                     "BENCH_REPO_ROOT": str(staging_root),
-                "BENCH_RESULT_JSON": str(result_json_path),
-                "BENCH_RUN_ID": run_paths.run_id,
-                "BENCH_TASK_ID": task.task_id,
-                "BENCH_TASKS": str(task.task_dir.parent),
+                    "BENCH_RESULT_JSON": str(result_json_path),
+                    "BENCH_RUN_ID": run_paths.run_id,
+                    "BENCH_TASK_ID": task.task_id,
+                    "BENCH_TASKS": str(task.task_dir.parent),
                     "BENCH_WORKDIR": str(workspace),
                 }
             )

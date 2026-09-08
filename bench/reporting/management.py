@@ -197,6 +197,8 @@ def format_delete_preview(entries: Sequence[ReportEntry], *, root: Path | str | 
     ]
     for entry in entries:
         body.append(f"{action} {_display_run_dir(entry, root=root)}")
+    if not confirmed and entries:
+        body.append("run again with --yes to delete these runs")
     return "\n".join(body) + "\n"
 
 

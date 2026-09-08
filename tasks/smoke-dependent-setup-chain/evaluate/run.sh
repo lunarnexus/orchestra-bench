@@ -23,8 +23,8 @@ assert round(order['total'], 2) == 14.0
 assert shop.CUSTOMERS['c-1']['cart'] == []
 
 shop.add_customer('c-2', 'Grace')
-shop.add_to_cart('c-2', 'sku-404', 1)
 try:
+    shop.add_to_cart('c-2', 'sku-404', 1)
     shop.checkout('c-2')
 except Exception as exc:
     unknown_product_error = f"{type(exc).__name__}: {exc}"

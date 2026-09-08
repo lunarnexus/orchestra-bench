@@ -15,14 +15,16 @@ old = [
     {'id': 'u2', 'name': 'Grace Hopper', 'email': 'grace@example.com', 'private_note': 'internal only'},
 ]
 new = migration.migrate(old)
-rolled = migration.rollback(new)
+migrated_creates_new_schema = new[0]['full_name'] == 'Ada Lovelace' and new[0]['contact']['email'] == 'ada@example.com'
+migrated_preserves_unknown_fields = new[0]['tier'] == 'pro' and new[0]['token'] == 'secret-token'
 migration.write_release_notes(new, 'release_notes.md')
 notes = Path('release_notes.md').read_text()
+rolled = migration.rollback(new)
 
 payload = {
     'checks': {
-        'migrate_creates_new_schema': new[0]['full_name'] == 'Ada Lovelace' and new[0]['contact']['email'] == 'ada@example.com',
-        'migrate_preserves_unknown_fields': new[0]['tier'] == 'pro' and new[0]['token'] == 'secret-token',
+        'migrate_creates_new_schema': migrated_creates_new_schema,
+        'migrate_preserves_unknown_fields': migrated_preserves_unknown_fields,
         'rollback_restores_legacy_fields': rolled[0]['name'] == 'Ada Lovelace' and rolled[0]['email'] == 'ada@example.com' and rolled[1]['private_note'] == 'internal only',
         'release_notes_are_written': Path('release_notes.md').exists() and '2' in notes,
         'release_notes_hide_secret_values': 'secret-token' not in notes and 'internal only' not in notes,
@@ -30,8 +32,8 @@ payload = {
     'details': {
         'functionality': {
             'checks': {
-                'migrate_creates_new_schema': new[0]['full_name'] == 'Ada Lovelace' and new[0]['contact']['email'] == 'ada@example.com',
-                'migrate_preserves_unknown_fields': new[0]['tier'] == 'pro' and new[0]['token'] == 'secret-token',
+                'migrate_creates_new_schema': migrated_creates_new_schema,
+                'migrate_preserves_unknown_fields': migrated_preserves_unknown_fields,
                 'rollback_restores_legacy_fields': rolled[0]['name'] == 'Ada Lovelace' and rolled[0]['email'] == 'ada@example.com' and rolled[1]['private_note'] == 'internal only',
                 'release_notes_are_written': Path('release_notes.md').exists() and '2' in notes,
                 'release_notes_hide_secret_values': 'secret-token' not in notes and 'internal only' not in notes,

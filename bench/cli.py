@@ -53,6 +53,7 @@ from .runtime import (
     prepare_startup,
 )
 from .tasks import TaskLoadError, list_suites, list_tasks, load_task
+from .workspace import workspace_dir
 
 
 def _json_dump(payload: Any) -> str:
@@ -315,7 +316,16 @@ def _collect_pi_sessions_from_container(sync_summary: dict[str, Any], run_dir: P
     container_exec(["sh", "-lc", script], workdir=CONTAINER_ROOT, env={CONTAINER_CONTEXT_ENV: "1"}, verbose=False)
 
 
-def _collect_pi_sessions_local(home_dir: str | Path | None, artifacts_dir: Path) -> dict[str, Any]:
+def _session_cwd(path: Path) -> str:
+    try:
+        first = path.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+        payload = json.loads(first)
+    except (OSError, IndexError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("cwd") or "") if isinstance(payload, dict) else ""
+
+
+def _collect_pi_sessions_local(home_dir: str | Path | None, artifacts_dir: Path, *, workspace: Path | None = None) -> dict[str, Any]:
     """Copy pi session files from a runtime home on this filesystem into run artifacts."""
     record_path = artifacts_dir / "pi-sessions-collection.json"
 
@@ -339,7 +349,16 @@ def _collect_pi_sessions_local(home_dir: str | Path | None, artifacts_dir: Path)
     try:
         if not source.is_dir():
             return _record("unavailable", reason="source_missing")
-        shutil.copytree(source, target, dirs_exist_ok=True)
+        if workspace is None:
+            shutil.copytree(source, target, dirs_exist_ok=True)
+        else:
+            workspace_text = str(workspace)
+            for path in source.rglob("*.jsonl"):
+                if _session_cwd(path) != workspace_text:
+                    continue
+                dest = target / path.relative_to(source)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, dest)
     except OSError as exc:
         return _record("unavailable", reason="copy_failed", error=str(exc))
     return _record("collected", source=str(source))
@@ -567,10 +586,10 @@ def _print_run_help() -> None:
             [
                 "usage:",
                 "  02-run <pi|hermes|opencode> [task-id|args...]",
-                "  02-run --auto [pi|hermes|opencode] <task-or-suite> [--verbose]",
+                "  02-run --auto [pi|hermes|opencode] <task-or-suite|all> [--verbose]",
                 "  02-run --list         list suites with their tasks",
                 "",
-                "Open a manual harness session in the container, or run and score a task/suite automatically.",
+                "Open a manual harness session in the container, or run and score a task/suite/all automatically.",
                 "If the first argument after pi/hermes/opencode is a known task id, 02-run opens that task session and prints Prompt.md first.",
                 "Automatic runs default to the catalog role/harness; 02-run --auto smoke keeps that default, while 02-run --auto pi smoke selects Pi explicitly.",
                 "",
@@ -578,7 +597,7 @@ def _print_run_help() -> None:
                 "  02-run --list         list suites with their tasks",
                 "",
                 "Options:",
-                "  --auto <task-or-suite>  run and score an automatic task or suite",
+                "  --auto <task-or-suite|all>  run and score an automatic task, suite, or all suites",
                 "  --verbose               stream the full session output for a real target",
                 "  --no-orchestra          disable Orchestra tools for this run",
                 "  --no-orch-on            keep tools as configured, but skip /orch on",
@@ -592,6 +611,7 @@ def _print_run_help() -> None:
                 "  02-run --auto hermes smoke",
                 "  02-run --auto opencode smoke",
                 "  02-run --auto smoke",
+                "  02-run --auto all",
                 "  02-run --auto smoke --verbose",
             ]
         )
@@ -956,7 +976,7 @@ def _run_single_task(
 
         def on_settled(prepared):  # type: ignore[no-untyped-def]
             home_dir = str((runtime_snapshot or {}).get("home_dir") or "")
-            _collect_pi_sessions_local(home_dir, prepared.run_paths.artifacts_dir)
+            _collect_pi_sessions_local(home_dir, prepared.run_paths.artifacts_dir, workspace=workspace_dir(prepared.run_paths))
 
     return run_and_grade(
         task,
@@ -987,6 +1007,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     argv = list(getattr(args, "argv", []))
     if getattr(args, "list", False):
         return _print_run_list(args)
+    if args.auto and str(args.task_id) == "all":
+        return cmd_run_all_suites(args)
     if args.auto:
         if not _inside_container():
             return _run_auto_inside_container(args)
@@ -1118,6 +1140,22 @@ def cmd_run_suite(args: argparse.Namespace, tasks: list[Any] | None = None) -> i
     summary = _suite_summary_payload(suite_name, results)
     print(f"[bench] suite complete: passed={summary['passed']} failed={summary['failed']}", flush=True)
     return int(summary["return_code"])
+
+
+def cmd_run_all_suites(args: argparse.Namespace) -> int:
+    suites = list_suites(args.tasks_root)
+    if not suites:
+        raise ValueError("no suites found")
+    print(f"[bench] auto all: {len(suites)} suites", flush=True)
+    return_code = 0
+    for suite in suites:
+        suite_args = argparse.Namespace(**vars(args))
+        suite_args.task_id = suite
+        suite_code = _run_auto_inside_container(suite_args) if not _inside_container() else cmd_run_suite(suite_args)
+        if suite_code != 0:
+            return_code = 1
+    print(f"[bench] all complete: suites={len(suites)} status={'pass' if return_code == 0 else 'fail'}", flush=True)
+    return return_code
 
 
 def cmd_grade(args: argparse.Namespace) -> int:

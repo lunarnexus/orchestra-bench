@@ -10,24 +10,26 @@ code = r'''
 import json
 import support
 request = support.submit_request('user@example.com', 'Billing', 'Need receipt')
+created_id = request['id']
+created_pending = request['status'] == 'pending' and bool(created_id)
 pending = support.admin_list(status='pending')
-resolved = support.admin_resolve(request['id'], 'sent receipt')
+resolved = support.admin_resolve(created_id, 'sent receipt')
 
 payload = {
     'checks': {
-        'submit_request_creates_pending_request': request['status'] == 'pending' and bool(request['id']),
-        'admin_list_filters_pending_requests': [item['id'] for item in pending] == [request['id']],
+        'submit_request_creates_pending_request': created_pending,
+        'admin_list_filters_pending_requests': [item['id'] for item in pending] == [created_id],
         'admin_resolve_updates_status_and_note': resolved['status'] == 'resolved' and resolved['admin_note'] == 'sent receipt',
-        'admin_list_filters_resolved_requests': support.admin_list(status='resolved')[0]['id'] == request['id'],
+        'admin_list_filters_resolved_requests': support.admin_list(status='resolved')[0]['id'] == created_id,
         'admin_resolve_missing_request_fails': False,
     },
     'details': {
         'functionality': {
             'checks': {
-                'submit_request_creates_pending_request': request['status'] == 'pending' and bool(request['id']),
-                'admin_list_filters_pending_requests': [item['id'] for item in pending] == [request['id']],
+                'submit_request_creates_pending_request': created_pending,
+                'admin_list_filters_pending_requests': [item['id'] for item in pending] == [created_id],
                 'admin_resolve_updates_status_and_note': resolved['status'] == 'resolved' and resolved['admin_note'] == 'sent receipt',
-                'admin_list_filters_resolved_requests': support.admin_list(status='resolved')[0]['id'] == request['id'],
+                'admin_list_filters_resolved_requests': support.admin_list(status='resolved')[0]['id'] == created_id,
                 'admin_resolve_missing_request_fails': False,
             },
             'evidence': {

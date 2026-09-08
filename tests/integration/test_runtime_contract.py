@@ -53,6 +53,8 @@ def test_static_runtime_contract_files_encode_thin_entrypoint_and_image_contract
     assert (REPO_ROOT / "config" / "pi" / "settings.json").is_file()
     assert (REPO_ROOT / "config" / "skills").is_dir()
     assert "pkg-config" in dockerfile
+    assert "python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn pytest httpx django pyyaml" in dockerfile
+    assert "python3 -m pip install -e \"/opt/orchestra/src[dev]\"" in dockerfile
     assert '"orchestra", "init", "pi", "--copy", "--force"' in runtime
     assert "agent-catalog.yaml" in runtime
     assert "prepare-workdir" in runtime

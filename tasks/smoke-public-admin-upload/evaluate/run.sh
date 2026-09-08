@@ -10,23 +10,25 @@ code = r'''
 import json
 import uploads
 upload = uploads.submit_upload('u1', 'report.txt', 'hello')
+created_id = upload['id']
+created_pending = upload['status'] == 'pending' and upload['filename'] == 'report.txt' and upload['path'].startswith(uploads.STORAGE_ROOT.rstrip('/') + '/')
 pending = uploads.admin_list(status='pending')
-approved = uploads.admin_approve(upload['id'])
+approved = uploads.admin_approve(created_id)
 
 payload = {
     'checks': {
-        'submit_upload_creates_pending_record': upload['status'] == 'pending' and upload['filename'] == 'report.txt' and upload['path'].startswith(uploads.STORAGE_ROOT.rstrip('/') + '/'),
-        'admin_list_filters_pending_uploads': [item['id'] for item in pending] == [upload['id']],
-        'admin_approve_marks_upload_approved': approved['status'] == 'approved' and approved['id'] == upload['id'],
+        'submit_upload_creates_pending_record': created_pending,
+        'admin_list_filters_pending_uploads': [item['id'] for item in pending] == [created_id],
+        'admin_approve_marks_upload_approved': approved['status'] == 'approved' and approved['id'] == created_id,
         'admin_approve_missing_upload_fails': False,
         'rejected_uploads_raise_value_error': False,
     },
     'details': {
         'functionality': {
             'checks': {
-                'submit_upload_creates_pending_record': upload['status'] == 'pending' and upload['filename'] == 'report.txt' and upload['path'].startswith(uploads.STORAGE_ROOT.rstrip('/') + '/'),
-                'admin_list_filters_pending_uploads': [item['id'] for item in pending] == [upload['id']],
-                'admin_approve_marks_upload_approved': approved['status'] == 'approved' and approved['id'] == upload['id'],
+                'submit_upload_creates_pending_record': created_pending,
+                'admin_list_filters_pending_uploads': [item['id'] for item in pending] == [created_id],
+                'admin_approve_marks_upload_approved': approved['status'] == 'approved' and approved['id'] == created_id,
                 'admin_approve_missing_upload_fails': False,
                 'rejected_uploads_raise_value_error': False,
             },

@@ -15,6 +15,7 @@ from bench.paths import RunPaths
 from bench.reporting.queries import ReportEntry
 from bench.result import EvaluationResult, HarnessResult, RunMeta, TaskResult, load_result, write_json_atomic
 from bench.tasks import TaskLoadError, load_task
+from bench.workspace import workspace_dir
 
 
 def _write_task(task_dir: Path, *, task_id: str = "alpha-run", family: str = "builder", batch: str | None = "smoke", description: str = "Sample task") -> None:
@@ -255,7 +256,7 @@ def test_run_help_shows_public_wrapper_modes_and_examples(capsys) -> None:
     output = capsys.readouterr().out
     assert output.splitlines()[0] == "usage:"
     assert "02-run <pi|hermes|opencode> [task-id|args...]" in output
-    assert "02-run --auto [pi|hermes|opencode] <task-or-suite> [--verbose]" in output
+    assert "02-run --auto [pi|hermes|opencode] <task-or-suite|all> [--verbose]" in output
     assert "02-run --list         list suites with their tasks" in output
     assert "02-run --list-suites" not in output
     assert "If the first argument after pi/hermes/opencode is a known task id, 02-run opens that task session and prints Prompt.md first." in output
@@ -270,6 +271,7 @@ def test_run_help_shows_public_wrapper_modes_and_examples(capsys) -> None:
     assert "02-run --auto hermes smoke" in output
     assert "02-run --auto opencode smoke" in output
     assert "02-run --auto smoke" in output
+    assert "02-run --auto all" in output
     assert "02-run --auto smoke --verbose" in output
     assert "02-run --verbose" not in output
     assert "./scripts/" not in output
@@ -705,6 +707,51 @@ def test_run_suite_routes_batch_execution(tmp_path: Path, monkeypatch, capsys) -
     assert "[bench] auto: beta-run" in output
     assert "[bench] suite complete: passed=2 failed=0" in output
     assert [call[0] for call in calls] == ["list_tasks", "resolve", "harness", "run_and_grade", "harness", "run_and_grade"]
+
+
+def test_run_all_routes_suites_in_order(tmp_path: Path, monkeypatch, capsys) -> None:
+    task_root = tmp_path / "tasks"
+    _write_task(task_root / "smoke-task", task_id="smoke-task", batch="smoke")
+    _write_task(task_root / "easy-task", task_id="easy-task", batch="capability-easy")
+    _write_task(task_root / "normal-task", task_id="normal-task", batch="capability-normal")
+    catalog_path = tmp_path / "config" / "orchestra" / "agent-catalog.yaml"
+    _write_catalog(catalog_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("bench.cli._inside_container", lambda: True, raising=False)
+    monkeypatch.setattr(RunPaths, "container_workdir", property(lambda self: str(self.run_dir / "workspace")))
+
+    calls: list[str] = []
+
+    def fake_resolve_harness_for_role(catalog, role=None):  # type: ignore[no-untyped-def]
+        return {"command": ["python3", "-c", "print('harness ok')"], "model": "fake-model", "agent": "fake-agent", "profile": "default", "env": {}}
+
+    class FakeHarness:
+        pass
+
+    def fake_from_resolved_config(cls, resolved):  # type: ignore[no-untyped-def]
+        return FakeHarness()
+
+    def fake_run_and_grade(task, harness, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(task.task_id)
+        return TaskResult(
+            run_meta=RunMeta(run_id=kwargs.get("run_id") or f"generated-{task.task_id}", task_id=task.task_id, batch=task.batch),
+            harness=HarnessResult(status="ok", exit_code=0),
+            evaluation=EvaluationResult(status="ok", score="pass"),
+            outcome="pass",
+        )
+
+    monkeypatch.setattr("bench.cli.resolve_harness_for_role", fake_resolve_harness_for_role, raising=False)
+    monkeypatch.setattr("bench.cli.CommandHarness.from_resolved_config", classmethod(fake_from_resolved_config), raising=False)
+    monkeypatch.setattr("bench.cli.run_and_grade", fake_run_and_grade, raising=False)
+
+    assert main(["run", "all", "--tasks-root", str(task_root), "--root", str(tmp_path), "--catalog", str(catalog_path), "--auto"]) == 0
+
+    output = capsys.readouterr().out
+    assert "[bench] auto all: 3 suites" in output
+    assert "[bench] auto suite: smoke (1 tasks)" in output
+    assert "[bench] auto suite: capability-easy (1 tasks)" in output
+    assert "[bench] auto suite: capability-normal (1 tasks)" in output
+    assert calls == ["smoke-task", "easy-task", "normal-task"]
 
 
 @pytest.mark.parametrize("argv", [["run", "alpha-run"], ["run", "smoke"]])
@@ -1321,12 +1368,15 @@ def _run_auto_pi_single_task(
             if home_dir is not None and create_sessions:
                 sessions = home_dir / ".pi" / "agent" / "sessions"
                 sessions.mkdir(parents=True, exist_ok=True)
+                cwd = str(workspace_dir(request.run_paths))
                 (sessions / "parent-session.jsonl").write_text(
-                    json.dumps({"type": "message_end", "usage": {"input": 10, "output": 5}}) + "\n",
+                    json.dumps({"type": "session", "cwd": cwd, "id": "parent-session"}) + "\n"
+                    + json.dumps({"type": "message_end", "usage": {"input": 10, "output": 5}}) + "\n",
                     encoding="utf-8",
                 )
                 (sessions / "orchestra-worker-child-1.jsonl").write_text(
-                    json.dumps({"type": "message_end", "usage": {"input": 7, "output": 3}}) + "\n",
+                    json.dumps({"type": "session", "cwd": cwd, "id": "orchestra-worker-child-1"}) + "\n"
+                    + json.dumps({"type": "message_end", "usage": {"input": 7, "output": 3}}) + "\n",
                     encoding="utf-8",
                 )
             return HarnessResult(status="ok", exit_code=0)

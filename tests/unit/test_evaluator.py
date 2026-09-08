@@ -32,8 +32,8 @@ def _write_task(task_dir: Path, *, task_id: str = "alpha") -> None:
 
 
 
-def test_grade_run_inherits_process_environment_for_grader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Graders rely on a sane inherited env (e.g. PATH); container python breaks with an empty env."""
+def test_grade_run_uses_system_path_for_grader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graders use the app/runtime toolchain, not Orchestra's agent virtualenv."""
     repo = RepoPaths(tmp_path)
     task_dir = tmp_path / "tasks" / "alpha"
     _write_task(task_dir)
@@ -51,7 +51,7 @@ def test_grade_run_inherits_process_environment_for_grader(tmp_path: Path, monke
         ),
     )
 
-    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
+    monkeypatch.setenv("PATH", "/opt/orchestra/.venv/bin:/usr/local/bin:/usr/bin")
     captured: dict[str, object] = {}
 
     def fake_runner(command, **kwargs):
@@ -62,7 +62,7 @@ def test_grade_run_inherits_process_environment_for_grader(tmp_path: Path, monke
     grade_run(task, run_paths, runner=fake_runner)
 
     env = captured["env"]
-    assert env["PATH"] == "/usr/local/bin:/usr/bin"
+    assert env["PATH"] == "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     assert env["BENCH_WORKDIR"] == str(workspace)
 
 

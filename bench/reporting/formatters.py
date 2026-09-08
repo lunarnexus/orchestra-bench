@@ -246,6 +246,8 @@ def _fmt_tools_availability(provenance: dict[str, Any]) -> str:
         return "disabled"
     if provenance.get("orchestra_tools_available") is True:
         return "available"
+    if provenance.get("orchestra_tools_executed") is True:
+        return "observed"
     return "unknown"
 
 
@@ -363,21 +365,9 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
             _format_label("children", f"completed={_fmt_decimal(child_completed)} failed={_fmt_decimal(child_failed)} timed_out={_fmt_decimal(child_timed_out)} reconciled={_fmt_decimal(child_reconciled)} active={_fmt_decimal(child_active)} inferred_active={_fmt_decimal(child_inferred_active)}"),
             _format_label("tool orchestration without /orch on", f"{no_orch_on_tool_activity}/{total}" if total else "n/a"),
             "",
-            "=== recent runs ===",
+            "tip: 03-results runs | 03-results run <ref> | 04-debug <ref> orch|full|raw",
         ]
     )
-    if rows:
-        for row in rows[:10]:
-            run_ref = f"{row.run_id}-{row.task_id}"
-            body.append(
-                f"{_status(row):<16} ref={run_ref:<54} "
-                f"suite={row.batch or 'unlabeled':<10} time={_fmt_seconds(row.elapsed_seconds):<8} "
-                f"model={_short_model(row.model)}"
-            )
-    else:
-        body.append("no runs found")
-    body.append("")
-    body.append("tip: 03-results run <ref> | 04-debug <ref> orch|full|raw")
     return _lines(*body)
 
 
@@ -389,10 +379,11 @@ def format_runs(entries: Iterable[ReportEntry]) -> str:
         return _lines(*body)
     for row in rows:
         run_ref = f"{row.run_id}-{row.task_id}"
+        notes = str(row.notes or "").replace("\n", " ").strip()
         body.append(
-            f"{_status(row):<16} ref={run_ref:<54} "
+            f"{_status(row):<16} {run_ref:<54} "
             f"suite={row.batch or 'unlabeled':<10} time={_fmt_seconds(row.elapsed_seconds):<8} "
-            f"model={_short_model(row.model)}"
+            f"model={_short_model(row.model)} notes={notes or 'n/a'}"
         )
     return _lines(*body)
 
