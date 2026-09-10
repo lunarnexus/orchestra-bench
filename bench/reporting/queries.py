@@ -626,7 +626,23 @@ def _extract_timing(result: TaskResult) -> dict[str, Any]:
     return timing
 
 
-def _extract_provenance(result: TaskResult, provenance: dict[str, Any]) -> dict[str, Any]:
+def _orchestra_tools_available_from_events(run_dir: Path) -> bool | None:
+    events_path = run_dir / "artifacts" / "harness" / "events.jsonl"
+    if not events_path.is_file():
+        return None
+    try:
+        lines = events_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if "Orchestra:on" in line or "orchestra_tools\": \"on" in line or "orchestra_tools': 'on" in line:
+            return True
+        if "Orchestra:off" in line or "orchestra_tools\": \"off" in line or "orchestra_tools': 'off" in line:
+            return False
+    return None
+
+
+def _extract_provenance(result: TaskResult, provenance: dict[str, Any], run_dir: Path | None = None) -> dict[str, Any]:
     details = result.details if isinstance(result.details, dict) else {}
     merged: dict[str, Any] = {}
     for candidate in (
@@ -636,6 +652,12 @@ def _extract_provenance(result: TaskResult, provenance: dict[str, Any]) -> dict[
     ):
         if isinstance(candidate, dict):
             merged.update(candidate)
+    if merged.get("no_orchestra") is True:
+        merged["orchestra_tools_available"] = False
+    elif merged.get("orchestra_tools_available") is None and run_dir is not None:
+        observed = _orchestra_tools_available_from_events(run_dir)
+        if observed is not None:
+            merged["orchestra_tools_available"] = observed
     return merged
 
 
@@ -848,7 +870,7 @@ def collect_results(
             tokens=_extract_tokens(result, provenance, run_dir),
             context=dict(result.context),
             timing=_extract_timing(result),
-            provenance=_extract_provenance(result, provenance),
+            provenance=_extract_provenance(result, provenance, run_dir),
             orchestra_metrics=orchestra_metrics,
         )
         entries_by_task[entry.task_id].append(entry)

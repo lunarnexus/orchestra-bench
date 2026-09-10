@@ -143,7 +143,7 @@ def test_same_check_map_scores_identically_across_orchestra_modes() -> None:
     scores = {
         "orchestra_on": score_task_result(_result("20250101T090010", orchestra=True, orchestra_metrics=FULL_ORCHESTRA_METRICS)),
         "orchestra_off": score_task_result(_result("20250101T090011", orchestra=False)),
-        "no_orch_on_diagnostic": score_task_result(
+        "activity_while_disabled": score_task_result(
             _result(
                 "20250101T090012",
                 orchestra=False,

@@ -19,7 +19,7 @@ def _write_harness_fallback_artifacts(run_dir: Path) -> tuple[Path, Path]:
         events_path,
         [
             {"type": "session", "id": "harness-session", "cwd": "/workspace/run"},
-            {"type": "custom", "customType": "orchestra-command", "data": {"text": "/orch on"}},
+            {"type": "custom", "customType": "orchestra-command", "data": {"text": "enable orchestra tools"}},
             {"type": "custom", "customType": "orch_dispatch", "data": {"text": "dispatch builder"}},
             {"type": "custom", "customType": "orch_status", "data": {"text": "children active"}},
             {"type": "custom", "customType": "orch_return", "data": {"text": "child returned"}},
@@ -42,8 +42,8 @@ def _write_harness_fallback_artifacts(run_dir: Path) -> tuple[Path, Path]:
     )
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.write_text(
-        "prompt: /orch on\n"
-        '{"message": "/orch on", "type": "prompt"}\n'
+        "prompt: enable orchestra tools\n"
+        '{"message": "enable orchestra tools", "type": "prompt"}\n'
         "prompt: # Run Prompt\n"
         "Read `PRD.md`, inspect the fixture, implement the requested behavior, and leave the workspace in a runnable state.\n"
         "Dispatch and proceed until finished.\n",
@@ -154,7 +154,7 @@ def test_format_session_debug_uses_harness_fallback_for_orch_and_full_views(tmp_
     assert "no session transcripts found" not in orch
     assert "╭─ session parent" in full
     assert "╭─ session harness" in full
-    assert "/orch on" in full
+    assert "enable orchestra tools" in full
     assert "orch_dispatch" in full
     assert "orch_status" in full
     assert "Read PRD.md" in full
@@ -163,7 +163,7 @@ def test_format_session_debug_uses_harness_fallback_for_orch_and_full_views(tmp_
     assert "worker text" not in full
 
     assert "╭─ session harness" not in orch
-    assert "/orch on" in orch
+    assert "enable orchestra tools" in orch
     assert "orch_dispatch" in orch
     assert "orch_status" in orch
     assert "Read PRD.md" in orch
@@ -200,5 +200,5 @@ def test_format_session_raw_falls_back_to_harness_artifacts_when_pi_sessions_mis
     assert f"path: {events_path}" in raw
     assert f"path: {transcript_path}" in raw
     assert '"customType": "orchestra-command"' in raw
-    assert "prompt: /orch on" in raw
+    assert "prompt: enable orchestra tools" in raw
     assert '"type": "get_state"' not in raw

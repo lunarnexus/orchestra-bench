@@ -339,10 +339,9 @@ def test_run_detail_renders_persisted_correctness_mode_usage_and_behavior_facts(
                 "model": "model-a",
                 "orchestra": True,
                 "no_orchestra": False,
-                "no_orch_on": False,
-                "orch_on_requested": True,
+                "mode_disabled_flag": False,
+                "mode_enabled_requested": True,
                 "orchestra_tools_available": True,
-                "tool_orchestration_without_orch_on": False,
             }
         },
     )
@@ -355,13 +354,11 @@ def test_run_detail_renders_persisted_correctness_mode_usage_and_behavior_facts(
 
     assert persisted.evaluation.details["functionality"]["checks"] == {"create_file": True, "run_command": False, "preserve_output": True}
     assert entries[0].tokens["all_sessions"]["total_tokens"] == persisted.tokens["all_sessions"]["total_tokens"] == 210
-    assert entries[0].provenance["orch_on_requested"] is persisted.details["provenance"]["orch_on_requested"] is True
+    assert entries[0].provenance["mode_enabled_requested"] is persisted.details["provenance"]["mode_enabled_requested"] is True
     assert entries[0].orchestra_metrics["dispatch_attempts"] == persisted.orchestra["dispatch_attempts"] == 3
     assert "correctness: score=67/100 checks=2/3" in detail
     assert "failed checks: run_command" in detail
-    assert "orch_on       : requested" in detail
     assert "no-orchestra  : no" in detail
-    assert "no-orch-on    : no" in detail
     assert "tools         : available" in detail
     assert "all      : total=210" in detail
     assert "parent   : total=150" in detail
@@ -395,21 +392,17 @@ def test_run_detail_reports_disabled_and_unknown_mode_facts(tmp_path: Path) -> N
             {
                 "orchestra": False,
                 "no_orchestra": True,
-                "no_orch_on": True,
-                "orch_on_requested": False,
+                "mode_disabled_flag": True,
+                "mode_enabled_requested": False,
                 "orchestra_tools_available": False,
             }
         )
     )
-    assert "orch_on       : skipped" in disabled
     assert "no-orchestra  : yes" in disabled
-    assert "no-orch-on    : yes" in disabled
     assert "tools         : disabled" in disabled
 
     unknown = format_run_detail(entry({"orchestra": None}))
-    assert "orch_on       : unknown" in unknown
     assert "no-orchestra  : unknown" in unknown
-    assert "no-orch-on    : unknown" in unknown
     assert "tools         : unknown" in unknown
     assert "sources   : parent=n/a children=n/a" in unknown
     assert "unavailable: n/a" in unknown
@@ -429,13 +422,13 @@ def test_run_detail_shows_configured_availability_and_observed_execution_indepen
         )
         return ReportEntry(path=tmp_path / "result.json", result=result, batch="smoke", provenance=provenance)
 
-    # --no-orch-on skips activation; observed execution is still reported when it happens.
+    # Activation was explicitly disabled by a flag; observed execution is still reported when it happens.
     independent = format_run_detail(
         entry(
             {
                 "orchestra": False,
-                "no_orch_on": True,
-                "orch_on_requested": False,
+                "mode_disabled_flag": True,
+                "mode_enabled_requested": False,
                 "orchestra_tools_available": None,
                 "orchestra_tools_executed": True,
             }
@@ -449,8 +442,8 @@ def test_run_detail_shows_configured_availability_and_observed_execution_indepen
         entry(
             {
                 "orchestra": True,
-                "no_orch_on": False,
-                "orch_on_requested": True,
+                "mode_disabled_flag": False,
+                "mode_enabled_requested": True,
                 "orchestra_tools_available": True,
                 "orchestra_tools_executed": False,
             }
@@ -487,6 +480,32 @@ def test_failure_reason_summarizes_failed_functionality_checks() -> None:
     )
 
     assert _extract_failure_reason(result) == "failed checks: functional_b, functional_c"
+
+
+def test_collect_results_infers_tool_availability_from_pi_widget(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_run_detail
+    from bench.reporting.queries import collect_results
+
+    run_dir = tmp_path / "results" / "20250101T010107-task-e"
+    write_json_atomic(
+        run_dir / "result.json",
+        TaskResult(
+            run_meta=RunMeta(run_id="20250101T010107", task_id="task-e", batch="smoke"),
+            harness=HarnessResult(status="ok"),
+            evaluation=EvaluationResult(status="ok", score="pass", details={"functionality": {"checks": {"functional_a": True}}}),
+            outcome="pass",
+            details={"provenance": {"harness": "pi", "model": "model-a", "no_orchestra": False, "orchestra_tools_available": None, "orchestra_tools_executed": False}},
+        ),
+    )
+    events = run_dir / "artifacts" / "harness" / "events.jsonl"
+    events.parent.mkdir(parents=True, exist_ok=True)
+    events.write_text(json.dumps({"type": "extension_ui_request", "widgetLines": ["(Orchestra:on)"]}) + "\n", encoding="utf-8")
+
+    [entry] = collect_results(tmp_path / "results")
+    detail = format_run_detail(entry)
+
+    assert "tools         : available" in detail
+    assert "tools-exec    : no" in detail
 
 
 def test_run_detail_tools_display_uses_observed_execution(tmp_path: Path) -> None:
@@ -648,6 +667,15 @@ def test_reporting_formatters_render_dashboard_runs_detail_tokens_and_timing(rep
         provenance={"harness": "pi", "backend": "pi", "model": "model-b", "orchestra": False},
     )
 
+    workspace = detail_entry.path.parent / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / ".evaluator-reports.sqlite3").write_text("db", encoding="utf-8")
+    (workspace / ".tmp-evaluator-inventory.json").write_text("{}", encoding="utf-8")
+    (workspace / ".pytest_cache").mkdir()
+    (workspace / "__pycache__").mkdir()
+    (workspace / "PLAN.md").write_text("plan", encoding="utf-8")
+    (workspace / "test_shop.py").write_text("test", encoding="utf-8")
+
     detail = format_run_detail(detail_entry)
     detail_fail = format_run_detail(detail_fail_entry)
 
@@ -664,7 +692,10 @@ def test_reporting_formatters_render_dashboard_runs_detail_tokens_and_timing(rep
     assert detail.startswith("=== run 20250101T010103 ===\n")
     assert "task      : task-a" in detail
     assert "suite     : smoke" in detail
-    assert "result    : pass" in detail
+    # Lifecycle/harness state and evaluation state are separate axes, not one `result` line.
+    assert "lifecycle : ok" in detail
+    assert "evaluation: ok" in detail
+    assert not any(line.startswith("result    ") for line in detail.splitlines())
     assert "score     : 89/100" in detail
     assert "reason    :" not in detail
     assert "agent     : harness=pi model=model-a orchestra=yes" in detail
@@ -688,11 +719,15 @@ def test_reporting_formatters_render_dashboard_runs_detail_tokens_and_timing(rep
     assert "runner    :" not in detail
     assert "evaluator :" not in detail
     assert "details   :" in detail
-    assert "04-debug 20250101T010103-task-a orch|full|raw" in detail
+    # Root wrappers are gone; the debug hint points at scripts/.
+    assert "debug     : scripts/04-debug 20250101T010103-task-a orch|full|raw" in detail
 
     assert "=== artifacts ===" in detail
     assert f"result   : {detail_entry.path}" in detail
     assert f"workspace: {detail_entry.path.parent / 'workspace'}" in detail
+    assert "workspace evaluator: .evaluator-reports.sqlite3, .tmp-evaluator-inventory.json" in detail
+    assert "workspace cache/runtime: .pytest_cache, __pycache__" in detail
+    assert "workspace agent/support: PLAN.md, test_shop.py" in detail
     assert "artifacts/harness" in detail
     assert "transcript=" in detail
     assert "sessions : " in detail
@@ -702,7 +737,11 @@ def test_reporting_formatters_render_dashboard_runs_detail_tokens_and_timing(rep
     assert "True" not in detail
 
     assert detail_fail.startswith("=== run 20250101T010104 ===\n")
-    assert "result    : error" in detail_fail
+    # Harness failed and the evaluator never produced a verdict: both axes are shown.
+    assert "lifecycle : lifecycle_failed" in detail_fail
+    assert "evaluation: failed" in detail_fail
+    assert not any(line.startswith("result    ") for line in detail_fail.splitlines())
+    assert "correctness: not evaluated" in detail_fail
     assert "score     : n/a" in detail_fail
     assert "reason    : evaluation crashed" in detail_fail
     assert "agent     : harness=pi model=model-b orchestra=no" in detail_fail
@@ -1053,25 +1092,225 @@ def test_reporting_formatters_render_dashboard_aggregates_and_recent_runs(tmp_pa
     assert "orchestration :" not in dashboard
     assert "efficiency :" not in dashboard
     assert "reliability :" not in dashboard
-    assert "tokens     : avg=150 high=300 low=50" in dashboard
-    assert "context    : avg=81.7 high=140 low=25" in dashboard
-    assert "elapsed    : avg=15.0s high=30.0s low=5.0s" in dashboard
+    assert "tokens all           : avg=150 high=300 low=50" in dashboard
+    assert "context all          : avg=81.7 high=140 low=25" in dashboard
+    assert "compactions all      : total=4 avg=1.3" in dashboard
+    assert "tokens main          : n/a" in dashboard
+    assert "tokens children      : n/a" in dashboard
+    assert "elapsed              : avg=15.0s high=30.0s low=5.0s" in dashboard
     assert "dispatches : attempts=3 accepted=3 rejected=0" in dashboard
     assert "children   : completed=3 failed=1 timed_out=0 reconciled=0 active=0 inferred_active=0" in dashboard
-    assert "20250101T010103" not in dashboard
+    # The error summary carries compact run refs so an operator can jump to the run.
+    evaluator_error_line = next(line for line in dashboard.splitlines() if line.startswith("evaluator"))
+    assert "20250101T010103-task-c" in evaluator_error_line
+    # Scored runs (pass/fail) are never listed as errors.
     assert "20250101T010102" not in dashboard
-    assert "03-results runs" in dashboard
+    assert "scripts/03-results runs" in dashboard
 
 
-def test_reporting_formatters_surface_tool_activity_without_orch_on_without_scoring_it(tmp_path: Path) -> None:
+def test_reporting_formatters_dashboard_reason_lines(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_dashboard
+    from bench.reporting.queries import ReportEntry
+    from bench.result import EvaluationResult, HarnessResult, RunMeta, TaskResult
+
+    empty_children = {"completed": 0, "failed": 0, "timed_out": 0, "reconciled": 0, "active": 0, "inferred_active": 0}
+
+    def make_entry(run_id: str, orchestra_metrics: dict[str, object]) -> ReportEntry:
+        result = TaskResult(
+            run_meta=RunMeta(run_id=run_id, task_id=f"task-{run_id}", batch="smoke", started_at="2025-01-01T00:00:00Z", finished_at="2025-01-01T00:10:00Z"),
+            harness=HarnessResult(status="ok", exit_code=0),
+            evaluation=EvaluationResult(status="ok", score="pass"),
+            outcome="pass",
+            score_numeric=80.0,
+            score_display="80/100",
+            category_scores={"functionality": {"score_numeric": 20.0}},
+            tokens={"all_sessions": {"total_tokens": 100, "final_context_tokens": 50, "max_context_tokens": 60, "compactions": 0}},
+            reliability={"artifacts_present": True},
+        )
+        return ReportEntry(
+            path=tmp_path / run_id / "result.json",
+            result=result,
+            batch="smoke",
+            model="model-a",
+            orchestra=True,
+            score_numeric=80.0,
+            score_display="80/100",
+            category_scores={"functionality": {"score_numeric": 20.0}},
+            notes="ready",
+            failure_reason="",
+            harness_status="ok",
+            harness_exit_code=0,
+            harness_error="",
+            evaluation_status="ok",
+            evaluation_score="80/100",
+            evaluation_error="",
+            artifact_paths={},
+            tokens={"all_sessions": {"total_tokens": 100, "final_context_tokens": 50, "max_context_tokens": 60, "compactions": 0}},
+            timing={"elapsed_seconds": 5.0},
+            provenance={"harness": "pi", "backend": "pi", "model": "model-a", "orchestra": True},
+            orchestra_metrics=orchestra_metrics,
+        )
+
+    entries = [
+        make_entry(
+            "20250101T030301",
+            {
+                "dispatch_attempts": 4,
+                "dispatch_accepted": 2,
+                "dispatch_rejected": 2,
+                "child_sessions": {**empty_children, "completed": 1, "failed": 1},
+                "dispatch_rejection_reasons": {"model concurrency limit exceeded": 1, "not accepted": 1},
+                "child_failure_reasons": {"timeout": 1},
+            },
+        ),
+        make_entry(
+            "20250101T030302",
+            {
+                "dispatch_attempts": 1,
+                "dispatch_accepted": 1,
+                "child_sessions": {**empty_children, "completed": 2},
+                # Current extraction fallback marker must render as an honest no-reason label.
+                "dispatch_rejection_reasons": {"dispatch was not accepted": 1},
+                # Nested aliases only; no top-level reason dicts beyond the fallback above.
+                "dispatch": {"attempts": 0, "accepted": 0, "rejected": 0, "rejection_reasons": {}},
+                "children": {"returns": {}, "sessions": empty_children, "failure_reasons": None},
+            },
+        ),
+    ]
+
+    dashboard = format_dashboard(entries)
+
+    # Totals are preserved across entries.
+    assert "dispatches : attempts=5 accepted=3 rejected=2" in dashboard
+    assert "children   : completed=3 failed=1 timed_out=0 reconciled=0 active=0 inferred_active=0" in dashboard
+    # Opaque markers (both legacy `not accepted` and the current extraction fallback)
+    # merge into one honest no-reason label; concrete reasons pass through unchanged.
+    assert "rejects    : rejected without recorded reason: 2; model concurrency limit exceeded: 1" in dashboard
+    assert "dispatch was not accepted" not in dashboard
+    assert "not accepted: 1" not in dashboard.replace("rejected without recorded reason", "")
+    assert "child fails : timeout: 1" in dashboard
+    # Rejects line sits inside the orchestra section, after children totals.
+    assert dashboard.index("children   : completed=3") < dashboard.index("rejects    :")
+
+    stale_pass_override = make_entry(
+        "20250101T030304",
+        {
+            "dispatch_attempts": 1,
+            "dispatch_accepted": 1,
+            "child_sessions": {**empty_children, "completed": 1, "failed": 1},
+            "child_failure_reasons": {
+                "Status: complete Verdict: **pass** builder run `abc123` satisfies all acceptance criteria": 1
+            },
+        },
+    )
+    stale_dashboard = format_dashboard([stale_pass_override])
+    assert "children   : completed=1 failed=0" in stale_dashboard
+    assert "child fails" not in stale_dashboard
+
+    bare_dashboard = format_dashboard([make_entry("20250101T030303", {"dispatch_attempts": 0, "dispatch_accepted": 0, "child_sessions": empty_children})])
+    assert "rejects" not in bare_dashboard
+    assert "child fails" not in bare_dashboard
+
+
+def test_honest_rejection_reason_maps_only_opaque_markers() -> None:
+    from bench.reporting.formatters import _honest_rejection_counts, _honest_rejection_reason
+
+    # Opaque extraction fallback markers (both current and legacy variants) map to the honest label.
+    assert _honest_rejection_reason("dispatch was not accepted") == "rejected without recorded reason"
+    assert _honest_rejection_reason("not accepted") == "rejected without recorded reason"
+    assert _honest_rejection_reason("  NOT ACCEPTED . ") == "rejected without recorded reason"
+    # Concrete reasons pass through unchanged.
+    assert _honest_rejection_reason("model concurrency limit exceeded") == "model concurrency limit exceeded"
+
+    # Both marker variants merge into one honest bucket; concrete counts are preserved.
+    counts = _honest_rejection_counts(
+        {"dispatch was not accepted": 3, "not accepted": 2, "global concurrency limit exceeded": 1}
+    )
+    assert counts == {"rejected without recorded reason": 5, "global concurrency limit exceeded": 1}
+
+
+def test_reporting_formatters_dashboard_usage_bucket_aliases_and_compactions(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_dashboard
+    from bench.reporting.queries import ReportEntry
+    from bench.result import EvaluationResult, HarnessResult, RunMeta, TaskResult
+
+    empty_children = {"completed": 0, "failed": 0, "timed_out": 0, "reconciled": 0, "active": 0, "inferred_active": 0}
+
+    def make_entry(run_id: str, tokens: dict[str, object]) -> ReportEntry:
+        result = TaskResult(
+            run_meta=RunMeta(run_id=run_id, task_id=f"task-{run_id}", batch="smoke", started_at="2025-01-01T00:00:00Z", finished_at="2025-01-01T00:10:00Z"),
+            harness=HarnessResult(status="ok", exit_code=0),
+            evaluation=EvaluationResult(status="ok", score="pass"),
+            outcome="pass",
+            score_numeric=80.0,
+            score_display="80/100",
+            category_scores={"functionality": {"score_numeric": 20.0}},
+            tokens=tokens,
+            reliability={"artifacts_present": True},
+        )
+        return ReportEntry(
+            path=tmp_path / run_id / "result.json",
+            result=result,
+            batch="smoke",
+            model="model-a",
+            orchestra=True,
+            score_numeric=80.0,
+            score_display="80/100",
+            category_scores={"functionality": {"score_numeric": 20.0}},
+            notes="ready",
+            failure_reason="",
+            harness_status="ok",
+            harness_exit_code=0,
+            harness_error="",
+            evaluation_status="ok",
+            evaluation_score="80/100",
+            evaluation_error="",
+            artifact_paths={},
+            tokens=tokens,
+            timing={"elapsed_seconds": 5.0},
+            provenance={"harness": "pi", "backend": "pi", "model": "model-a", "orchestra": True},
+            orchestra_metrics={"dispatch_attempts": 0, "dispatch_accepted": 0, "child_sessions": empty_children},
+        )
+
+    entries = [
+        make_entry(
+            "20250101T020201",
+            {
+                "parent_session": {"total_tokens": 100, "final_context_tokens": 50, "max_context_tokens": 60, "compactions": 1},
+                "children_sessions": {"total_tokens": 40, "final_context_tokens": 20, "max_context_tokens": 30, "compactions": 2},
+            },
+        ),
+        make_entry(
+            "20250101T020202",
+            {
+                "main_session": {"total_tokens": 300, "final_context_tokens": 90, "max_context_tokens": 120, "compactions": 5},
+                "subagent_sessions": {"total_tokens": 60, "final_context_tokens": 30, "max_context_tokens": 40, "compactions": 0},
+            },
+        ),
+    ]
+
+    dashboard = format_dashboard(entries)
+
+    assert "tokens all           : n/a" in dashboard
+    # main bucket: parent_session and main_session aliases both resolve.
+    assert "tokens main          : avg=200 high=300 low=100" in dashboard
+    assert "context main         : avg=70 high=90 low=50" in dashboard
+    # children bucket: children_sessions and subagent_sessions aliases both resolve.
+    assert "tokens children      : avg=50 high=60 low=40" in dashboard
+    assert "context children     : avg=25 high=30 low=20" in dashboard
+    assert "compactions main     : total=6 avg=3" in dashboard
+    assert "compactions children : total=2 avg=1" in dashboard
+
+
+def test_reporting_formatters_surface_unorchestrated_tool_activity_without_scoring_it(tmp_path: Path) -> None:
     from bench.reporting.formatters import format_dashboard, format_run_detail
     from bench.reporting.queries import ReportEntry
     from bench.result import EvaluationResult, HarnessResult, RunMeta, TaskResult
 
-    def make_entry(*, run_id: str, orchestra: bool, orchestration_score: float | None, tool_activity_without_orch_on: dict[str, object] | None = None, child_sessions: dict[str, object] | None = None) -> ReportEntry:
+    def make_entry(*, run_id: str, orchestra: bool, orchestration_score: float | None, tool_activity: dict[str, object] | None = None, child_sessions: dict[str, object] | None = None) -> ReportEntry:
         category_scores = {
             "functionality": {"score_numeric": 20.0, "available": True},
-            "orchestration": {"score_numeric": orchestration_score, "available": orchestration_score is not None, "score_display": "35/35" if orchestration_score is not None else "n/a", "inputs": {"tool_activity_without_orch_on": tool_activity_without_orch_on or {}}},
+            "orchestration": {"score_numeric": orchestration_score, "available": orchestration_score is not None, "score_display": "35/35" if orchestration_score is not None else "n/a", "inputs": {"tool_activity": tool_activity or {}}},
             "efficiency": {"score_numeric": 10.0, "available": True},
             "reliability": {"score_numeric": 15.0, "available": True},
         }
@@ -1111,7 +1350,7 @@ def test_reporting_formatters_surface_tool_activity_without_orch_on_without_scor
                 "dispatch_attempts": 1,
                 "dispatch_accepted": 1,
                 "child_sessions": child_sessions or {"completed": 1, "failed": 0, "timed_out": 0, "reconciled": 0, "active": 0, "inferred_active": 0},
-                **({"tool_activity_without_orch_on": tool_activity_without_orch_on} if tool_activity_without_orch_on else {}),
+                **({"tool_activity": tool_activity} if tool_activity else {}),
             },
         )
 
@@ -1121,9 +1360,9 @@ def test_reporting_formatters_surface_tool_activity_without_orch_on_without_scor
             run_id="20250101T010202",
             orchestra=False,
             orchestration_score=None,
-            tool_activity_without_orch_on={
+            tool_activity={
                 "detected": True,
-                "reason": "tool orchestration observed without /orch on",
+                "reason": "dispatch/child activity observed while orchestration was disabled",
                 "child_sessions": {"active": 1, "inferred_active": 1},
             },
             child_sessions={"completed": 1, "failed": 0, "timed_out": 0, "reconciled": 0, "active": 1, "inferred_active": 1},
@@ -1136,13 +1375,16 @@ def test_reporting_formatters_surface_tool_activity_without_orch_on_without_scor
     assert "orchestration :" not in dashboard
     assert "efficiency :" not in dashboard
     assert "reliability :" not in dashboard
-    assert "tool orchestration without /orch on" in dashboard
-    assert "tool orchestration without /orch on:" in detail
+    # The per-run tool-activity line lives in run detail only; the dashboard no longer shows N/M.
+    assert "tool activity :" not in dashboard
+    # The run-detail tool-activity line reports neutral counts only, without stored reason text.
+    assert "orchestration was disabled" not in detail
+    assert "tool activity: dispatches=n/a accepted=n/a active=1 inferred_active=1" in detail
     assert "orchestra=no" in detail
     assert "inferred_active=1" in detail
 
 
-def test_reporting_formatters_render_persisted_provenance_activity_without_metrics(tmp_path: Path) -> None:
+def test_reporting_formatters_render_persisted_provenance_tool_activity(tmp_path: Path) -> None:
     from bench.reporting.formatters import format_run_detail
     from bench.reporting.queries import collect_results
 
@@ -1155,7 +1397,7 @@ def test_reporting_formatters_render_persisted_provenance_activity_without_metri
         details={
             "provenance": {
                 "orchestra": False,
-                "tool_orchestration_without_orch_on": True,
+                "tool_activity": True,
             }
         },
     )
@@ -1164,8 +1406,11 @@ def test_reporting_formatters_render_persisted_provenance_activity_without_metri
     entry = collect_results(results_root)[0]
     detail = format_run_detail(entry)
 
-    assert "tool orchestration without /orch on:" in detail
-    assert "dispatches=n/a accepted=n/a active=n/a inferred_active=n/a" in detail
+    # Neutral counts-only line from persisted provenance tool_activity.
+    assert "orchestration was disabled" not in detail
+    assert "tool activity: dispatches=n/a accepted=n/a active=n/a inferred_active=n/a" in detail
+
+
 
 
 def test_parse_since_filter_supports_simple_relative_and_calendar_values() -> None:
@@ -1582,11 +1827,17 @@ def test_failure_paths_report_error_states_without_bogus_success_scores(tmp_path
     lifecycle_detail = format_run_detail(by_id["20250101T090001"])
     evaluator_detail = format_run_detail(by_id["20250101T090002"])
 
-    assert "result    : error" in lifecycle_detail
+    # Lifecycle and evaluation state are separate axes; a not-run evaluator is explicit.
+    assert "lifecycle : lifecycle_failed" in lifecycle_detail
+    assert "evaluation: not_run" in lifecycle_detail
+    assert not any(line.startswith("result    ") for line in lifecycle_detail.splitlines())
+    assert "correctness: not evaluated" in lifecycle_detail
     assert "score     : n/a" in lifecycle_detail
     assert "runner    : lifecycle_failed exit=1 runner crashed" in lifecycle_detail
 
-    assert "result    : error" in evaluator_detail
+    assert "lifecycle : ok" in evaluator_detail
+    assert "evaluation: failed" in evaluator_detail
+    assert "correctness: not evaluated" in evaluator_detail
     assert "score     : n/a" in evaluator_detail
     assert "evaluator : failed evaluator produced no JSON" in evaluator_detail
 
@@ -1663,8 +1914,10 @@ def test_run_detail_labels_noop_notimplemented_as_failure(tmp_path: Path) -> Non
     entry = entries[0]
 
     detail = format_run_detail(entry)
-    assert "result    : fail" in detail
-    assert "result    : pass" not in detail
+    # Product failure is an evaluation verdict on a healthy lifecycle, shown as separate axes.
+    assert "lifecycle : ok" in detail
+    assert "evaluation: ok" in detail
+    assert not any(line.startswith("result    ") for line in detail.splitlines())
     assert entry.category_scores["functionality"]["score_numeric"] == 50.0
     score_line = next(line for line in detail.splitlines() if line.startswith("score     "))
     assert "/100" in score_line or "n/a" in score_line
@@ -1672,3 +1925,220 @@ def test_run_detail_labels_noop_notimplemented_as_failure(tmp_path: Path) -> Non
     if "/100" in score_line:
         numeric = float(score_line.split(":")[1].strip().split("/")[0])
     assert numeric is None or numeric <= 50, f"no-op run reported a passing-looking total: {score_line!r}"
+
+
+def test_human_number_compacts_large_values_and_preserves_small_ones() -> None:
+    from bench.reporting.formatters import _fmt_number, human_number
+
+    assert human_number(None) == "n/a"
+    assert human_number(True) == "True"
+    assert human_number(False) == "False"
+    assert human_number(0) == "0"
+    assert human_number(-150) == "-150"
+    assert human_number(999) == "999"
+    assert human_number(42.5) == "42.5"
+    assert human_number(100.0) == "100"
+
+    assert human_number(1_000) == "1K"
+    assert human_number(572129.3) == "572.1K"
+    assert human_number(-2_132_494) == "-2.1M"
+    assert human_number(1_500_000_000) == "1.5B"
+    assert human_number(3_000_000_000_000) == "3T"
+
+    # _fmt_number keeps its prior plain behavior for small values via human_number
+    assert _fmt_number(None) == "n/a"
+    assert _fmt_number(True) == "True"
+    assert _fmt_number(210) == "210"
+    assert _fmt_number(57.0) == "57"
+
+
+def test_run_detail_token_lines_use_human_number_for_large_totals(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_run_detail, human_number
+
+    # Guard against divergence between the shared formatter and its examples.
+    assert human_number(572129.3) == "572.1K"
+    assert human_number(2132494) == "2.1M"
+
+
+def _dashboard_entry(
+    tmp_path: Path,
+    run_id: str,
+    *,
+    outcome: str = "pass",
+    score_numeric: float | None = 90.0,
+    harness_status: str = "ok",
+    harness_exit_code: int | None = 0,
+    harness_error: str = "",
+    evaluation_status: str = "ok",
+    evaluation_score: str = "pass",
+    evaluation_error: str = "",
+) -> object:
+    from bench.reporting.queries import ReportEntry
+
+    result = TaskResult(
+        run_meta=RunMeta(run_id=run_id, task_id="task-a", batch="smoke", started_at="2025-01-01T00:00:00Z", finished_at="2025-01-01T00:10:00Z"),
+        harness=HarnessResult(status=harness_status, exit_code=harness_exit_code, error=harness_error),
+        evaluation=EvaluationResult(status=evaluation_status, score=evaluation_score, error=evaluation_error),
+        outcome=outcome,
+        score_numeric=score_numeric,
+        score_display=f"{int(score_numeric)}/100" if score_numeric is not None else "",
+    )
+    return ReportEntry(
+        path=tmp_path / run_id / "result.json",
+        result=result,
+        batch="smoke",
+        model="model-a",
+        harness_status=harness_status,
+        harness_exit_code=harness_exit_code,
+        harness_error=harness_error,
+        evaluation_status=evaluation_status,
+        evaluation_score=evaluation_score,
+        evaluation_error=evaluation_error,
+    )
+
+
+def test_dashboard_shows_evaluated_not_evaluated_and_error_reason_counts(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_dashboard
+
+    entries = [
+        _dashboard_entry(tmp_path, "20250101T010001", outcome="pass", score_numeric=90.0),
+        _dashboard_entry(
+            tmp_path,
+            "20250101T010002",
+            outcome="fail",
+            score_numeric=40.0,
+            evaluation_score="fail",
+        ),
+        _dashboard_entry(
+            tmp_path,
+            "20250101T010003",
+            outcome="error",
+            score_numeric=None,
+            harness_status="lifecycle_failed",
+            harness_exit_code=1,
+            harness_error="runner crashed",
+            evaluation_status="not_run",
+            evaluation_score="",
+        ),
+        _dashboard_entry(
+            tmp_path,
+            "20250101T010004",
+            outcome="error",
+            score_numeric=None,
+            evaluation_status="failed",
+            evaluation_score="",
+            evaluation_error="evaluator produced no JSON",
+        ),
+    ]
+
+    dashboard = format_dashboard(entries)
+
+    assert "runs       : 4" in dashboard
+    assert "passed     : 1" in dashboard
+    assert "failed     : 1" in dashboard
+    assert "error      : 2" in dashboard
+    assert "evaluated  : 2/4" in dashboard
+    assert "not evaluated : 2" in dashboard
+    # Pass rate is computed over evaluated runs only.
+    assert "evaluated pass rate : 50.0% (1/2) over 2 evaluated runs" in dashboard
+
+    assert "=== errors ===" in dashboard
+    lifecycle_line = next(line for line in dashboard.splitlines() if line.startswith("lifecycle"))
+    evaluator_line = next(line for line in dashboard.splitlines() if line.startswith("evaluator"))
+    # Lifecycle and evaluator reason counts are reported separately.
+    assert "runner crashed exit=1: 1" in lifecycle_line
+    assert "evaluator produced no JSON: 1" in evaluator_line
+    # Each reason carries compact run refs, not only counts.
+    assert "[20250101T010003-task-a]" in lifecycle_line
+    assert "[20250101T010004-task-a]" in evaluator_line
+
+
+def test_dashboard_excludes_lifecycle_incomplete_runs_from_scored_and_pass_rate(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_dashboard, format_runs
+
+    entries = [
+        _dashboard_entry(tmp_path, "20250101T020001", outcome="pass", score_numeric=90.0),
+        # Inconsistent/partial result.json: harness failed but a pass verdict and
+        # numeric score are present. It must not look scored or product-passed.
+        _dashboard_entry(
+            tmp_path,
+            "20250101T020002",
+            outcome="pass",
+            score_numeric=80.0,
+            harness_status="lifecycle_failed",
+            harness_exit_code=1,
+            harness_error="harness timeout",
+        ),
+    ]
+
+    dashboard = format_dashboard(entries)
+
+    assert "runs       : 2" in dashboard
+    # Only the clean run is counted as passed/scored; pass rate stays 100% (1/1).
+    assert "passed     : 1" in dashboard
+    assert "evaluated  : 1/2" in dashboard
+    assert "not evaluated : 1" in dashboard
+    assert "evaluated pass rate : 100.0% (1/1) over 1 evaluated runs" in dashboard
+
+    errors_line = next(line for line in dashboard.splitlines() if line.startswith("lifecycle"))
+    assert "harness timeout exit=1: 1" in errors_line
+
+    # The run listing must not render the lifecycle-incomplete run as PASS.
+    runs = format_runs(entries)
+    bad_line = next(line for line in runs.splitlines() if "20250101T020002" in line)
+    assert bad_line.startswith("lifecycle_failed ")
+    good_line = next(line for line in runs.splitlines() if "20250101T020001" in line)
+    assert good_line.startswith("PASS")
+
+
+def test_dashboard_errors_section_reports_none_when_all_runs_scored(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_dashboard
+
+    entries = [
+        _dashboard_entry(tmp_path, "20250101T030001", outcome="pass", score_numeric=90.0),
+        _dashboard_entry(
+            tmp_path,
+            "20250101T030002",
+            outcome="fail",
+            score_numeric=40.0,
+            evaluation_score="fail",
+        ),
+    ]
+
+    dashboard = format_dashboard(entries)
+
+    assert "not evaluated : 0" in dashboard
+    # A product failure is a scored verdict, not a lifecycle/evaluator error:
+    # it must not appear as an evaluator error reason.
+    assert "no lifecycle or evaluator errors" in dashboard
+
+
+def test_dashboard_warns_about_duplicate_selected_task_ids_when_selection_includes_retries(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_dashboard
+    from bench.reporting.queries import collect_results
+
+    tasks_root = tmp_path / "tasks"
+    results_root = tmp_path / "results"
+    _write_task(tasks_root, "task-a", batch="smoke")
+    # Three attempts (retries) of the same task in one selection.
+    for run_id, score in (("20250101T091001", 80.0), ("20250101T091002", 75.0), ("20250101T091003", 85.0)):
+        _write_result(
+            results_root,
+            run_id,
+            "task-a",
+            batch="smoke",
+            model="model-a",
+            orchestra=False,
+            score_numeric=score,
+            score_display=f"{int(score)}/100",
+        )
+
+    entries = collect_results(results_root, tasks_dir=tasks_root)
+    dashboard = format_dashboard(entries)
+    dup_line = next(line for line in dashboard.splitlines() if "duplicates" in line)
+    assert "warning:" in dup_line
+    assert "task-a x3" in dup_line
+
+    # A selection without retries must not carry the warning.
+    clean = format_dashboard([entries[0]])
+    assert "duplicates" not in clean

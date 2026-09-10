@@ -89,6 +89,35 @@ def _assistant_message_from_event(event: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _event_message_payload(event: dict[str, Any]) -> dict[str, Any]:
+    message = event.get("message")
+    if isinstance(message, dict):
+        return message
+    if isinstance(message, str) and message.startswith("{"):
+        try:
+            parsed = ast.literal_eval(message)
+        except (ValueError, SyntaxError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _event_runtime_error(events: Sequence[dict[str, Any]]) -> str:
+    terminal_types = {"message_end", "turn_end", "agent_end"}
+    for event in reversed(events):
+        if str(event.get("type") or "") not in terminal_types:
+            continue
+        payload = _event_message_payload(event)
+        if not payload:
+            payload = event
+        stop_reason = str(payload.get("stopReason") or "")
+        error_message = str(payload.get("errorMessage") or "")
+        if stop_reason == "error" or error_message:
+            return error_message or "Pi runtime error"
+        return ""
+    return ""
+
+
 def _assistant_text_from_events(events: Sequence[dict[str, Any]]) -> str:
     final_text = ""
     streamed: list[str] = []
@@ -151,10 +180,6 @@ _DIRECT_RETURN_PHRASES = (
     "returned done",
 )
 
-_ORCH_ON_ACTIVATION_PATTERNS = (
-    re.compile(r"Orchestra orchestrator skill refreshed for this session\.", re.IGNORECASE),
-    re.compile(r"Orchestra orchestrator skill (?:refreshed|loaded|activated)\b", re.IGNORECASE),
-)
 _VERBOSE_PREVIEW_LINES = 8
 _VERBOSE_PREVIEW_CHARS = 1200
 
@@ -243,13 +268,6 @@ def _consolidated_report_delivered(snapshot: dict[str, Any] | None, children_cle
     # Authoritative status reporting a delivered session report for cleared children.
     return children_cleared and snapshot.get("session_report_delivered") is True
 
-
-def _orch_on_activation_seen(events: Sequence[dict[str, Any]]) -> bool:
-    for event in events:
-        for text in _event_text_fragments(event):
-            if any(pattern.search(text) for pattern in _ORCH_ON_ACTIVATION_PATTERNS):
-                return True
-    return False
 
 
 @runtime_checkable
@@ -827,37 +845,6 @@ class PiRpcHarness(BaseHarness):
                 self._last_settle_status = "settled"
                 return True
 
-    def wait_for_orch_on_activation(self, timeout: float | None = None, *, start_index: int = 0) -> bool:
-        deadline = None if timeout is None else time.monotonic() + timeout
-        activation_seen = False
-        while True:
-            events = self.events[start_index:]
-            if not activation_seen and _orch_on_activation_seen(events):
-                activation_seen = True
-            if activation_seen and any(event.get("type") == "agent_settled" for event in events):
-                self._last_settle_status = "settled"
-                return True
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            if remaining == 0:
-                self._last_settle_status = "missing_settled" if activation_seen else "timeout"
-                return False
-            event = self._next_event(timeout=remaining if deadline is not None else timeout)
-            if event is None:
-                process = self._process
-                if process is not None and process.poll() is not None:
-                    self._drain_remaining_output()
-                    events = self.events[start_index:]
-                    if not activation_seen and _orch_on_activation_seen(events):
-                        activation_seen = True
-                    if activation_seen and any(event.get("type") == "agent_settled" for event in events):
-                        self._last_settle_status = "settled"
-                        return True
-                    self._last_settle_status = "missing_settled" if activation_seen else "missing_activation"
-                    return False
-                continue
-            if not activation_seen and _orch_on_activation_seen(self.events[start_index:]):
-                activation_seen = True
-
     def _drain_remaining_output(self) -> None:
         while True:
             event = self._next_event(timeout=0.0)
@@ -1023,35 +1010,7 @@ class PiRpcHarness(BaseHarness):
     def run(self, request: HarnessRequest) -> HarnessResult:
         self.start(request)
         deadline = None if request.timeout_seconds is None else time.monotonic() + max(0.0, request.timeout_seconds)
-        orch_on_requested = bool(request.metadata.get("orch_on"))
-        if orch_on_requested:
-            orch_on_start = len(self.events)
-            self.write_transcript(request, "prompt: /orch on")
-            self.send_prompt("/orch on")
-            if not self.wait_for_orch_on_activation(timeout=self._remaining_timeout(deadline), start_index=orch_on_start):
-                exit_code = self.stop()
-                details = {
-                    "agent_settled_seen": self.agent_settled_seen,
-                    "command": list(self.command),
-                    "event_count": len(self.events),
-                    "exit_code": exit_code,
-                    "last_settle_status": self._last_settle_status,
-                    "orch_on": orch_on_requested,
-                    "state": dict(self._state),
-                }
-                orch_on_error_map = {
-                    "timeout": "/orch on activation timed out",
-                    "missing_activation": "/orch on activation did not arrive",
-                    "missing_settled": "/orch on activation did not settle",
-                }
-                result = self.build_result(
-                    status="lifecycle_failed",
-                    exit_code=exit_code,
-                    error=orch_on_error_map.get(self._last_settle_status, "/orch on did not settle"),
-                    details=details,
-                )
-                self.write_summary(request, result.details | {"status": result.status, "exit_code": result.exit_code, "error": result.error})
-                return result
+        # Orchestra tools are exposed by runtime config; no explicit enable command is sent.
         self.write_transcript(request, f"prompt: {request.prompt}")
         task_start = len(self.events)
         self.send_prompt(request.prompt)
@@ -1060,10 +1019,11 @@ class PiRpcHarness(BaseHarness):
         except Exception:
             pass
         settled = self.wait_for_settled(timeout=self._remaining_timeout(deadline), start_index=task_start)
-        if settled and (orch_on_requested or _orchestra_dispatch_seen(self.events[task_start:])):
+        if settled and _orchestra_dispatch_seen(self.events[task_start:]):
             settled = self.wait_for_orchestra_children()
         exit_code = self.stop()
         reported_exit_code = 0 if settled and self._last_settle_status == "settled" and exit_code == -9 else exit_code
+        runtime_error = _event_runtime_error(self.events[task_start:])
         details = {
             "agent_settled_seen": self.agent_settled_seen,
             "command": list(self.command),
@@ -1073,10 +1033,17 @@ class PiRpcHarness(BaseHarness):
             "last_settle_status": self._last_settle_status,
             "state": dict(self._state),
         }
-        if not settled or self._last_settle_status != "settled":
+        if runtime_error:
+            details["runtime_error"] = runtime_error
+            result = self.build_result(
+                status="lifecycle_failed",
+                exit_code=reported_exit_code,
+                error=f"Pi runtime error: {runtime_error}",
+                details=details,
+            )
+        elif not settled or self._last_settle_status != "settled":
             error_map = {
                 "timeout": "timeout waiting for agent_settled",
-                "missing_activation": "/orch on activation did not arrive",
                 "missing_settled": "missing agent_settled",
                 "parent_not_done": "parent did not emit BENCH_PARENT_DONE before the completion timeout",
                 "children_active_after_parent_done": "children still active after parent done-ish",

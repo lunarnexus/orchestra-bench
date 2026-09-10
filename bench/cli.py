@@ -573,7 +573,6 @@ def _build_run_help_parser() -> argparse.ArgumentParser:
     orchestra_group = parser.add_mutually_exclusive_group()
     orchestra_group.add_argument("--orchestra", dest="orchestra", action="store_true")
     orchestra_group.add_argument("--no-orchestra", dest="orchestra", action="store_false")
-    parser.add_argument("--no-orch-on", action="store_true")
     parser.set_defaults(orchestra=None)
     parser.add_argument("target", nargs="?", metavar="target")
     parser.add_argument("argv", nargs=argparse.REMAINDER, metavar="...")
@@ -599,8 +598,8 @@ def _print_run_help() -> None:
                 "Options:",
                 "  --auto <task-or-suite|all>  run and score an automatic task, suite, or all suites",
                 "  --verbose               stream the full session output for a real target",
-                "  --no-orchestra          disable Orchestra tools for this run",
-                "  --no-orch-on            keep tools as configured, but skip /orch on",
+                "Orchestra tools are available by default.",
+                "  --no-orchestra          disable Orchestra tools for this run (only opt-out)",
                 "",
                 "Examples:",
                 "  02-run pi smoke-dependent-setup-chain",
@@ -622,28 +621,28 @@ def _print_public_results_help() -> None:
     print(
         "\n".join(
             [
-                "usage: 03-results [command] [run-id]",
+                "usage: scripts/03-results [command] [run-id]",
                 "",
-                "Show benchmark results. Bare 03-results prints the dashboard and recent runs.",
+                "Show benchmark results. Bare scripts/03-results prints the dashboard and recent runs.",
                 "",
                 "common commands:",
-                "  03-results dash         dashboard + recent runs",
-                "  03-results runs         recent runs only",
-                "  03-results run <id>     details for one run; timestamp prefix is ok",
-                "  04-debug <run-id> orch|full|raw",
-                "  03-results comp <a> <b>  compare two selectors (alias of compare)",
+                "  scripts/03-results dash         dashboard + recent runs",
+                "  scripts/03-results runs         recent runs only",
+                "  scripts/03-results run <id>     details for one run; timestamp prefix is ok",
+                "  scripts/04-debug <run-id> orch|full|raw",
+                "  scripts/03-results comp <a> <b>  compare two selectors (alias of compare)",
                 "",
                 "other commands: tokens, timing, compare, rescore, delete",
                 "",
                 "examples:",
-                "  03-results",
-                "  03-results dash --suite smoke",
-                "  03-results run 20260830T035857",
-                "  04-debug 20260830T035857 orch",
-                "  04-debug 20260830T035857 full",
-                "  03-results delete --task smoke-dependent-setup-chain",
-                "  03-results delete --task smoke-dependent-setup-chain --yes",
-                "  03-results delete --all --yes",
+                "  scripts/03-results",
+                "  scripts/03-results dash --suite smoke",
+                "  scripts/03-results run 20260830T035857",
+                "  scripts/04-debug 20260830T035857 orch",
+                "  scripts/04-debug 20260830T035857 full",
+                "  scripts/03-results delete --task smoke-dependent-setup-chain",
+                "  scripts/03-results delete --task smoke-dependent-setup-chain --yes",
+                "  scripts/03-results delete --all --yes",
             ]
         )
     )
@@ -728,9 +727,6 @@ def _consume_run_option(args: argparse.Namespace, raw_args: Sequence[str], index
     if token == "--no-orchestra":
         args.orchestra = False
         return index + 1
-    if token == "--no-orch-on":
-        args.no_orch_on = True
-        return index + 1
     raise ValueError(f"unknown option: {token}")
 
 
@@ -750,7 +746,6 @@ def _parse_run_argv(raw_args: Sequence[str]) -> argparse.Namespace:
         dry_run=False,
         verbose=False,
         orchestra=None,
-        no_orch_on=False,
         task_id=None,
         argv=[],
     )
@@ -900,8 +895,6 @@ def _auto_inner_argv(args: argparse.Namespace) -> list[str]:
         inner_args.append("--orchestra")
     elif args.orchestra is False:
         inner_args.append("--no-orchestra")
-    if getattr(args, "no_orch_on", False):
-        inner_args.append("--no-orch-on")
     if getattr(args, "verbose", False):
         inner_args.append("--verbose")
     if getattr(args, "dry_run", False):
@@ -955,10 +948,9 @@ def _run_single_task(
     catalog_orchestra_enabled = bool(resolved_config.get("enabled")) or args.orchestra is True
     tools_enabled = False if args.orchestra is False else None
     no_orchestra = args.orchestra is False if args.auto else None
-    no_orch_on = bool(getattr(args, "no_orch_on", False)) if args.auto else None
     orchestra_tools_available = None
-    orch_on = bool(args.auto and backend == "pi" and catalog_orchestra_enabled and args.orchestra is not False and not bool(getattr(args, "no_orch_on", False)))
-    effective_orchestra = orch_on
+    # Orchestra tools are exposed by runtime config; no explicit enable command is sent.
+    effective_orchestra = bool(args.auto and backend == "pi" and catalog_orchestra_enabled and args.orchestra is not False)
     if args.auto and backend == "pi":
         model = str(resolved_config.get("model") or args.model or "")
         rpc_command = ["pi"] + (["--model", model] if model else []) + ["--mode", "rpc"]
@@ -991,14 +983,13 @@ def _run_single_task(
         catalog_label=args.catalog_label,
         runtime_snapshot=runtime_snapshot,
         no_orchestra=no_orchestra,
-        no_orch_on=no_orch_on,
         orchestra_tools_available=orchestra_tools_available,
         model=str(resolved_config.get("model") or ""),
         agent=str(resolved_config.get("agent") or ""),
         profile=str(resolved_config.get("profile") or ""),
         env=request_env,
         stream_output=stream_output,
-        request_metadata={"orch_on": orch_on, "orchestra_tools_enabled": tools_enabled},
+        request_metadata={"orchestra_tools_enabled": tools_enabled},
         on_settled=on_settled,
     )
 

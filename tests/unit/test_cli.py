@@ -110,13 +110,18 @@ def test_help_lists_public_commands(capsys) -> None:
 def test_results_help_is_public_and_concise(capsys) -> None:
     assert main(["results", "--help"]) == 0
     output = capsys.readouterr().out
-    assert output.splitlines()[0] == "usage: 03-results [command] [run-id]"
-    assert "Show benchmark results. Bare 03-results prints the dashboard and recent runs." in output
+    assert output.splitlines()[0] == "usage: scripts/03-results [command] [run-id]"
+    assert "Show benchmark results. Bare scripts/03-results prints the dashboard and recent runs." in output
     assert "bench results" not in output
     assert "--root" not in output
     assert "--tasks-root" not in output
     assert "other commands: tokens, timing, compare, rescore, delete" in output
-    assert "04-debug <run-id> orch|full|raw" in output
+    assert "scripts/04-debug <run-id> orch|full|raw" in output
+    # After root wrappers were removed, every shell reference must use the scripts/ path.
+    for token in ("03-results", "04-debug"):
+        lines = [line for line in output.splitlines() if token in line]
+        assert lines
+        assert all(f"scripts/{token}" in line for line in lines)
     assert "[--no-tools]" not in output
     assert "[--no-color]" not in output
     assert "[--plain]" not in output
@@ -180,7 +185,7 @@ def test_public_debug_falls_back_to_harness_artifacts_when_pi_sessions_are_missi
         "\n".join(
             [
                 json.dumps({"type": "session", "id": "harness-session", "cwd": "/workspace/run"}),
-                json.dumps({"type": "custom", "customType": "orchestra-command", "data": {"text": "/orch on"}}),
+                json.dumps({"type": "custom", "customType": "orchestra-command", "data": {"text": "enable orchestra tools"}}),
                 json.dumps({"type": "custom", "customType": "orch_dispatch", "data": {"text": "dispatch builder"}}),
                 json.dumps({"type": "custom", "customType": "orch_status", "data": {"text": "children active"}}),
                 json.dumps({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "Read PRD.md"}]}}),
@@ -190,7 +195,7 @@ def test_public_debug_falls_back_to_harness_artifacts_when_pi_sessions_are_missi
         encoding="utf-8",
     )
     (harness_dir / "transcript.txt").write_text(
-        "prompt: /orch on\n"
+        "prompt: enable orchestra tools\n"
         "prompt: # Run Prompt\n"
         "Read `PRD.md`, inspect the fixture, implement the requested behavior, and leave the workspace in a runnable state.\n",
         encoding="utf-8",
@@ -200,7 +205,7 @@ def test_public_debug_falls_back_to_harness_artifacts_when_pi_sessions_are_missi
     assert main(["04-debug", run_ref, "orch", "--root", str(tmp_path)]) == 0
     orch = capsys.readouterr().out
     assert "no session transcripts found" not in orch
-    assert "/orch on" in orch
+    assert "enable orchestra tools" in orch
     assert "orch_dispatch" in orch
     assert "orch_status" in orch
 
@@ -215,7 +220,7 @@ def test_public_debug_falls_back_to_harness_artifacts_when_pi_sessions_are_missi
     assert f"path: {harness_dir / 'events.jsonl'}" in raw
     assert f"path: {harness_dir / 'transcript.txt'}" in raw
     assert '"customType": "orch_dispatch"' in raw
-    assert "prompt: /orch on" in raw
+    assert "prompt: enable orchestra tools" in raw
 
 
 def test_public_debug_reports_missing_and_ambiguous_run_refs(tmp_path: Path, capsys) -> None:
@@ -261,8 +266,8 @@ def test_run_help_shows_public_wrapper_modes_and_examples(capsys) -> None:
     assert "02-run --list-suites" not in output
     assert "If the first argument after pi/hermes/opencode is a known task id, 02-run opens that task session and prints Prompt.md first." in output
     assert "Automatic runs default to the catalog role/harness; 02-run --auto smoke keeps that default, while 02-run --auto pi smoke selects Pi explicitly." in output
-    assert "  --no-orchestra          disable Orchestra tools for this run" in output
-    assert "  --no-orch-on            keep tools as configured, but skip /orch on" in output
+    assert "Orchestra tools are available by default." in output
+    assert "  --no-orchestra          disable Orchestra tools for this run (only opt-out)" in output
     assert "02-run pi smoke-dependent-setup-chain" in output
     assert "02-run pi config" in output
     assert "02-run hermes --version" in output
@@ -1153,7 +1158,7 @@ def test_auto_run_propagates_synced_runtime_summary_into_run_path(tmp_path: Path
     assert seen["harness"] == ("fake-harness",)
 
 
-def test_auto_run_inside_container_no_orchestra_disables_tools_default_and_skips_orch_on(tmp_path: Path, monkeypatch) -> None:
+def test_auto_run_inside_container_no_orchestra_disables_tools_default(tmp_path: Path, monkeypatch) -> None:
     args = SimpleNamespace(
         run_id="run-1",
         task_id="alpha-run",
@@ -1166,7 +1171,6 @@ def test_auto_run_inside_container_no_orchestra_disables_tools_default_and_skips
         dry_run=False,
         verbose=False,
         orchestra=False,
-        no_orch_on=False,
     )
     seen: dict[str, object] = {}
 
@@ -1194,7 +1198,6 @@ def test_auto_run_inside_container_no_orchestra_disables_tools_default_and_skips
     assert bench_cli._run_auto_inside_container(args) == 0
     assert seen["sync"] == {"run_id": "run-1", "orchestra_tools_enabled": False}
     assert "--no-orchestra" in seen["command"]
-    assert "--no-orch-on" not in seen["command"]
     assert seen["env"]["BENCH_RUN_ID"] == "run-1"
     assert seen["env"]["HOME"] == f"{tmp_path}/.pi/home/run-1"
     assert seen["env"]["PI_CODING_AGENT_DIR"] == f"{tmp_path}/.pi/home/run-1/.pi/agent"
@@ -1256,18 +1259,16 @@ def test_run_single_task_uses_pi_rpc_harness_for_orchestrated_pi_catalog(tmp_pat
     assert created["run_kwargs"]["auto"] is True
     assert created["run_kwargs"]["orchestra"] is True
     assert created["run_kwargs"]["orchestra_tools_available"] is None
-    assert created["run_kwargs"]["request_metadata"]["orch_on"] is True
     assert isinstance(created["harness"], FakePiHarness)
 
 
-def test_run_single_task_uses_pi_rpc_harness_without_orch_on_when_requested(tmp_path: Path, monkeypatch) -> None:
+def test_run_single_task_disables_tools_when_no_orchestra(tmp_path: Path, monkeypatch) -> None:
     args = SimpleNamespace(
         root=tmp_path,
         run_id="run-1",
         role="builder",
-        orchestra=None,
+        orchestra=False,
         auto=True,
-        no_orch_on=True,
         notes="",
         catalog_label="config/orchestra/agent-catalog.yaml",
         verbose=False,
@@ -1318,8 +1319,7 @@ def test_run_single_task_uses_pi_rpc_harness_without_orch_on_when_requested(tmp_
     assert created["harness_kwargs"] == {"env": {"HARNESS_ENV": "catalog"}}
     assert created["run_kwargs"]["env"] == {"HARNESS_ENV": "catalog"}
     assert created["run_kwargs"]["orchestra_tools_available"] is False
-    assert created["run_kwargs"]["request_metadata"]["orch_on"] is False
-    assert created["run_kwargs"]["request_metadata"]["orchestra_tools_enabled"] is None
+    assert created["run_kwargs"]["request_metadata"]["orchestra_tools_enabled"] is False
     assert isinstance(created["harness"], FakePiHarness)
 
 
@@ -1462,7 +1462,6 @@ def test_run_single_task_does_not_claim_orchestra_tools_for_non_pi_backend(tmp_p
         role="builder",
         orchestra=None,
         auto=True,
-        no_orch_on=False,
         notes="",
         catalog_label="config/orchestra/agent-catalog.yaml",
         verbose=False,

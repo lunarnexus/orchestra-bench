@@ -20,6 +20,10 @@ _FINALIZED_RE = re.compile(r"\b(final summary|final readiness summary|done\.|ret
 _STATUS_TOKENS = {"success", "error", "blocker", "blocked", "fail", "failed", "timeout", "timed", "timed_out", "reconciled", "complete"}
 
 
+_FAILURE_STATUSES = {"error", "fail", "failed", "timeout", "timed", "timed_out"}
+_NO_CHILD_REASON = "no reason recorded"
+
+
 @dataclass(frozen=True)
 class _SummaryEvent:
     role: str
@@ -27,6 +31,7 @@ class _SummaryEvent:
     timestamp: datetime | None
     text: str
     child_id: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -113,9 +118,44 @@ def _message_text(message: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _summary_reason_after(lines: list[str], start_index: int) -> str:
+    """Capture the reason line that follows a non-success child return summary."""
+    for follow in lines[start_index + 1 :]:
+        stripped = follow.strip()
+        if not stripped or _ORCH_SUMMARY_RE.match(stripped):
+            break
+        value = re.sub(r"^(?:summary|reason)\s*[:\-]\s*", "", stripped, flags=re.IGNORECASE).strip()
+        return " ".join(value.split())[:160]
+    return ""
+
+
+_PASS_OVERRIDE_STATUS_RE = re.compile(r"^status\s*[:\-]\s*(done|complete|success)\b", re.IGNORECASE)
+_PASS_LINE_KEY_RE = re.compile(r"^(verdict|summary)\s*[:\-]", re.IGNORECASE)
+_PASS_WORD_RE = re.compile(r"\bpass\b")
+
+
+def _return_block_pass_override(lines: list[str], start_index: int) -> bool:
+    """True when a failure header's return block reports `status: done` plus a pass verdict/summary.
+
+    The bracket header can lag the child's actual terminal state (e.g. `[orchestra: verifier <id> fail]`
+    followed by `verdict: **pass** ... status: done`). That contradiction is not a real failure."""
+    saw_done = False
+    saw_pass = False
+    for follow in lines[start_index + 1 :]:
+        stripped = follow.strip()
+        if not stripped or _ORCH_SUMMARY_RE.match(stripped):
+            break
+        if _PASS_OVERRIDE_STATUS_RE.match(stripped):
+            saw_done = True
+        elif _PASS_LINE_KEY_RE.match(stripped) and _PASS_WORD_RE.search(stripped):
+            saw_pass = True
+    return saw_done and saw_pass
+
+
 def _orchestra_summary_events(text: str, *, timestamp: datetime | None) -> list[_SummaryEvent]:
+    lines = text.splitlines()
     events: list[_SummaryEvent] = []
-    for raw_line in text.splitlines():
+    for index, raw_line in enumerate(lines):
         line = raw_line.strip()
         if not line:
             continue
@@ -141,7 +181,11 @@ def _orchestra_summary_events(text: str, *, timestamp: datetime | None) -> list[
             child_id = tokens[-2]
         elif len(tokens) >= 2:
             role = tokens[0]
-        events.append(_SummaryEvent(role=role, status=status, timestamp=timestamp, text=line, child_id=child_id))
+        if status in _FAILURE_STATUSES and _return_block_pass_override(lines, index):
+            # Header says fail but the return block reports done + pass: count as a success.
+            status = "complete"
+        reason = _summary_reason_after(lines, index) if status in _FAILURE_STATUSES else ""
+        events.append(_SummaryEvent(role=role, status=status, timestamp=timestamp, text=line, child_id=child_id, reason=reason))
     return events
 
 
@@ -153,18 +197,48 @@ def _dispatch_key(record: dict[str, str]) -> tuple[str, str, str]:
     )
 
 
-def _classify_dispatch_result_text(normalized: str) -> str:
+_CONCRETE_REJECTION_REASONS = (
+    ("global concurrency limit exceeded", re.compile(r"\bglobal\s+concurrency limit exceeded\b")),
+    ("per-session concurrency limit exceeded", re.compile(r"\bper[- ]?session\s+concurrency limit exceeded\b")),
+    ("model concurrency limit exceeded", re.compile(r"\bmodel\s+concurrency limit exceeded\b")),
+)
+
+
+def _rejection_reason(text: str) -> str:
+    """Pick the most specific rejection reason present in an orch_dispatch result.
+
+    Concrete reasons (e.g. `model concurrency limit exceeded`) win over the generic
+    `dispatch was not accepted` marker; otherwise the leading detail segment before the
+    marker is preserved, and only then does the generic label apply.
+    """
+    lowered = " ".join(text.lower().split())
+    for reason, pattern in _CONCRETE_REJECTION_REASONS:
+        if pattern.search(lowered):
+            return reason
+    marker_index = None
+    for marker in ("dispatch was not accepted", "not accepted"):
+        index = lowered.find(marker)
+        if index != -1 and (marker_index is None or index < marker_index):
+            marker_index = index
+    if marker_index is not None:
+        prefix = " ".join(text.split())[:marker_index].strip(" ;,:-").strip()
+        if 3 <= len(prefix) <= 80:
+            return prefix
+    return "dispatch was not accepted"
+
+
+def _classify_dispatch_result_text(normalized: str, text: str) -> tuple[str, str]:
     if "orchestra dispatched:" in normalized or "subagent will auto-return" in normalized:
-        return "accepted"
+        return ("accepted", "")
     if any(phrase in normalized for phrase in ("dispatch was not accepted", "model concurrency limit exceeded", "not accepted", "rejected")):
-        return "rejected"
-    return ""
+        return ("rejected", _rejection_reason(text))
+    return ("", "")
 
 
 def _pair_dispatch_records(
     attempts: list[dict[str, str]], results: list[dict[str, str]]
 ) -> tuple[dict[str, str], ...]:
-    records = [{**attempt, "result": ""} for attempt in attempts]
+    records = [{**attempt, "result": "", "reason": ""} for attempt in attempts]
     used = [False] * len(records)
 
     def find_by_id(tool_call_id: str) -> int | None:
@@ -197,6 +271,7 @@ def _pair_dispatch_records(
         else:
             used[target] = True
             records[target]["result"] = result["result"]
+            records[target]["reason"] = str(result.get("reason") or "")
     return tuple(records)
 
 
@@ -265,11 +340,11 @@ def _summarize_session(path: Path) -> _SessionEvidence:
                         seen_dispatch_result_ids.add(tool_call_id)
                     text = _message_text(event.get("result") if isinstance(event.get("result"), dict) else {})
                     normalized = " ".join(text.lower().split())
-                    classified = _classify_dispatch_result_text(normalized)
+                    classified, reason = _classify_dispatch_result_text(normalized, text)
                     if not classified and event.get("isError"):
-                        classified = "rejected"
+                        classified, reason = "rejected", _rejection_reason(text)
                     if classified:
-                        dispatch_results.append({"tool_call_id": tool_call_id, "result": classified})
+                        dispatch_results.append({"tool_call_id": tool_call_id, "result": classified, "reason": reason})
                 continue
             data = event.get("data") if isinstance(event.get("data"), dict) else {}
             text = ""
@@ -324,9 +399,9 @@ def _summarize_session(path: Path) -> _SessionEvidence:
             if not tool_call_id or tool_call_id not in seen_dispatch_result_ids:
                 if tool_call_id:
                     seen_dispatch_result_ids.add(tool_call_id)
-                classified = _classify_dispatch_result_text(normalized)
+                classified, reason = _classify_dispatch_result_text(normalized, text)
                 if classified:
-                    dispatch_results.append({"tool_call_id": tool_call_id, "result": classified})
+                    dispatch_results.append({"tool_call_id": tool_call_id, "result": classified, "reason": reason})
             if timestamp is not None and _WAIT_RE.search(text):
                 waiting_signals.append(timestamp)
         summaries = _orchestra_summary_events(text, timestamp=timestamp)
@@ -385,10 +460,11 @@ def _empty_metrics() -> dict[str, Any]:
         "same_slice_dispatches": None,
         "child_returns": {"ok": None, "error": None, "blocker": None},
         "child_sessions": {"completed": None, "failed": None, "timed_out": None, "reconciled": None, "active": None, "inferred_active": None},
+        "child_failure_reasons": None,
         "parent": {"waited": None, "integrated": None, "finalized_before_children": None},
         "dispatch": {"attempts": None, "accepted": None, "rejected": None, "rejection_reasons": None},
         "roles": {"requested": None, "started": None, "returned": None},
-        "children": {"returns": {"ok": None, "error": None, "blocker": None}, "sessions": {"completed": None, "failed": None, "timed_out": None, "reconciled": None, "active": None, "inferred_active": None}},
+        "children": {"returns": {"ok": None, "error": None, "blocker": None}, "sessions": {"completed": None, "failed": None, "timed_out": None, "reconciled": None, "active": None, "inferred_active": None}, "failure_reasons": None},
         "evidence": {"pi_sessions": False, "orchestra_debug": False},
     }
 
@@ -466,6 +542,7 @@ def extract_orchestra_metrics(run_dir: Path | str) -> dict[str, Any]:
     # Stable identity per child run: (role, session id token); line text is the fallback for
     # malformed summaries that carry neither, so they keep counting like before.
     seen_return_identities: set[tuple[str, str]] = set()
+    child_failure_reasons: Counter[str] = Counter()
     child_returns_ok = child_returns_error = child_returns_blocker = 0
     dispatch_attempts = 0
     dispatch_accepted = 0
@@ -538,6 +615,8 @@ def extract_orchestra_metrics(run_dir: Path | str) -> dict[str, Any]:
                 _store_unique(role_started, role)
             elif result == "rejected":
                 dispatch_rejected += 1
+                reason = str(record.get("reason") or "").strip() or "dispatch was not accepted"
+                dispatch_reasons[reason] += 1
 
         if evidence.return_events:
             saw_return_evidence = True
@@ -570,11 +649,15 @@ def extract_orchestra_metrics(run_dir: Path | str) -> dict[str, Any]:
             elif summary.status in {"error", "fail", "failed"}:
                 child_returns_error += 1
                 child_failed += 1
+                reason = str(summary.reason or "").strip() or _NO_CHILD_REASON
+                child_failure_reasons[reason] += 1
             elif summary.status in {"blocker", "blocked"}:
                 child_returns_blocker += 1
                 child_reconciled += 1
             elif summary.status in {"timeout", "timed", "timed_out"}:
                 child_timed_out += 1
+                reason = str(summary.reason or "").strip() or _NO_CHILD_REASON
+                child_failure_reasons[reason] += 1
             elif summary.status == "reconciled":
                 child_reconciled += 1
 
@@ -611,6 +694,7 @@ def extract_orchestra_metrics(run_dir: Path | str) -> dict[str, Any]:
     dispatch_reasons_dict = dict(dispatch_reasons) if dispatch_reasons else None
     if not dispatch_reasons_dict and dispatch_rejected:
         dispatch_reasons_dict = {"dispatch was not accepted": dispatch_rejected}
+    child_failure_reasons_dict = dict(child_failure_reasons) if child_failure_reasons else (None if child_failed == 0 and child_timed_out == 0 else {_NO_CHILD_REASON: child_failed + child_timed_out})
 
     if dispatch_attempts or dispatch_accepted or dispatch_rejected or duplicate_same_slice_dispatches or role_requested or role_started or role_returned or child_completed or child_failed or child_timed_out or child_reconciled or child_active or child_inferred_active or parent_waited is not None or parent_integrated is not None or parent_finalized_before_children is not None:
         metrics["dispatch_attempts"] = dispatch_attempts
@@ -623,6 +707,7 @@ def extract_orchestra_metrics(run_dir: Path | str) -> dict[str, Any]:
         metrics["duplicate_same_slice_dispatches"] = duplicate_same_slice_dispatches
         metrics["same_slice_dispatches"] = duplicate_same_slice_dispatches
         metrics["child_returns"] = {"ok": child_returns_ok, "error": child_returns_error, "blocker": child_returns_blocker}
+        metrics["child_failure_reasons"] = child_failure_reasons_dict
         metrics["child_sessions"] = {
             "completed": child_completed,
             "failed": child_failed,
@@ -650,14 +735,15 @@ def extract_orchestra_metrics(run_dir: Path | str) -> dict[str, Any]:
         metrics["children"] = {
             "returns": metrics["child_returns"],
             "sessions": metrics["child_sessions"],
+            "failure_reasons": child_failure_reasons_dict,
         }
     else:
         return metrics
 
     if orchestra_mode is False and (saw_dispatch_evidence or saw_child_evidence or saw_return_evidence):
-        metrics["tool_activity_without_orch_on"] = {
+        metrics["tool_activity"] = {
             "detected": True,
-            "reason": "tool orchestration observed without /orch on",
+            "reason": "dispatch/child activity observed while orchestration was disabled",
             "dispatch_attempts": dispatch_attempts,
             "dispatch_accepted": dispatch_accepted,
             "dispatch_rejected": dispatch_rejected,

@@ -155,8 +155,11 @@ def _validate_role_configs(
     for name, raw_config in mapping.items():
         role_name = _require_str(name, f"roles key in {catalog_path}")
         config = _require_mapping(raw_config, f"roles.{role_name} in {catalog_path}")
+        harness_config_value = config.get("harness_config")
+        if harness_config_value is None:
+            continue
         harness_config = _require_str(
-            config.get("harness_config"),
+            harness_config_value,
             f"roles.{role_name}.harness_config in {catalog_path}",
         )
         if harness_config not in harness_configs:

@@ -17,12 +17,39 @@ def _fmt_bool(value: bool | None) -> str:
     return "yes" if value else "no"
 
 
-def _fmt_number(value: int | float | None) -> str:
+_HUMAN_NUMBER_UNITS = ((10**12, "T"), (10**9, "B"), (10**6, "M"), (10**3, "K"))
+
+
+def human_number(value: int | float | bool | None) -> str:
+    """Format a numeric value for compact human-readable reporting.
+
+    Small numbers render plainly; large ones use K/M/B/T suffixes with one
+    decimal (e.g. 572129.3 -> "572.1K", 2132494 -> "2.1M"). None renders as
+    "n/a" and booleans render verbatim, matching existing formatter output.
+    """
     if value is None:
         return "n/a"
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
+    if isinstance(value, bool):
+        return str(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    magnitude = abs(number)
+    if magnitude < 1000:
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+    for scale, suffix in _HUMAN_NUMBER_UNITS:
+        if magnitude >= scale:
+            text = f"{number / scale:.1f}".rstrip("0").rstrip(".")
+            return f"{text}{suffix}"
     return str(value)
+
+
+def _fmt_number(value: int | float | bool | None) -> str:
+    """Backward-compatible numeric formatter backed by :func:`human_number`."""
+    return human_number(value)
 
 
 def _fmt_seconds(value: float | None) -> str:
@@ -86,6 +113,10 @@ def _agent_display(entry: ReportEntry) -> str:
 
 
 def _status(row: ReportEntry) -> str:
+    # A lifecycle-incomplete run must never render as PASS/FAIL, even if an
+    # inconsistent result.json claims a product outcome.
+    if row.harness_status and str(row.harness_status).strip().lower() not in ("", "ok"):
+        return row.harness_status
     if row.outcome == "pass":
         return "PASS"
     if row.outcome == "fail":
@@ -93,6 +124,48 @@ def _status(row: ReportEntry) -> str:
     if row.harness_status and row.harness_status != "ok":
         return row.harness_status
     return row.outcome or "n/a"
+
+
+def _entry_harness_failed(entry: ReportEntry) -> bool:
+    status = str(entry.harness_status or "").strip().lower()
+    return bool(status) and status != "ok"
+
+
+def _entry_is_scored(entry: ReportEntry) -> bool:
+    """True when the run completed its lifecycle and produced an evaluator verdict.
+
+    Lifecycle-incomplete runs (harness failed / crashed / timed out) and runs
+    whose evaluation errored or never ran are not scored, regardless of any
+    score fields that may be present on a partial result.
+    """
+    if _entry_harness_failed(entry):
+        return False
+    if entry.outcome not in ("pass", "fail"):
+        return False
+    status = str(entry.evaluation_status or "").strip().lower()
+    if status in {"failed", "error"} and entry.score_numeric is None:
+        return False
+    return True
+
+
+def _lifecycle_error_reason(entry: ReportEntry) -> str:
+    status = str(entry.harness_status or "").strip() or "failed"
+    reason = _summarize_multiline(entry.harness_error)
+    if not _meaningful_reason(reason):
+        reason = f"harness {status}"
+    if entry.harness_exit_code not in (None, 0) and "exit=" not in reason:
+        reason = f"{reason} exit={entry.harness_exit_code}"
+    return reason
+
+
+def _evaluator_error_reason(entry: ReportEntry) -> str:
+    status = str(entry.evaluation_status or "").strip().lower()
+    reason = _summarize_multiline(entry.evaluation_error)
+    if _meaningful_reason(reason):
+        return reason
+    if status and status != "ok":
+        return f"evaluation {status}"
+    return str(entry.outcome) or "not evaluated"
 
 
 def _short_model(model: str) -> str:
@@ -103,6 +176,40 @@ def _short_model(model: str) -> str:
 
 def _lines(*items: object) -> str:
     return "\n".join(str(item) for item in items if str(item) != "") + "\n"
+
+
+def _workspace_note_buckets(workspace: Path) -> dict[str, list[str]]:
+    """Classify common post-run workspace extras for operator inspection.
+
+    This is intentionally heuristic and display-only: task outputs remain the
+    evaluator's source of truth. The goal is to separate obvious evaluator files
+    and runtime caches from agent-created support artifacts when reading a run.
+    """
+    buckets = {
+        "evaluator": [],
+        "cache/runtime": [],
+        "agent/support": [],
+    }
+    if not workspace.is_dir():
+        return buckets
+    for path in sorted(workspace.iterdir(), key=lambda item: item.name):
+        name = path.name
+        if name.startswith(".evaluator-") or name.startswith(".tmp-evaluator-"):
+            buckets["evaluator"].append(name)
+        elif name in {"__pycache__", ".pytest_cache"} or name.endswith(".sqlite3"):
+            buckets["cache/runtime"].append(name)
+        elif name in {"PLAN.md", "RESEARCH.md"} or name.startswith("test_") or name.endswith("_test.py"):
+            buckets["agent/support"].append(name)
+    return buckets
+
+
+def _workspace_note_lines(workspace: Path) -> list[str]:
+    buckets = _workspace_note_buckets(workspace)
+    lines: list[str] = []
+    for label, names in buckets.items():
+        if names:
+            lines.append(f"workspace {label}: {', '.join(names[:8])}" + (f", +{len(names) - 8} more" if len(names) > 8 else ""))
+    return lines
 
 
 def _as_list(entries: Iterable[ReportEntry]) -> list[ReportEntry]:
@@ -187,6 +294,7 @@ def _entry_context_bucket(entry: ReportEntry, bucket: str) -> dict[str, Any]:
     tokens = entry.tokens if isinstance(entry.tokens, dict) else {}
     aliases = {
         "parent": ("parent_session", "main_session"),
+        "main": ("parent_session", "main_session"),
         "children": ("children_sessions", "subagent_sessions"),
         "all": ("all_sessions",),
     }
@@ -201,7 +309,45 @@ def _entry_context_bucket(entry: ReportEntry, bucket: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _entry_usage_value(entry: ReportEntry, bucket: str, key: str) -> float | None:
+    data = _entry_context_bucket(entry, bucket)
+    value = data.get(key) if isinstance(data, dict) else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _compaction_stats(values: list[float]) -> str:
+    if not values:
+        return "n/a"
+    total = sum(values)
+    avg = round(mean(values), 1)
+    return f"total={human_number(total)} avg={human_number(avg)}"
+
+
+def _fmt_usage_value(value: float) -> str:
+    """Round per-bucket stats to one decimal before compacting large numbers."""
+    return _fmt_number(round(float(value), 1))
+
+
+def _usage_lines(rows: list[tuple[str, str]]) -> list[str]:
+    width = max([_LABEL_WIDTH] + [len(label) + 1 for label, _ in rows]) if rows else _LABEL_WIDTH
+    return [f"{label:<{width}}: {value}" for label, value in rows]
+
+
+def _child_failure_reason_is_pass_override(reason: object) -> bool:
+    text = str(reason or "").strip().lower()
+    return "verdict:" in text and "pass" in text and ("status: complete" in text or "status: done" in text)
+
+
+def _entry_child_failure_pass_override(entry: ReportEntry) -> bool:
+    reasons = _entry_orchestra_reasons(entry, "child_failure_reasons", "children", "failure_reasons")
+    return bool(reasons) and all(_child_failure_reason_is_pass_override(reason) for reason in reasons)
+
+
 def _entry_orchestra_value(entry: ReportEntry, key: str) -> Any:
+    if key == "failed" and _entry_child_failure_pass_override(entry):
+        return 0
     metrics = entry.orchestra_metrics if isinstance(entry.orchestra_metrics, dict) else {}
     value = metrics.get(key)
     if value is not None:
@@ -221,6 +367,61 @@ def _entry_orchestra_mapping(entry: ReportEntry, key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _entry_orchestra_reasons(entry: ReportEntry, top_key: str, nested_container: str, nested_key: str) -> dict[str, Any]:
+    metrics = entry.orchestra_metrics if isinstance(entry.orchestra_metrics, dict) else {}
+    value = metrics.get(top_key)
+    if not isinstance(value, dict):
+        container = metrics.get(nested_container)
+        if isinstance(container, dict):
+            value = container.get(nested_key)
+    return value if isinstance(value, dict) else {}
+
+
+def _reason_counts(rows: list[ReportEntry], top_key: str, nested_container: str, nested_key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        reasons = _entry_orchestra_reasons(row, top_key, nested_container, nested_key)
+        if top_key == "child_failure_reasons" and reasons and all(_child_failure_reason_is_pass_override(reason) for reason in reasons):
+            continue
+        for reason, count in reasons.items():
+            try:
+                value = int(count)
+            except (TypeError, ValueError):
+                continue
+            counts[str(reason)] = counts.get(str(reason), 0) + value
+    return counts
+
+
+def _reason_line(label: str, counts: dict[str, int]) -> str:
+    ordered = "; ".join(f"{reason}: {count}" for reason, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+    return _format_label(label, ordered)
+
+
+_NO_REJECTION_REASON_LABEL = "rejected without recorded reason"
+_OPAQUE_REJECTION_MARKERS = {"dispatch was not accepted", "not accepted"}
+
+
+def _honest_rejection_reason(reason: object) -> str:
+    """Render a stored rejection reason with honest wording.
+
+    Extraction falls back to the bare `dispatch was not accepted` marker when an
+    orch_dispatch result carried no concrete detail; surface that as an explicit
+    no-reason label instead of opaque phrasing. Concrete reasons pass through unchanged.
+    """
+    text = str(reason or "").strip()
+    if text.rstrip(".").strip().lower() in _OPAQUE_REJECTION_MARKERS:
+        return _NO_REJECTION_REASON_LABEL
+    return text
+
+
+def _honest_rejection_counts(counts: dict[str, int]) -> dict[str, int]:
+    merged: dict[str, int] = {}
+    for reason, count in counts.items():
+        label = _honest_rejection_reason(reason)
+        merged[label] = merged.get(label, 0) + count
+    return merged
+
+
 def _fmt_list(value: object) -> str:
     if not isinstance(value, list):
         return "n/a"
@@ -230,14 +431,6 @@ def _fmt_list(value: object) -> str:
 def _fmt_explicit_flag(value: object) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
-    return "unknown"
-
-
-def _fmt_orch_on_request(value: object) -> str:
-    if value is True:
-        return "requested"
-    if value is False:
-        return "skipped"
     return "unknown"
 
 
@@ -252,6 +445,8 @@ def _fmt_tools_availability(provenance: dict[str, Any]) -> str:
 
 
 def _entry_dispatch_value(entry: ReportEntry, key: str) -> float:
+    if key == "failed" and _entry_child_failure_pass_override(entry):
+        return 0.0
     metrics = entry.orchestra_metrics if isinstance(entry.orchestra_metrics, dict) else {}
     value = metrics.get(key)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -269,16 +464,16 @@ def _entry_dispatch_value(entry: ReportEntry, key: str) -> float:
     return 0.0
 
 
-def _entry_no_orch_on_tool_activity(entry: ReportEntry) -> dict[str, Any] | None:
+def _entry_tool_activity(entry: ReportEntry) -> dict[str, Any] | None:
     metrics = entry.orchestra_metrics if isinstance(entry.orchestra_metrics, dict) else {}
-    activity = metrics.get("tool_activity_without_orch_on") or metrics.get("tool_orchestration_without_orch_on") or metrics.get("contamination")
+    activity = metrics.get("tool_activity") or metrics.get("contamination")
     if isinstance(activity, dict) and activity.get("detected"):
         return activity
     if activity is True:
         return {"detected": True}
     orchestration = entry.category_scores.get("orchestration") if isinstance(entry.category_scores, dict) else {}
     inputs = orchestration.get("inputs") if isinstance(orchestration, dict) else {}
-    activity = inputs.get("tool_activity_without_orch_on") or inputs.get("contamination") if isinstance(inputs, dict) else None
+    activity = inputs.get("tool_activity") or inputs.get("contamination") if isinstance(inputs, dict) else None
     if isinstance(activity, dict) and activity.get("detected"):
         return activity
     if activity is True:
@@ -289,7 +484,7 @@ def _entry_no_orch_on_tool_activity(entry: ReportEntry) -> dict[str, Any] | None
         fallback = details.get("provenance")
         if isinstance(fallback, dict):
             provenance = fallback
-    activity = provenance.get("tool_orchestration_without_orch_on")
+    activity = provenance.get("tool_activity")
     if isinstance(activity, dict) and activity.get("detected"):
         return activity
     if activity is True:
@@ -305,9 +500,12 @@ def _format_label(label: str, value: str) -> str:
 def format_dashboard(entries: Iterable[ReportEntry]) -> str:
     rows = _as_list(entries)
     total = len(rows)
-    passed = sum(1 for row in rows if row.outcome == "pass")
-    failed = sum(1 for row in rows if row.outcome == "fail")
-    errored = sum(1 for row in rows if row.outcome == "error")
+    scored_rows = [row for row in rows if _entry_is_scored(row)]
+    evaluated = len(scored_rows)
+    not_evaluated = total - evaluated
+    passed = sum(1 for row in scored_rows if row.outcome == "pass")
+    failed = sum(1 for row in scored_rows if row.outcome == "fail")
+    errored = sum(1 for row in rows if row.outcome == "error" or not _entry_is_scored(row))
     scored_total = passed + failed
     by_suite: dict[str, list[ReportEntry]] = defaultdict(list)
     for row in rows:
@@ -316,12 +514,19 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
     score_values = [_entry_score_value(row) for row in rows]
     score_values = [value for value in score_values if value is not None]
     category_names = ("functionality",)
-    token_values = [value for value in (_entry_total_tokens(row) for row in rows) if value is not None]
-    context_values = [
-        value
-        for value in (_entry_token_value(row, "all_sessions", "final_context_tokens") for row in rows)
-        if value is not None
-    ]
+    usage_buckets = ("all", "main", "children")
+    token_values_by_bucket = {
+        bucket: [value for value in (_entry_usage_value(row, bucket, "total_tokens") for row in rows) if value is not None]
+        for bucket in usage_buckets
+    }
+    context_values_by_bucket = {
+        bucket: [value for value in (_entry_usage_value(row, bucket, "final_context_tokens") for row in rows) if value is not None]
+        for bucket in usage_buckets
+    }
+    compaction_values_by_bucket = {
+        bucket: [value for value in (_entry_usage_value(row, bucket, "compactions") for row in rows) if value is not None]
+        for bucket in usage_buckets
+    }
     elapsed_values = [row.elapsed_seconds for row in rows if row.elapsed_seconds is not None]
     dispatch_attempts = sum(_entry_dispatch_value(row, "dispatch_attempts") for row in rows)
     dispatch_accepted = sum(_entry_dispatch_value(row, "dispatch_accepted") for row in rows)
@@ -332,7 +537,61 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
     child_reconciled = sum(_entry_dispatch_value(row, "reconciled") for row in rows)
     child_active = sum(_entry_dispatch_value(row, "active") for row in rows)
     child_inferred_active = sum(_entry_dispatch_value(row, "inferred_active") for row in rows)
-    no_orch_on_tool_activity = sum(1 for row in rows if _entry_no_orch_on_tool_activity(row) is not None)
+
+    task_counts: dict[str, int] = {}
+    for row in rows:
+        tid = str(row.task_id or "").strip()
+        if tid:
+            task_counts[tid] = task_counts.get(tid, 0) + 1
+    duplicate_tasks = {tid: count for tid, count in task_counts.items() if count > 1}
+
+    lifecycle_reasons: dict[str, int] = {}
+    evaluator_reasons: dict[str, int] = {}
+    lifecycle_refs: dict[str, list[str]] = {}
+    evaluator_refs: dict[str, list[str]] = {}
+    for row in rows:
+        if _entry_is_scored(row):
+            continue
+        ref = f"{row.run_id}-{row.task_id}"
+        if _entry_harness_failed(row):
+            bucket, reason, refs = lifecycle_reasons, _lifecycle_error_reason(row), lifecycle_refs
+        else:
+            bucket, reason, refs = evaluator_reasons, _evaluator_error_reason(row), evaluator_refs
+        bucket[reason] = bucket.get(reason, 0) + 1
+        refs.setdefault(reason, []).append(ref)
+    errors_lines: list[str] = []
+    if not lifecycle_reasons and not evaluator_reasons:
+        errors_lines.append("no lifecycle or evaluator errors")
+    else:
+        def _counted(counts: dict[str, int], refs: dict[str, list[str]]) -> str:
+            parts = []
+            for reason, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                listed = refs.get(reason, [])[:5]
+                extra = len(refs.get(reason, ())) - len(listed)
+                ref_text = " ".join(listed) + (f" (+{extra} more)" if extra > 0 else "")
+                parts.append(f"{reason}: {count} [{ref_text}]")
+            return "; ".join(parts)
+        if lifecycle_reasons:
+            errors_lines.append(_format_label("lifecycle", _counted(lifecycle_reasons, lifecycle_refs)))
+        if evaluator_reasons:
+            errors_lines.append(_format_label("evaluator", _counted(evaluator_reasons, evaluator_refs)))
+
+    reject_reasons = _reason_counts(rows, "dispatch_rejection_reasons", "dispatch", "rejection_reasons")
+    child_fail_reasons = _reason_counts(rows, "child_failure_reasons", "children", "failure_reasons")
+    reason_lines: list[str] = []
+    if reject_reasons:
+        reason_lines.append(_reason_line("rejects", _honest_rejection_counts(reject_reasons)))
+    if child_fail_reasons:
+        reason_lines.append(_reason_line("child fails", child_fail_reasons))
+
+    usage_rows: list[tuple[str, str]] = []
+    for bucket in ("all", "main", "children"):
+        usage_rows.append((f"tokens {bucket}", _summary_stats(token_values_by_bucket[bucket], formatter=_fmt_usage_value)))
+    for bucket in ("all", "main", "children"):
+        usage_rows.append((f"context {bucket}", _summary_stats(context_values_by_bucket[bucket], formatter=_fmt_usage_value)))
+    for bucket in ("all", "main", "children"):
+        usage_rows.append((f"compactions {bucket}", _compaction_stats(compaction_values_by_bucket[bucket])))
+    usage_rows.append(("elapsed", _summary_stats([float(value) for value in elapsed_values], formatter=_fmt_seconds)))
 
     body = [
         "=== orchestra-bench dashboard ===",
@@ -340,14 +599,23 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
         _format_label("passed", str(passed)),
         _format_label("failed", str(failed)),
         _format_label("error", str(errored)),
+    ]
+    if duplicate_tasks:
+        dup_text = ", ".join(
+            f"{tid} x{count}" for tid, count in sorted(duplicate_tasks.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        body.append(_format_label("duplicates", f"warning: {len(duplicate_tasks)} task id(s) selected more than once (retries): {dup_text}"))
+    body.extend([
+        _format_label("evaluated", f"{evaluated}/{total}"),
+        _format_label("not evaluated", str(not_evaluated)),
         _format_label(
             "evaluated pass rate",
-            f"{(passed / scored_total) * 100:.1f}% ({passed}/{scored_total})" if scored_total else "n/a",
+            f"{(passed / scored_total) * 100:.1f}% ({passed}/{scored_total}) over {evaluated} evaluated runs" if scored_total else "n/a (no evaluated runs)",
         ),
         "",
         "=== scores ===",
         _format_label("score", _summary_stats(score_values, total=total, include_available=True)),
-    ]
+    ])
     for category in category_names:
         category_values = [value for value in (_entry_category_value(row, category) for row in rows) if value is not None]
         body.append(_format_label(category, _summary_stats(category_values, total=total, include_available=True, availability_label="scored")))
@@ -355,17 +623,18 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
     body.extend(
         [
             "",
-            "=== tokens/context ===",
-            _format_label("tokens", _summary_stats([float(value) for value in token_values], formatter=_fmt_decimal)),
-            _format_label("context", _summary_stats([float(value) for value in context_values], formatter=_fmt_decimal)),
-            _format_label("elapsed", _summary_stats([float(value) for value in elapsed_values], formatter=_fmt_seconds)),
+            "=== usage ===",
+            *_usage_lines(usage_rows),
             "",
             "=== orchestra ===",
             _format_label("dispatches", f"attempts={_fmt_decimal(dispatch_attempts)} accepted={_fmt_decimal(dispatch_accepted)} rejected={_fmt_decimal(dispatch_rejected)}"),
             _format_label("children", f"completed={_fmt_decimal(child_completed)} failed={_fmt_decimal(child_failed)} timed_out={_fmt_decimal(child_timed_out)} reconciled={_fmt_decimal(child_reconciled)} active={_fmt_decimal(child_active)} inferred_active={_fmt_decimal(child_inferred_active)}"),
-            _format_label("tool orchestration without /orch on", f"{no_orch_on_tool_activity}/{total}" if total else "n/a"),
+            *reason_lines,
             "",
-            "tip: 03-results runs | 03-results run <ref> | 04-debug <ref> orch|full|raw",
+            "=== errors ===",
+            *errors_lines,
+            "",
+            "tip: scripts/03-results runs | scripts/03-results run <ref> | scripts/04-debug <ref> orch|full|raw",
         ]
     )
     return _lines(*body)
@@ -422,25 +691,41 @@ def format_run_detail(entry: ReportEntry) -> str:
         fallback = details.get("provenance")
         if isinstance(fallback, dict):
             provenance = fallback
+    # Correctness/evaluation state and lifecycle/harness state are separate axes;
+    # a run can be harness-failed while still carrying an evaluator verdict (or vice versa).
+    # Prefer the flattened entry fields; fall back to the persisted result so a
+    # manually-built ReportEntry still renders its recorded states.
+    lifecycle_state = str(entry.harness_status or "").strip() or str(getattr(entry.result, "harness", None) and entry.result.harness.status or "").strip()
+    if not lifecycle_state:
+        lifecycle_state = "ok" if entry.outcome in ("pass", "fail") else "n/a"
+    evaluation_state = str(entry.evaluation_status or "").strip() or str(getattr(entry.result, "evaluation", None) and entry.result.evaluation.status or "").strip()
+    if not evaluation_state:
+        evaluation_state = "not_run" if (entry.score_numeric is None and not entry.score_display) else "unknown"
+    scored = _entry_is_scored(entry)
     body = [
         f"=== run {entry.run_id} ===",
         f"task      : {entry.task_id}",
         f"suite     : {entry.batch or 'unlabeled'}",
-        f"result    : {outcome}",
+        f"lifecycle : {lifecycle_state}",
+        f"evaluation: {evaluation_state}",
         f"score     : {score}",
     ]
     if outcome != "pass" and _meaningful_reason(reason):
         body.append(f"reason    : {reason}")
+    if scored:
+        correctness_line = f"score={score} checks={check_summary}"
+    else:
+        # Evaluator never produced a usable verdict (not run or failed); the
+        # score/checks fields on a partial result.json are not trustworthy.
+        correctness_line = "not evaluated"
     body.extend([
         "",
         "=== correctness ===",
-        f"correctness: score={score} checks={check_summary}",
+        f"correctness: {correctness_line}",
         f"failed checks: {failed_checks}",
         "",
         "=== mode ===",
-        f"orch_on       : {_fmt_orch_on_request(provenance.get('orch_on_requested'))}",
         f"no-orchestra  : {_fmt_explicit_flag(provenance.get('no_orchestra'))}",
-        f"no-orch-on    : {_fmt_explicit_flag(provenance.get('no_orch_on'))}",
         f"tools         : {_fmt_tools_availability(provenance)}",
         f"tools-exec    : {_fmt_explicit_flag(provenance.get('orchestra_tools_executed'))}",
         f"agent     : {_agent_display(entry)}",
@@ -575,17 +860,16 @@ def format_run_detail(entry: ReportEntry) -> str:
         for key, value in sorted(checks.items()):
             marker = "ok" if bool(value) else "fail"
             body.append(f"  {marker:<4} {key}")
-    no_orch_on_tool_activity = _entry_no_orch_on_tool_activity(entry)
-    if no_orch_on_tool_activity is not None:
-        child_sessions = no_orch_on_tool_activity.get("child_sessions") if isinstance(no_orch_on_tool_activity.get("child_sessions"), dict) else {}
-        reason = str(no_orch_on_tool_activity.get('reason') or 'tool orchestration observed without /orch on')
-        if reason == 'orchestra=false with dispatch/child activity observed':
-            reason = 'tool orchestration observed without /orch on'
+    tool_activity = _entry_tool_activity(entry)
+    if tool_activity is not None:
+        child_sessions = tool_activity.get("child_sessions") if isinstance(tool_activity.get("child_sessions"), dict) else {}
+        # Neutral, counts-only line: stored reason texts may assert legacy mode state
+        # (e.g. "orchestration was disabled" or references to an enable command) that is
+        # ambiguous under the current mode model, so only observed counts are surfaced.
         body.append(
-            "tool orchestration without /orch on: "
-            f"{reason} "
-            f"dispatches={_fmt_number(no_orch_on_tool_activity.get('dispatch_attempts'))} "
-            f"accepted={_fmt_number(no_orch_on_tool_activity.get('dispatch_accepted'))} "
+            "tool activity: "
+            f"dispatches={_fmt_number(tool_activity.get('dispatch_attempts'))} "
+            f"accepted={_fmt_number(tool_activity.get('dispatch_accepted'))} "
             f"active={_fmt_number(child_sessions.get('active'))} "
             f"inferred_active={_fmt_number(child_sessions.get('inferred_active'))}"
         )
@@ -595,11 +879,13 @@ def format_run_detail(entry: ReportEntry) -> str:
     if not evaluator_stdout:
         evaluator_stdout = artifacts.get("evaluator_stdout") or (entry.path.parent / "artifacts" / "evaluator" / "stdout.txt")
     body.append(f"details   : {evaluator_stdout}")
-    body.append(f"debug     : 04-debug {run_ref} orch|full|raw")
+    body.append(f"debug     : scripts/04-debug {run_ref} orch|full|raw")
 
     body.extend(["", "=== artifacts ==="])
     body.append(f"result   : {artifacts.get('result_json') or entry.path}")
-    body.append(f"workspace: {artifacts.get('workspace') or (entry.path.parent / 'workspace')}")
+    workspace_path = Path(str(artifacts.get('workspace') or (entry.path.parent / 'workspace')))
+    body.append(f"workspace: {workspace_path}")
+    body.extend(_workspace_note_lines(workspace_path))
     harness_artifacts = artifacts.get("harness")
     harness_path = entry.path.parent / "artifacts" / "harness"
     if isinstance(harness_artifacts, dict):

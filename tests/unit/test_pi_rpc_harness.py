@@ -320,6 +320,48 @@ def test_run_captures_stderr_to_run_log_and_classifies_timeout_missing_settled_a
     assert nonzero_request.artifacts.log_path.read_text(encoding="utf-8") == "stderr line\n"
 
 
+def test_run_classifies_final_pi_runtime_error_as_lifecycle_failed(tmp_path: Path) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start"}\n',
+                json.dumps(
+                    {
+                        "type": "message_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [],
+                            "stopReason": "error",
+                            "errorMessage": 'Model "LOADED" is not available.',
+                        },
+                    }
+                )
+                + "\n",
+                '{"type":"agent_settled"}\n',
+            ]
+        )
+        process.alive = False
+
+    process = _FakeJsonlProcess()
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "runtime-error", timeout_seconds=0.5)
+
+    result = harness.run(request)
+
+    assert result.status == "lifecycle_failed"
+    assert result.error == 'Pi runtime error: Model "LOADED" is not available.'
+    assert result.details["runtime_error"] == 'Model "LOADED" is not available.'
+
+
 class _GatedJsonlProcess(_FakeJsonlProcess):
     """Fake process that only releases gated chunks after a monotonic offset."""
 
@@ -345,7 +387,7 @@ def _sent_prompt_messages(process: _FakeJsonlProcess) -> list[str]:
     return messages
 
 
-def test_run_sends_orch_on_before_task_prompt_when_requested(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_sends_only_task_prompt_even_with_tools_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from bench.harnesses.pi_rpc import PiRpcHarness
 
     monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
@@ -358,14 +400,7 @@ def test_run_sends_orch_on_before_task_prompt_when_requested(tmp_path: Path, mon
             return
         if command.get("type") != "prompt":
             return
-        if command.get("message") == "/orch on":
-            process.chunks.extend(
-                [
-                    '{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n',
-                    '{"type":"agent_settled","message":"orch on settled"}\n',
-                ]
-            )
-            return
+        assert command["message"] == "Build the thing."
         process.chunks.extend(
             [
                 '{"type":"response","command":"prompt","success":true}\n',
@@ -383,19 +418,20 @@ def test_run_sends_orch_on_before_task_prompt_when_requested(tmp_path: Path, mon
     process = _FakeJsonlProcess(event_log=event_log)
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "orch-on", timeout_seconds=0.5, metadata={"orch_on": True})
+    request = _request(tmp_path / "tools-enabled", timeout_seconds=0.5)
 
     result = harness.run(request)
 
+    # No enable command is sent; the task prompt is the only message.
     assert result.status == "ok"
-    assert _sent_prompt_messages(process) == ["/orch on", "Build the thing."]
-    assert event_log.index("read:agent_settled") < event_log.index("send:prompt:Build the thing.")
+    assert result.details["last_settle_status"] == "settled"
+    assert _sent_prompt_messages(process) == ["Build the thing."]
 
 
-def test_run_fails_when_orch_on_activation_success_is_missing(tmp_path: Path) -> None:
+def test_run_fails_closed_when_agent_settled_never_arrives_even_with_tools_enabled(tmp_path: Path) -> None:
     from bench.harnesses.pi_rpc import PiRpcHarness
 
-    request = _request(tmp_path / "orch-on-missing", timeout_seconds=0.01, metadata={"orch_on": True})
+    request = _request(tmp_path / "no-settle", timeout_seconds=0.1)
     process = _FakeJsonlProcess()
     process.alive = False
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
@@ -403,36 +439,12 @@ def test_run_fails_when_orch_on_activation_success_is_missing(tmp_path: Path) ->
     result = harness.run(request)
 
     assert result.status == "lifecycle_failed"
-    assert result.error == "/orch on activation did not arrive"
-    assert result.details["last_settle_status"] == "missing_activation"
-    assert _sent_prompt_messages(process) == ["/orch on"]
-
-
-def test_run_fails_when_orch_on_activation_arrives_but_never_settles(tmp_path: Path) -> None:
-    from bench.harnesses.pi_rpc import PiRpcHarness
-
-    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
-        if command.get("type") == "get_state":
-            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
-            return
-        if command.get("type") == "prompt" and command.get("message") == "/orch on":
-            process.chunks.append('{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n')
-            process.alive = False
-
-    process = _FakeJsonlProcess()
-    process.on_send = lambda command: on_send(process, command)
-    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "orch-on-missing-settle", timeout_seconds=0.5, metadata={"orch_on": True})
-
-    result = harness.run(request)
-
-    assert result.status == "lifecycle_failed"
-    assert result.error == "/orch on activation did not settle"
+    assert result.error == "missing agent_settled"
     assert result.details["last_settle_status"] == "missing_settled"
-    assert _sent_prompt_messages(process) == ["/orch on"]
+    assert _sent_prompt_messages(process) == ["Build the thing."]
 
 
-def test_run_skips_orch_on_when_not_requested(tmp_path: Path) -> None:
+def test_run_sends_only_task_prompt_by_default(tmp_path: Path) -> None:
     from bench.harnesses.pi_rpc import PiRpcHarness
 
     def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
@@ -446,7 +458,7 @@ def test_run_skips_orch_on_when_not_requested(tmp_path: Path) -> None:
     process = _FakeJsonlProcess()
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "no-orch-on", timeout_seconds=0.5)
+    request = _request(tmp_path / "default-prompt-only", timeout_seconds=0.5)
 
     result = harness.run(request)
 
@@ -477,7 +489,7 @@ def test_run_without_dispatch_does_not_require_doneish_even_when_status_snapshot
     process = _FakeJsonlProcess()
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "no-dispatch-status", timeout_seconds=0.5, metadata={"orch_on": False})
+    request = _request(tmp_path / "no-dispatch-status", timeout_seconds=0.5)
 
     result = harness.run(request)
 
@@ -515,7 +527,7 @@ def test_run_accepts_doneish_text_before_final_agent_settled(tmp_path: Path) -> 
     assert result.details["last_settle_status"] == "settled"
 
 
-def test_run_without_orch_on_fails_closed_when_no_authoritative_status_after_dispatch(
+def test_run_fails_closed_when_no_authoritative_status_after_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -545,7 +557,7 @@ def test_run_without_orch_on_fails_closed_when_no_authoritative_status_after_dis
     process = _FakeJsonlProcess()
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "no-orch-on-children", timeout_seconds=0.5, metadata={"orch_on": False})
+    request = _request(tmp_path / "dispatch-no-status", timeout_seconds=0.5)
 
     result = harness.run(request)
 
@@ -569,10 +581,7 @@ def test_run_keeps_session_open_until_doneish_parent_and_children_clear(
             return
         if command.get("type") != "prompt":
             return
-        if command.get("message") == "/orch on":
-            process.chunks.append('{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n')
-            process.chunks.append('{"type":"agent_settled","message":"orch on settled"}\n')
-            return
+        assert command["message"] == "Build the thing."
         process.chunks.extend(
             [
                 '{"type":"response","command":"prompt","success":true}\n',
@@ -632,7 +641,7 @@ def test_run_keeps_session_open_until_doneish_parent_and_children_clear(
     process = _FakeJsonlProcess()
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "success", timeout_seconds=0.5, metadata={"orch_on": True})
+    request = _request(tmp_path / "success", timeout_seconds=0.5)
 
     result = harness.run(request)
 
@@ -640,7 +649,8 @@ def test_run_keeps_session_open_until_doneish_parent_and_children_clear(
     assert result.details["last_settle_status"] == "settled"
     assert process.killed is False
     assert harness.agent_settled_seen is True
-    assert _sent_prompt_messages(process) == ["/orch on", "Build the thing."]
+    # Child-settle gating comes from the observed orch_dispatch, not an activation step.
+    assert _sent_prompt_messages(process) == ["Build the thing."]
 
 
 def test_status_provider_fails_closed_without_authoritative_status_after_dispatch(tmp_path: Path) -> None:
@@ -778,7 +788,7 @@ def test_run_settles_via_consolidated_return_prompt_without_cli_status(
     process = _FakeJsonlProcess()
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "consolidated", timeout_seconds=0.5, metadata={"orch_on": False})
+    request = _request(tmp_path / "consolidated", timeout_seconds=0.5)
 
     result = harness.run(request)
 
@@ -825,7 +835,7 @@ def test_run_quiet_window_catches_dispatch_after_apparent_completion(
     )
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "quiet-catches-late-dispatch", timeout_seconds=1.0, metadata={"orch_on": False})
+    request = _request(tmp_path / "quiet-catches-late-dispatch", timeout_seconds=1.0)
 
     result = harness.run(request)
 
@@ -887,7 +897,7 @@ def test_run_grants_parent_finalize_window_when_consolidated_report_arrives_near
     )
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "finalize-window", timeout_seconds=5.0, metadata={"orch_on": False})
+    request = _request(tmp_path / "finalize-window", timeout_seconds=5.0)
 
     result = harness.run(request)
 
@@ -957,7 +967,7 @@ def test_run_grants_parent_finalize_window_when_cli_status_misses_delivered_repo
             "raw_text": '{"active_runs":{"count":0},"descendants_terminal":true,"session_report_delivered":false}',
         },
     )
-    request = _request(tmp_path / "cli-report-mismatch", timeout_seconds=5.0, metadata={"orch_on": False})
+    request = _request(tmp_path / "cli-report-mismatch", timeout_seconds=5.0)
 
     result = harness.run(request)
 
@@ -1000,7 +1010,7 @@ def test_run_fails_parent_not_done_when_no_doneish_by_finalize_deadline(
     process = _GatedJsonlProcess(gates=[(0.1, [consolidated + "\n", '{"type":"agent_start","message":"return integration turn"}\n'])])
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "finalize-timeout", timeout_seconds=5.0, metadata={"orch_on": False})
+    request = _request(tmp_path / "finalize-timeout", timeout_seconds=5.0)
 
     result = harness.run(request)
 
@@ -1152,10 +1162,6 @@ def test_run_times_out_when_children_stay_active_after_parent_exit(
             return
         if command.get("type") != "prompt":
             return
-        if command.get("message") == "/orch on":
-            process.chunks.append('{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n')
-            process.chunks.append('{"type":"agent_settled","message":"orch on settled"}\n')
-            return
         process.chunks.extend(
             [
                 '{"type":"response","command":"prompt","success":true}\n',
@@ -1191,7 +1197,7 @@ def test_run_times_out_when_children_stay_active_after_parent_exit(
     process = _FakeJsonlProcess()
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "timeout", timeout_seconds=0.01, metadata={"orch_on": True})
+    request = _request(tmp_path / "timeout", timeout_seconds=0.01)
 
     result = harness.run(request)
 
@@ -1200,7 +1206,7 @@ def test_run_times_out_when_children_stay_active_after_parent_exit(
     assert result.error == "children still active after parent wait timeout"
 
 
-def test_run_fails_closed_when_parent_settles_without_doneish_signal(
+def test_run_accepts_parent_settle_without_doneish_when_no_dispatch_observed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1214,10 +1220,7 @@ def test_run_fails_closed_when_parent_settles_without_doneish_signal(
             return
         if command.get("type") != "prompt":
             return
-        if command.get("message") == "/orch on":
-            process.chunks.append('{"type":"extension_ui_request","message":"Orchestra orchestrator skill refreshed for this session."}\n')
-            process.chunks.append('{"type":"agent_settled","message":"orch on settled"}\n')
-            return
+        assert command["message"] == "Build the thing."
         process.chunks.extend(
             [
                 '{"type":"response","command":"prompt","success":true}\n',
@@ -1231,11 +1234,13 @@ def test_run_fails_closed_when_parent_settles_without_doneish_signal(
     process = _FakeJsonlProcess()
     process.on_send = lambda command: on_send(process, command)
     harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
-    request = _request(tmp_path / "fail", timeout_seconds=0.5, metadata={"orch_on": True})
+    request = _request(tmp_path / "fail", timeout_seconds=0.5)
 
     result = harness.run(request)
 
-    assert result.status == "lifecycle_failed"
-    assert result.details["last_settle_status"] == "parent_not_done"
-    assert "BENCH_PARENT_DONE" in result.error
+    # No orch_dispatch was observed, so child-settle gating does not apply and the
+    # parent's agent_settled is sufficient; no doneish sentinel is required.
+    assert result.status == "ok"
+    assert result.details["last_settle_status"] == "settled"
+    assert _sent_prompt_messages(process) == ["Build the thing."]
 

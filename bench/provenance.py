@@ -141,7 +141,6 @@ def build_run_metadata(
     catalog_label: str | None = None,
     runtime_snapshot: dict[str, object] | None = None,
     no_orchestra: bool | None = None,
-    no_orch_on: bool | None = None,
     orchestra_tools_available: bool | None = None,
     orchestra_tools_executed: bool | None = None,
 ) -> dict[str, object]:
@@ -152,13 +151,6 @@ def build_run_metadata(
         "orchestra": orchestra,
         # Explicit mode flags so the three auto modes are distinguishable from raw JSON alone.
         "no_orchestra": bool(no_orchestra) if no_orchestra is not None else None,
-        "no_orch_on": bool(no_orch_on) if no_orch_on is not None else None,
-        # /orch on was requested for this run when Orchestra mode was effective and the skip flag was not set.
-        "orch_on_requested": (
-            (bool(orchestra) and not bool(no_orch_on))
-            if orchestra is not None or no_orch_on is not None
-            else None
-        ),
         # null when tool availability cannot be determined at provenance construction time
         "orchestra_tools_available": (
             bool(orchestra_tools_available) if orchestra_tools_available is not None else None
@@ -168,8 +160,6 @@ def build_run_metadata(
         "orchestra_tools_executed": (
             bool(orchestra_tools_executed) if orchestra_tools_executed is not None else None
         ),
-        # Filled in by the runner after grading when dispatch/tool activity can be inspected.
-        "tool_orchestration_without_orch_on": None,
         "auto": auto,
         "extra_skills": list(extra_skills or []),
         "notes": notes,

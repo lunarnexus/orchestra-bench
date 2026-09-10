@@ -148,11 +148,9 @@ def _write_mode_catalog(catalog: Path) -> None:
 
 MODE_FACTS = [
     # full Orchestra auto run (--orchestra)
-    {"orchestra": True, "no_orchestra": False, "no_orch_on": False, "tools_available": None, "requested": True},
-    # tools available but /orch on skipped (--no-orch-on)
-    {"orchestra": False, "no_orchestra": False, "no_orch_on": True, "tools_available": None, "requested": False},
-    # Orchestra tools disabled and /orch on skipped (--no-orchestra --no-orch-on)
-    {"orchestra": False, "no_orchestra": True, "no_orch_on": True, "tools_available": False, "requested": False},
+    {"orchestra": True, "no_orchestra": False, "tools_available": None},
+    # Orchestra tools disabled (--no-orchestra)
+    {"orchestra": False, "no_orchestra": True, "tools_available": False},
 ]
 
 
@@ -168,7 +166,6 @@ def test_build_run_metadata_persists_explicit_mode_flags(tmp_path: Path) -> None
             catalog_path=catalog,
             orchestra=facts["orchestra"],
             no_orchestra=facts["no_orchestra"],
-            no_orch_on=facts["no_orch_on"],
             orchestra_tools_available=facts["tools_available"],
         )
 
@@ -176,16 +173,13 @@ def test_build_run_metadata_persists_explicit_mode_flags(tmp_path: Path) -> None
         assert metadata["orchestra"] == facts["orchestra"]
         assert metadata["no_orchestra"] == facts["no_orchestra"]
         assert isinstance(metadata["no_orchestra"], bool)
-        assert metadata["no_orch_on"] == facts["no_orch_on"]
-        assert isinstance(metadata["no_orch_on"], bool)
-        assert metadata["orch_on_requested"] == facts["requested"]
         assert metadata["orchestra_tools_available"] == facts["tools_available"]
         signatures.append(
-            (metadata["no_orchestra"], metadata["no_orch_on"], metadata["orch_on_requested"])
+            (metadata["orchestra"], metadata["no_orchestra"])
         )
 
-    # The three auto modes are distinguishable from the flags alone.
-    assert len(set(signatures)) == 3
+    # The auto modes are distinguishable from the flags alone.
+    assert len(set(signatures)) == 2
 
 
 def test_build_run_metadata_mode_flags_are_null_when_not_supplied(tmp_path: Path) -> None:
@@ -195,8 +189,6 @@ def test_build_run_metadata_mode_flags_are_null_when_not_supplied(tmp_path: Path
     metadata = build_run_metadata(task_id="smoke", run_id="run-1", catalog_path=catalog)
 
     assert metadata["no_orchestra"] is None
-    assert metadata["no_orch_on"] is None
-    assert metadata["orch_on_requested"] is None
     assert metadata["orchestra_tools_available"] is None
     assert metadata["orchestra_tools_executed"] is None
 
@@ -213,7 +205,6 @@ def test_build_run_metadata_persists_observed_execution_separately_from_availabi
         catalog_path=catalog,
         orchestra=False,
         no_orchestra=False,
-        no_orch_on=True,
         orchestra_tools_available=None,
         orchestra_tools_executed=True,
     )

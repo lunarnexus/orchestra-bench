@@ -102,6 +102,8 @@ def test_happy_path_extracts_dispatch_roles_and_parent_signals(tmp_path: Path) -
     assert metrics["roles_returned"] == ["builder"]
     assert metrics["child_returns"] == {"ok": 1, "error": 0, "blocker": 0}
     assert metrics["child_sessions"] == {"completed": 1, "failed": 0, "timed_out": 0, "reconciled": 0, "active": 0, "inferred_active": 0}
+    assert metrics["child_failure_reasons"] is None
+    assert metrics["children"]["failure_reasons"] is None
     assert metrics["parent"]["waited"] is True
     assert metrics["parent"]["integrated"] is True
     assert metrics["parent"]["finalized_before_children"] is False
@@ -137,7 +139,9 @@ def test_rejected_dispatch_counts_reasons_and_does_not_start_child(tmp_path: Pat
     assert metrics["dispatch_attempts"] == 1
     assert metrics["dispatch_accepted"] == 0
     assert metrics["dispatch_rejected"] == 1
-    assert metrics["dispatch_rejection_reasons"] == {"dispatch was not accepted": 1}
+    # Concrete reason wins over the generic "dispatch was not accepted" marker.
+    assert metrics["dispatch_rejection_reasons"] == {"model concurrency limit exceeded": 1}
+    assert metrics["dispatch"]["rejection_reasons"] == {"model concurrency limit exceeded": 1}
     assert metrics["roles_requested"] == ["builder"]
     assert metrics["roles_started"] == []
     assert metrics["roles_returned"] == []
@@ -173,7 +177,202 @@ def test_child_failure_and_blocker_are_tracked(tmp_path: Path) -> None:
 
     assert metrics["child_returns"] == {"ok": 0, "error": 1, "blocker": 1}
     assert metrics["child_sessions"] == {"completed": 0, "failed": 1, "timed_out": 0, "reconciled": 1, "active": 0, "inferred_active": 0}
+    # The failed child's summary line is its reason; the blocker (reconciled) bucket is excluded.
+    assert metrics["child_failure_reasons"] == {"failed": 1}
+    assert metrics["children"]["failure_reasons"] == {"failed": 1}
     assert metrics["roles_returned"] == ["builder", "reviewer"]
+
+
+def test_child_failure_and_timeout_reason_summaries_are_captured(tmp_path: Path) -> None:
+    from bench.reporting.orchestra_metrics import extract_orchestra_metrics
+
+    results_root = tmp_path / "results"
+    result_path = _write_task_result(results_root, "20250101T010113", "task-child-reasons")
+    run_dir = result_path.parent
+
+    returns_text = (
+        "[orchestra: builder abc123 error]"
+        "\nsummary: pytest failed: 3 errors in tests/unit/test_x.py"
+        "\n\n"
+        "[orchestra: verifier def456 timed_out]"
+        "\nsummary: worker exceeded soft timeout budget"
+    )
+
+    _write_session(
+        run_dir,
+        "parent.jsonl",
+        "parent-session",
+        [
+            _session_event("2025-01-01T00:00:09Z", message={"role": "user", "content": [{"type": "text", "text": returns_text}]}),
+        ],
+    )
+
+    metrics = extract_orchestra_metrics(run_dir)
+
+    assert metrics["child_returns"] == {"ok": 0, "error": 1, "blocker": 0}
+    expected_reasons = {
+        "pytest failed: 3 errors in tests/unit/test_x.py": 1,
+        "worker exceeded soft timeout budget": 1,
+    }
+    assert metrics["child_failure_reasons"] == expected_reasons
+    assert metrics["children"]["failure_reasons"] == expected_reasons
+
+
+def test_child_failure_without_summary_uses_fallback(tmp_path: Path) -> None:
+    from bench.reporting.orchestra_metrics import extract_orchestra_metrics
+
+    results_root = tmp_path / "results"
+    result_path = _write_task_result(results_root, "20250101T010114", "task-child-reason-fallback")
+    run_dir = result_path.parent
+
+    _write_session(
+        run_dir,
+        "parent.jsonl",
+        "parent-session",
+        [
+            _session_event("2025-01-01T00:00:09Z", message={"role": "user", "content": [{"type": "text", "text": "[orchestra: builder abc123 error]"}]}),
+        ],
+    )
+
+    metrics = extract_orchestra_metrics(run_dir)
+
+    assert metrics["child_sessions"]["failed"] == 1
+    assert metrics["child_failure_reasons"] == {"no reason recorded": 1}
+    assert metrics["children"]["failure_reasons"] == {"no reason recorded": 1}
+
+
+def test_fail_header_with_done_pass_return_block_is_not_counted_failed(tmp_path: Path) -> None:
+    """OB-1 regression (batch 20260910T152750-smoke-migration-release-check): the verifier header says
+    fail but its return block reports `status: done` and a pass verdict — count it as completed, not failed."""
+    from bench.reporting.orchestra_metrics import extract_orchestra_metrics
+
+    results_root = tmp_path / "results"
+    result_path = _write_task_result(results_root, "20260910T152750", "smoke-migration-release-check")
+    run_dir = result_path.parent
+
+    returns_text = (
+        "[orchestra: builder fedbd25d9e84 success]\n"
+        "summary: Status: complete Verdict: **pass** implemented migration.py\n"
+        "status: done\n"
+        "run_id: fedbd25d9e84\n"
+        "worker_session: orchestra-worker-fedbd25d9e84\n"
+        "log: /workspace/.pi/home/20260910T152750/workspace/orchestra/state/runs/fedbd25d9e84/events.jsonl\n"
+        "\n"
+        "[orchestra: verifier d488eb2382a5 fail]\n"
+        "summary: Status: complete Verdict: **pass** builder run `fedbd25d9e84` satisfies all acceptance criteria for `migration.py`. Evidence reused: - Builder return (claims only; independently re-proven below) [truncated]\n"
+        "tokens: input=51750 output=3783 reasoning=750 cache_read=0 cache_write=0 cost_usd=0.0\n"
+        "next: read the failed return artifact and decide how to proceed\n"
+        "return_path: /workspace/.pi/home/20260910T152750/workspace/orchestra/state/runs/d488eb2382a5/return.md\n"
+        "verdict: **pass** — builder run `fedbd25d9e84` satisfies all acceptance criteria for `migration.py`.\n"
+        "status: done\n"
+        "run_id: d488eb2382a5\n"
+        "debug: orchestra debug --run-id d488eb2382a5\n"
+        "events_path: /workspace/.pi/home/20260910T152750/workspace/orchestra/state/runs/d488eb2382a5/events.jsonl\n"
+        "worker_session: orchestra-worker-d488eb2382a5\n"
+        "log: /workspace/.pi/home/20260910T152750/workspace/orchestra/state/runs/d488eb2382a5/events.jsonl"
+    )
+
+    _write_session(
+        run_dir,
+        "parent.jsonl",
+        "parent-session",
+        [
+            _session_event("2025-09-10T15:46:00Z", message={"role": "user", "content": [{"type": "text", "text": returns_text}]}),
+        ],
+    )
+
+    metrics = extract_orchestra_metrics(run_dir)
+
+    assert metrics["child_sessions"] == {"completed": 2, "failed": 0, "timed_out": 0, "reconciled": 0, "active": 0, "inferred_active": 0}
+    assert metrics["child_returns"] == {"ok": 2, "error": 0, "blocker": 0}
+    assert metrics["child_failure_reasons"] is None
+    assert metrics["children"]["failure_reasons"] is None
+    assert metrics["roles_returned"] == ["builder", "verifier"]
+
+
+def test_rejected_dispatch_preserves_specific_limit_variant(tmp_path: Path) -> None:
+    from bench.reporting.orchestra_metrics import extract_orchestra_metrics
+
+    results_root = tmp_path / "results"
+    result_path = _write_task_result(results_root, "20250101T010110", "task-rj-global")
+    run_dir = result_path.parent
+
+    _write_session(
+        run_dir,
+        "parent.jsonl",
+        "parent-session",
+        [
+            _session_event(
+                "2025-01-01T00:00:01Z",
+                message={"role": "assistant", "content": [_dispatch_call("builder", "implement checkout", "slice-a")]},
+            ),
+            _session_event(
+                "2025-01-01T00:00:02Z",
+                message={"role": "toolResult", "toolName": "orch_dispatch", "content": [{"type": "text", "text": "global concurrency limit exceeded; dispatch was not accepted; wait for current subagents to return, then re-dispatch. Do not poll while waiting."}]},
+            ),
+        ],
+    )
+
+    metrics = extract_orchestra_metrics(run_dir)
+
+    assert metrics["dispatch_rejected"] == 1
+    assert metrics["dispatch_rejection_reasons"] == {"global concurrency limit exceeded": 1}
+
+
+def test_rejected_dispatch_preserves_unknown_specific_prefix(tmp_path: Path) -> None:
+    from bench.reporting.orchestra_metrics import extract_orchestra_metrics
+
+    results_root = tmp_path / "results"
+    result_path = _write_task_result(results_root, "20250101T010111", "task-rj-prefix")
+    run_dir = result_path.parent
+
+    _write_session(
+        run_dir,
+        "parent.jsonl",
+        "parent-session",
+        [
+            _session_event(
+                "2025-01-01T00:00:01Z",
+                message={"role": "assistant", "content": [_dispatch_call("builder", "implement checkout", "slice-a")]},
+            ),
+            _session_event(
+                "2025-01-01T00:00:02Z",
+                message={"role": "toolResult", "toolName": "orch_dispatch", "content": [{"type": "text", "text": "ORCHESTRA_DISPATCH_BUDGET dispatch budget exhausted; dispatch was not accepted; wait for current subagents to return"}]},
+            ),
+        ],
+    )
+
+    metrics = extract_orchestra_metrics(run_dir)
+
+    assert metrics["dispatch_rejection_reasons"] == {"ORCHESTRA_DISPATCH_BUDGET dispatch budget exhausted": 1}
+
+
+def test_rejected_dispatch_without_detail_falls_back_to_generic(tmp_path: Path) -> None:
+    from bench.reporting.orchestra_metrics import extract_orchestra_metrics
+
+    results_root = tmp_path / "results"
+    result_path = _write_task_result(results_root, "20250101T010112", "task-rj-generic")
+    run_dir = result_path.parent
+
+    _write_session(
+        run_dir,
+        "parent.jsonl",
+        "parent-session",
+        [
+            _session_event(
+                "2025-01-01T00:00:01Z",
+                message={"role": "assistant", "content": [_dispatch_call("builder", "implement checkout", "slice-a")]},
+            ),
+            _session_event(
+                "2025-01-01T00:00:02Z",
+                message={"role": "toolResult", "toolName": "orch_dispatch", "content": [{"type": "text", "text": "dispatch was not accepted"}]},
+            ),
+        ],
+    )
+
+    metrics = extract_orchestra_metrics(run_dir)
+
+    assert metrics["dispatch_rejection_reasons"] == {"dispatch was not accepted": 1}
 
 
 def test_child_still_active_reports_active_child(tmp_path: Path) -> None:
@@ -324,7 +523,7 @@ def test_duplicate_same_slice_dispatch_is_counted(tmp_path: Path) -> None:
     assert metrics["roles_requested"] == ["builder"]
 
 
-def test_non_orchestra_dispatch_activity_is_reported_without_orch_on(tmp_path: Path) -> None:
+def test_non_orchestration_run_reports_tool_activity(tmp_path: Path) -> None:
     from bench.reporting.orchestra_metrics import extract_orchestra_metrics
 
     results_root = tmp_path / "results"
@@ -358,11 +557,12 @@ def test_non_orchestra_dispatch_activity_is_reported_without_orch_on(tmp_path: P
 
     metrics = extract_orchestra_metrics(run_dir)
 
-    assert metrics["tool_activity_without_orch_on"]["detected"] is True
-    assert "without /orch on" in metrics["tool_activity_without_orch_on"]["reason"]
-    assert metrics["tool_activity_without_orch_on"]["dispatch_attempts"] == 1
-    assert metrics["tool_activity_without_orch_on"]["child_sessions"]["active"] == 1
-    assert metrics["tool_activity_without_orch_on"]["child_sessions"]["inferred_active"] == 1
+    assert "tool_activity" in metrics
+    assert metrics["tool_activity"]["detected"] is True
+    assert metrics["tool_activity"]["reason"] == "dispatch/child activity observed while orchestration was disabled"
+    assert metrics["tool_activity"]["dispatch_attempts"] == 1
+    assert metrics["tool_activity"]["child_sessions"]["active"] == 1
+    assert metrics["tool_activity"]["child_sessions"]["inferred_active"] == 1
 
 
 def test_aggregate_return_message_counts_each_subagent_return(tmp_path: Path) -> None:

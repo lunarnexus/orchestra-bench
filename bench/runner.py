@@ -157,7 +157,6 @@ def _build_provenance(
     catalog_label: str | None = None,
     runtime_snapshot: dict[str, object] | None = None,
     no_orchestra: bool | None = None,
-    no_orch_on: bool | None = None,
     orchestra_tools_available: bool | None = None,
 ) -> dict[str, Any]:
     if provenance is not None:
@@ -176,7 +175,6 @@ def _build_provenance(
         catalog_label=catalog_label,
         runtime_snapshot=runtime_snapshot,
         no_orchestra=no_orchestra,
-        no_orch_on=no_orch_on,
         orchestra_tools_available=orchestra_tools_available,
     )
 
@@ -196,7 +194,6 @@ def prepare_run(
     catalog_label: str | None = None,
     runtime_snapshot: dict[str, object] | None = None,
     no_orchestra: bool | None = None,
-    no_orch_on: bool | None = None,
     orchestra_tools_available: bool | None = None,
 ) -> PreparedRun:
     repo = RepoPaths(Path.cwd() if root is None else root)
@@ -225,7 +222,6 @@ def prepare_run(
         catalog_label=catalog_label,
         runtime_snapshot=runtime_snapshot,
         no_orchestra=no_orchestra,
-        no_orch_on=no_orch_on,
         orchestra_tools_available=orchestra_tools_available,
     )
     bench_run = _bench_run_payload(
@@ -295,7 +291,7 @@ def _orchestra_metrics_have_activity(metrics: Mapping[str, Any]) -> bool:
         values = roles.get(key)
         if isinstance(values, list) and any(str(value).strip() for value in values):
             return True
-    return bool(metrics.get("tool_activity_without_orch_on") or metrics.get("tool_orchestration_without_orch_on"))
+    return False
 
 
 def _persist_orchestra_metrics(result: TaskResult, run_paths: RunPaths) -> dict[str, Any]:
@@ -316,13 +312,6 @@ def _persist_orchestra_metrics(result: TaskResult, run_paths: RunPaths) -> dict[
         provenance = {}
         details["provenance"] = provenance
     activity_observed = _orchestra_metrics_have_activity(metrics)
-    orch_on_requested = provenance.get("orch_on_requested")
-    if isinstance(orch_on_requested, bool):
-        # A false value is an observed-mode claim: only report contamination when
-        # the extracted metrics also show dispatch/child activity.
-        provenance["tool_orchestration_without_orch_on"] = (
-            activity_observed if not orch_on_requested else False
-        )
     # Observed execution is its own fact, derived from actual non-error dispatch tool
     # events (never from CLI flags or configured availability); None when unproven.
     provenance["orchestra_tools_executed"] = orchestra_tools_executed_from_events(run_paths.run_dir)
@@ -451,7 +440,6 @@ def run_task(
     stream_output: bool = False,
     request_metadata: Mapping[str, Any] | None = None,
     no_orchestra: bool | None = None,
-    no_orch_on: bool | None = None,
     orchestra_tools_available: bool | None = None,
     on_settled: Callable[[PreparedRun], None] | None = None,
 ) -> TaskResult:
@@ -469,7 +457,6 @@ def run_task(
         catalog_label=catalog_label,
         runtime_snapshot=runtime_snapshot,
         no_orchestra=no_orchestra,
-        no_orch_on=no_orch_on,
         orchestra_tools_available=orchestra_tools_available,
     )
     request = _make_request(
@@ -596,6 +583,58 @@ def _attach_auto_gate(result: TaskResult, gate_result: object) -> None:
     provenance["auto_gate"] = auto_gate
 
 
+# Settle statuses that prove children were active (or the authoritative status was
+# unavailable) when the harness gave up; these workspaces are never safe to grade.
+_UNSAFE_LIFECYCLE_SETTLE_STATUSES = {
+    "children_active_after_parent_done",
+    "children_active_after_parent_exit",
+    "children_active_timeout",
+    "authoritative_status_unavailable",
+}
+
+
+def _metrics_show_active_children(metrics: Mapping[str, Any]) -> bool:
+    child_sessions = metrics.get("child_sessions") if isinstance(metrics.get("child_sessions"), dict) else {}
+    for key in ("active", "inferred_active"):
+        value = child_sessions.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return True
+    return False
+
+
+def _lifecycle_failure_is_stable(result: TaskResult, harness: Harness, prepared: PreparedRun) -> bool:
+    """A lifecycle_failed run is gradable only when the workspace is stable.
+
+    Stable means the failure was a parent completion timeout (the parent never emitted
+    BENCH_PARENT_DONE before the deadline) and neither orchestra metrics nor the gate
+    status snapshot show active/inferred-active children. Every other failure mode —
+    crashes, missing agent_settled, non-zero exits, or any evidence of live children —
+    keeps the evaluator skipped.
+    """
+    details = result.harness.details if isinstance(result.harness.details, dict) else {}
+    last_settle_status = str(details.get("last_settle_status") or "")
+    if last_settle_status in _UNSAFE_LIFECYCLE_SETTLE_STATUSES:
+        return False
+    if last_settle_status != "parent_not_done":
+        # Only a parent completion timeout is treated as a stable workspace; other
+        # lifecycle failures (crash, missing agent_settled, non-zero exit) stay ungraded.
+        return False
+    metrics = _persist_orchestra_metrics(result, prepared.run_paths)
+    if _metrics_show_active_children(metrics):
+        return False
+    gate_session_id = _auto_gate_session_id(harness, prepared)
+    status_provider = _auto_gate_status_provider(harness)
+    if gate_session_id and callable(status_provider):
+        try:
+            snapshot = coerce_status_snapshot(gate_session_id, status_provider(gate_session_id))
+        except Exception:
+            # Fail closed: an unreadable or unusable gate is not evidence of safety.
+            return False
+        if snapshot.state == "running" or (snapshot.active_runs is not None and snapshot.active_runs > 0):
+            return False
+    return True
+
+
 def run_and_grade(
     task: TaskDefinition,
     harness: Harness,
@@ -622,7 +661,6 @@ def run_and_grade(
     stream_output: bool = False,
     request_metadata: Mapping[str, Any] | None = None,
     no_orchestra: bool | None = None,
-    no_orch_on: bool | None = None,
     orchestra_tools_available: bool | None = None,
 ) -> TaskResult:
     prepared = prepared or prepare_run(
@@ -639,7 +677,6 @@ def run_and_grade(
         catalog_label=catalog_label,
         runtime_snapshot=runtime_snapshot,
         no_orchestra=no_orchestra,
-        no_orch_on=no_orch_on,
         orchestra_tools_available=orchestra_tools_available,
     )
     result = run_task(
@@ -654,11 +691,15 @@ def run_and_grade(
         stream_output=stream_output,
         request_metadata=request_metadata,
         no_orchestra=no_orchestra,
-        no_orch_on=no_orch_on,
         orchestra_tools_available=orchestra_tools_available,
         on_settled=on_settled,
     )
     if result.harness.status != "ok":
+        if _lifecycle_failure_is_stable(result, harness, prepared):
+            # Stable workspace despite the lifecycle failure (e.g. parent completion
+            # timeout with no active children): still grade it; the lifecycle failure
+            # metadata stays intact on result.harness.
+            return grade_run(task, prepared.run_paths, runner=runner, prior_result=result)
         return result
     effective_auto = auto if auto is not None else bool(prepared.provenance.get("auto"))
     effective_orchestra = orchestra if orchestra is not None else bool(prepared.provenance.get("orchestra"))

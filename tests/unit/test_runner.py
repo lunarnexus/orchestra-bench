@@ -115,6 +115,58 @@ class _FailingHarness:
         raise RuntimeError("boom")
 
 
+class _ParentTimeoutHarness:
+    """Lifecycle failure limited to a parent completion timeout (no BENCH_PARENT_DONE)."""
+
+    def __init__(self, *, settle_status: str = "parent_not_done") -> None:
+        self.settle_status = settle_status
+        self.session_id = "sess-timeout-1"
+        self.status_calls: list[str] = []
+
+    @property
+    def status_provider(self):  # type: ignore[no-untyped-def]
+        return lambda session_id: {"sessionId": session_id, "active_runs": 0, "state": "settled", "raw_text": "active_runs: 0 / 1"}
+
+    def run(self, request):  # type: ignore[no-untyped-def]
+        return HarnessResult(
+            status="lifecycle_failed",
+            exit_code=0,
+            error="parent did not emit BENCH_PARENT_DONE before the completion timeout",
+            details={"last_settle_status": self.settle_status},
+        )
+
+
+class _GateUnsafeParentTimeoutHarness(_ParentTimeoutHarness):
+    @property
+    def status_provider(self):  # type: ignore[no-untyped-def]
+        provider = lambda session_id: self._record_status(session_id)
+        return provider
+
+    def _record_status(self, session_id: str) -> dict:
+        self.status_calls.append(session_id)
+        return {"sessionId": session_id, "active_runs": 2, "state": "running", "raw_text": "active_runs: 2 / 3"}
+
+
+def _clean_child_metrics() -> dict:
+    return {
+        "dispatch": {"attempts": 1, "accepted": 1, "rejected": 0, "rejection_reasons": {}},
+        "roles": {"requested": ["builder"], "returned": ["builder"]},
+        "child_sessions": {"completed": 1, "failed": 0, "timed_out": 0, "reconciled": 0, "active": 0, "inferred_active": 0},
+    }
+
+
+def _passing_evaluator_runner():
+    def runner(command, **kwargs):  # type: ignore[no-untyped-def]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"status": "ok", "score": "pass", "checks": {"done": True}, "details": {"functionality": {"checks": {"done": True}, "evidence": {}}}}),
+            stderr="",
+        )
+
+    return runner
+
+
 class _AutoHarness:
     def run(self, request):  # type: ignore[no-untyped-def]
         return HarnessResult(status="ok", exit_code=0, details={"steps": 1})
@@ -151,9 +203,9 @@ def test_make_request_uses_disabled_tools_prompt_wording_only_for_auto_no_orches
     _write_catalog(catalog_path)
 
     modes = [
-        ({"auto": True, "orchestra": False, "no_orchestra": True, "no_orch_on": True}, True),
-        ({"auto": True, "orchestra": False, "no_orchestra": False, "no_orch_on": True}, False),
-        ({"auto": True, "orchestra": True, "no_orchestra": False, "no_orch_on": False}, False),
+        ({"auto": True, "orchestra": False, "no_orchestra": True}, True),
+        ({"auto": True, "orchestra": False, "no_orchestra": False}, False),
+        ({"auto": True, "orchestra": True, "no_orchestra": False}, False),
     ]
     for index, (mode, disabled_tools) in enumerate(modes):
         provenance = build_run_metadata(
@@ -404,6 +456,133 @@ def test_run_and_grade_skips_grading_when_gate_is_not_safe(tmp_path: Path, monke
     assert result.details["provenance"]["auto_gate"]["reason"] == "timeout"
 
 
+def test_run_and_grade_stable_parent_timeout_evaluates_and_preserves_lifecycle_failure(tmp_path: Path, monkeypatch) -> None:
+    task_dir = tmp_path / "tasks" / "alpha-run"
+    _write_task(task_dir)
+    task = load_task(task_dir, tmp_path / "tasks")
+    catalog_path = tmp_path / "config" / "orchestra" / "agent-catalog.yaml"
+    _write_catalog(catalog_path)
+    provenance = build_run_metadata(
+        task_id=task.task_id,
+        run_id="20250101T010304",
+        catalog_path=catalog_path,
+        auto=True,
+        orchestra=True,
+    )
+    monkeypatch.setattr("bench.runner.extract_orchestra_metrics", lambda run_dir: _clean_child_metrics())
+
+    prepared = prepare_run(task, root=tmp_path, run_id="20250101T010304", provenance=provenance)
+    result = run_and_grade(
+        task,
+        _ParentTimeoutHarness(),
+        prepared=prepared,
+        runner=_passing_evaluator_runner(),
+    )
+
+    # Lifecycle failure metadata is preserved separately on the harness section.
+    assert result.harness.status == "lifecycle_failed"
+    assert result.harness.error == "parent did not emit BENCH_PARENT_DONE before the completion timeout"
+    assert result.harness.details["last_settle_status"] == "parent_not_done"
+    # The stable workspace was still evaluated.
+    assert result.evaluation.status == "ok"
+    assert result.evaluation.score == "pass"
+    assert result.outcome == "pass"
+    persisted = load_result(prepared.run_paths.result_json)
+    assert persisted.harness.status == "lifecycle_failed"
+    assert persisted.evaluation.status == "ok"
+
+
+def test_run_and_grade_active_children_lifecycle_failure_skips_evaluator(tmp_path: Path, monkeypatch) -> None:
+    task_dir = tmp_path / "tasks" / "alpha-run"
+    _write_task(task_dir)
+    task = load_task(task_dir, tmp_path / "tasks")
+    catalog_path = tmp_path / "config" / "orchestra" / "agent-catalog.yaml"
+    _write_catalog(catalog_path)
+    provenance = build_run_metadata(
+        task_id=task.task_id,
+        run_id="20250101T010305",
+        catalog_path=catalog_path,
+        auto=True,
+        orchestra=True,
+    )
+    metrics = _clean_child_metrics()
+    metrics["child_sessions"] = dict(metrics["child_sessions"], active=1)
+    monkeypatch.setattr("bench.runner.extract_orchestra_metrics", lambda run_dir: metrics)
+
+    prepared = prepare_run(task, root=tmp_path, run_id="20250101T010305", provenance=provenance)
+
+    def exploding_runner(command, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("evaluator must not run while children are active")
+
+    result = run_and_grade(task, _ParentTimeoutHarness(), prepared=prepared, runner=exploding_runner)
+
+    assert result.harness.status == "lifecycle_failed"
+    assert result.evaluation.status == "not_run"
+    assert result.outcome == "error"
+
+
+def test_run_and_grade_gate_unsafe_parent_timeout_skips_evaluator(tmp_path: Path, monkeypatch) -> None:
+    task_dir = tmp_path / "tasks" / "alpha-run"
+    _write_task(task_dir)
+    task = load_task(task_dir, tmp_path / "tasks")
+    catalog_path = tmp_path / "config" / "orchestra" / "agent-catalog.yaml"
+    _write_catalog(catalog_path)
+    provenance = build_run_metadata(
+        task_id=task.task_id,
+        run_id="20250101T010306",
+        catalog_path=catalog_path,
+        auto=True,
+        orchestra=True,
+    )
+    monkeypatch.setattr("bench.runner.extract_orchestra_metrics", lambda run_dir: _clean_child_metrics())
+
+    prepared = prepare_run(task, root=tmp_path, run_id="20250101T010306", provenance=provenance)
+    harness = _GateUnsafeParentTimeoutHarness()
+
+    def exploding_runner(command, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("evaluator must not run while the gate shows active children")
+
+    result = run_and_grade(task, harness, prepared=prepared, runner=exploding_runner)
+
+    # The gate snapshot was consulted and showed active children.
+    assert harness.status_calls == ["sess-timeout-1"]
+    assert result.harness.status == "lifecycle_failed"
+    assert result.evaluation.status == "not_run"
+    assert result.outcome == "error"
+
+
+def test_run_and_grade_unsafe_settle_status_skips_evaluator(tmp_path: Path, monkeypatch) -> None:
+    task_dir = tmp_path / "tasks" / "alpha-run"
+    _write_task(task_dir)
+    task = load_task(task_dir, tmp_path / "tasks")
+    catalog_path = tmp_path / "config" / "orchestra" / "agent-catalog.yaml"
+    _write_catalog(catalog_path)
+    provenance = build_run_metadata(
+        task_id=task.task_id,
+        run_id="20250101T010307",
+        catalog_path=catalog_path,
+        auto=True,
+        orchestra=True,
+    )
+    monkeypatch.setattr("bench.runner.extract_orchestra_metrics", lambda run_dir: _clean_child_metrics())
+
+    prepared = prepare_run(task, root=tmp_path, run_id="20250101T010307", provenance=provenance)
+
+    def exploding_runner(command, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("evaluator must not run when the settle status shows active children")
+
+    result = run_and_grade(
+        task,
+        _ParentTimeoutHarness(settle_status="children_active_timeout"),
+        prepared=prepared,
+        runner=exploding_runner,
+    )
+
+    assert result.harness.status == "lifecycle_failed"
+    assert result.evaluation.status == "not_run"
+    assert result.outcome == "error"
+
+
 def test_run_and_grade_success_writes_bench_run_summary_and_final_result(tmp_path: Path) -> None:
     task_dir = tmp_path / "tasks" / "alpha-run"
     _write_task(task_dir)
@@ -520,7 +699,6 @@ def test_run_task_persists_orchestra_metrics_and_observed_execution_on_lifecycle
         role=None,
         orchestra=True,
         no_orchestra=False,
-        no_orch_on=False,
     )
 
     result = run_task(task, _DispatchingFailingHarness(), prepared=prepared)
@@ -618,11 +796,9 @@ def test_run_and_grade_persists_correctness_only_shape_in_raw_result_json(tmp_pa
 
 AUTO_MODE_FACTS = [
     # full Orchestra auto run (--orchestra)
-    {"run_id": "20250101T040607", "orchestra": True, "no_orchestra": False, "no_orch_on": False},
-    # tools available but /orch on skipped (--no-orch-on)
-    {"run_id": "20250101T040608", "orchestra": False, "no_orchestra": False, "no_orch_on": True},
-    # Orchestra tools disabled and /orch on skipped (--no-orchestra --no-orch-on)
-    {"run_id": "20250101T040609", "orchestra": False, "no_orchestra": True, "no_orch_on": True},
+    {"run_id": "20250101T040607", "orchestra": True, "no_orchestra": False},
+    # Orchestra tools disabled (--no-orchestra)
+    {"run_id": "20250101T040609", "orchestra": False, "no_orchestra": True},
 ]
 
 
@@ -644,7 +820,6 @@ def test_run_and_grade_persists_distinct_mode_flags_in_raw_result_json(tmp_path_
             role=None,
             orchestra=facts["orchestra"],
             no_orchestra=facts["no_orchestra"],
-            no_orch_on=facts["no_orch_on"],
         )
         run_and_grade(
             task,
@@ -663,17 +838,12 @@ def test_run_and_grade_persists_distinct_mode_flags_in_raw_result_json(tmp_path_
         provenance = raw["details"]["provenance"]
         assert provenance["orchestra"] == facts["orchestra"]  # existing meaning preserved
         assert provenance["no_orchestra"] is facts["no_orchestra"]
-        assert provenance["no_orch_on"] is facts["no_orch_on"]
-        expected_requested = bool(facts["orchestra"]) and not facts["no_orch_on"]
-        assert provenance["orch_on_requested"] is expected_requested
-        # Graded run with no dispatch/tool activity: flag is knowable and false.
-        assert provenance["tool_orchestration_without_orch_on"] is False
         signatures.append(
-            (provenance["no_orchestra"], provenance["no_orch_on"], provenance["orch_on_requested"])
+            (provenance["orchestra"], provenance["no_orchestra"])
         )
 
-    # The three auto modes are distinguishable from raw JSON alone.
-    assert len(set(signatures)) == 3
+    # The auto modes are distinguishable from raw JSON alone.
+    assert len(set(signatures)) == 2
 
 
 def _write_harness_events(run_paths, *events: dict) -> None:
@@ -700,7 +870,6 @@ def test_run_and_grade_persists_observed_dispatch_execution_in_raw_result_json(t
         role=None,
         orchestra=True,
         no_orchestra=False,
-        no_orch_on=False,
     )
     _write_harness_events(
         prepared.run_paths,
@@ -748,7 +917,6 @@ def test_run_and_grade_persists_false_observed_execution_when_no_dispatch(tmp_pa
         role=None,
         orchestra=False,
         no_orchestra=True,
-        no_orch_on=True,
     )
     _write_harness_events(
         prepared.run_paths,
@@ -771,7 +939,6 @@ def test_run_and_grade_persists_false_observed_execution_when_no_dispatch(tmp_pa
     provenance = raw["details"]["provenance"]
     # --no-orchestra with no tool execution records observed false.
     assert provenance["orchestra_tools_executed"] is False
-    assert provenance["tool_orchestration_without_orch_on"] is False
 
 
 def test_run_and_grade_observed_execution_null_when_no_harness_events(tmp_path: Path) -> None:
@@ -789,7 +956,6 @@ def test_run_and_grade_observed_execution_null_when_no_harness_events(tmp_path: 
         role=None,
         orchestra=False,
         no_orchestra=True,
-        no_orch_on=True,
     )
 
     run_and_grade(
@@ -807,56 +973,6 @@ def test_run_and_grade_observed_execution_null_when_no_harness_events(tmp_path: 
     raw = _raw_result_payload(prepared.run_paths.result_json)
     # No readable event source: the fact is unproven, not false.
     assert raw["details"]["provenance"]["orchestra_tools_executed"] is None
-
-
-def test_run_and_grade_flags_tool_orchestration_without_orch_on_when_activity_observed(tmp_path: Path, monkeypatch) -> None:
-    task_dir = tmp_path / "tasks" / "alpha-run"
-    _write_task(task_dir)
-    task = load_task(task_dir, tmp_path / "tasks")
-    catalog_path = tmp_path / "config" / "orchestra" / "agent-catalog.yaml"
-    _write_catalog(catalog_path)
-    metrics = {
-        "dispatch": {"attempts": 1, "accepted": 1, "rejected": 0, "rejection_reasons": {}},
-        "roles": {"requested": ["builder"], "returned": ["builder"]},
-        "child_sessions": {"completed": 1, "failed": 0, "timed_out": 0, "reconciled": 0, "active": 0},
-        "parent": {"waited": True, "integrated": True, "finalized_before_children": False},
-        "duplicate_same_slice_dispatches": 0,
-        "same_slice_dispatches": 0,
-        "evidence": {"pi_sessions": True, "harness_events": True},
-    }
-    monkeypatch.setattr("bench.runner.extract_orchestra_metrics", lambda run_dir: metrics)
-
-    prepared = prepare_run(
-        task,
-        root=tmp_path,
-        run_id="20250101T040610",
-        catalog_path=catalog_path,
-        role=None,
-        orchestra=False,
-        no_orchestra=False,
-        no_orch_on=True,
-    )
-    result = run_and_grade(
-        task,
-        _SuccessHarness(),
-        prepared=prepared,
-        runner=lambda command, **kwargs: subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=json.dumps({"status": "ok", "score": "fail", "checks": {"core": True, "workflow": False}, "details": {"functionality": {"checks": {"core": True, "workflow": False}}, "evidence": {}}}),
-            stderr="",
-        ),
-    )
-
-    raw = _raw_result_payload(prepared.run_paths.result_json)
-    provenance = raw["details"]["provenance"]
-    assert provenance["no_orch_on"] is True
-    assert provenance["tool_orchestration_without_orch_on"] is True
-    # The diagnostic stays out of correctness scoring.
-    assert "orchestration" not in result.category_scores
-    assert set(raw["category_scores"]) == {"functionality"}
-    assert raw["score_numeric"] == 50.0
-    assert load_result(prepared.run_paths.result_json) == result
 
 
 def test_grade_run_regrades_legacy_weighted_categories_to_correctness_only(tmp_path: Path) -> None:
@@ -958,7 +1074,7 @@ def test_run_and_grade_persists_orchestra_metrics_and_scores_full_orchestra(tmp_
     assert load_result(prepared.run_paths.result_json) == result
 
 
-def test_run_and_grade_persists_tool_activity_without_orch_on_without_orchestration_points(tmp_path: Path, monkeypatch) -> None:
+def test_run_and_grade_persists_tool_activity_without_orchestration_points(tmp_path: Path, monkeypatch) -> None:
     task_dir = tmp_path / "tasks" / "alpha-run"
     _write_task(task_dir)
     task = load_task(task_dir, tmp_path / "tasks")

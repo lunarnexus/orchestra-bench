@@ -71,6 +71,10 @@ def test_catalog_parser_ignores_orchestra_owned_unknown_keys(tmp_path: Path) -> 
         "    command: ['pi', '--model', '{model}', '-p', '{prompt}']\n"
         "    runtime_hint: ignored by bench\n"
         "roles:\n"
+        "  orchestrator:\n"
+        "    skills:\n"
+        "    - orchestrator\n"
+        "    - planner\n"
         "  builder:\n"
         "    harness_config: pi\n"
         "    model: example/model\n"
@@ -81,8 +85,10 @@ def test_catalog_parser_ignores_orchestra_owned_unknown_keys(tmp_path: Path) -> 
         "    scheduling_hint: ignored by bench\n"
     )
 
+    parsed = load_agent_catalog(catalog)
     resolved = resolve_harness_for_role(catalog)
 
+    assert parsed["roles"]["orchestrator"]["skills"] == ["orchestrator", "planner"]
     assert resolved["role"] == "builder"
     assert resolved["model"] == "example/model"
     assert resolved["command"] == ["pi", "--model", "{model}", "-p", "{prompt}"]
