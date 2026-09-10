@@ -8,6 +8,8 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Iterable
 
+from bench.version import product_title
+
 from .queries import ReportEntry, canonical_functionality_checks
 
 
@@ -594,7 +596,7 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
     usage_rows.append(("elapsed", _summary_stats([float(value) for value in elapsed_values], formatter=_fmt_seconds)))
 
     body = [
-        "=== orchestra-bench dashboard ===",
+        f"=== {product_title('dashboard')} ===",
         _format_label("runs", str(total)),
         _format_label("passed", str(passed)),
         _format_label("failed", str(failed)),
@@ -642,7 +644,7 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
 
 def format_runs(entries: Iterable[ReportEntry]) -> str:
     rows = _as_list(entries)
-    body = ["=== recent runs ==="]
+    body = [f"=== {product_title('recent runs')} ==="]
     if not rows:
         body.append("no runs found")
         return _lines(*body)
@@ -703,7 +705,7 @@ def format_run_detail(entry: ReportEntry) -> str:
         evaluation_state = "not_run" if (entry.score_numeric is None and not entry.score_display) else "unknown"
     scored = _entry_is_scored(entry)
     body = [
-        f"=== run {entry.run_id} ===",
+        f"=== {product_title(f'run {entry.run_id}')} ===",
         f"task      : {entry.task_id}",
         f"suite     : {entry.batch or 'unlabeled'}",
         f"lifecycle : {lifecycle_state}",
@@ -923,7 +925,7 @@ def format_tokens(entries: Iterable[ReportEntry]) -> str:
     rows = [row for row in entries if row.total_tokens is not None]
     totals = [float(row.total_tokens or 0) for row in rows]
     total = sum(totals)
-    body = ["=== token usage ===", f"runs: {len(rows)}", f"total_tokens: {_fmt_number(total)}"]
+    body = [f"=== {product_title('token usage')} ===", f"runs: {len(rows)}", f"total_tokens: {_fmt_number(total)}"]
     if rows:
         body.append(f"min_total_tokens: {_fmt_number(min(totals))}")
         body.append(f"max_total_tokens: {_fmt_number(max(totals))}")
@@ -934,7 +936,7 @@ def format_tokens(entries: Iterable[ReportEntry]) -> str:
 def format_timing(entries: Iterable[ReportEntry]) -> str:
     rows = [row for row in entries if row.elapsed_seconds is not None]
     values = [row.elapsed_seconds for row in rows if row.elapsed_seconds is not None]
-    body = ["=== timing ===", f"runs: {len(rows)}"]
+    body = [f"=== {product_title('timing')} ===", f"runs: {len(rows)}"]
     for row in rows:
         body.append(f"{row.run_id:<18} {row.task_id:<34} {_fmt_seconds(row.elapsed_seconds)}")
     if values:
@@ -1040,7 +1042,7 @@ def format_comparison_results(summary: dict[str, Any]) -> str:
     children = summary.get("children") if isinstance(summary.get("children"), dict) else {}
     mode = str(summary.get("mode") or "n/a")
     body = [
-        "=== compare ===",
+        f"=== {product_title('compare')} ===",
         f"mode      : {mode}",
         f"parent    : {parent.get('label') or parent.get('selector') or 'n/a'} ({_format_number(parent.get('runs'))} runs)",
         f"children  : {children.get('label') or children.get('selector') or 'n/a'} ({_format_number(children.get('runs'))} runs)",

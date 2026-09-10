@@ -10,6 +10,7 @@ import shutil
 import sys
 import textwrap
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -62,6 +63,10 @@ def _json_dump(payload: Any) -> str:
 
 def _print_json(payload: Any) -> None:
     sys.stdout.write(_json_dump(payload))
+
+
+def _bench_log(message: str, *, flush: bool = False) -> None:
+    print(f"[{datetime.now().strftime('%H:%M')}] {message}", flush=flush)
 
 
 def _parse_json_summary_from_stdout(stdout: str) -> dict[str, Any]:
@@ -216,25 +221,25 @@ def _auto_score_display(result: TaskResult) -> str:
 def _print_auto_result(result: TaskResult) -> None:
     details = result.details if isinstance(result.details, dict) else {}
     score = _auto_score_display(result)
-    print(f"[bench] auto result: {result.task_id} -> {result.outcome} (score={score}, evaluator={result.evaluation.status})", flush=True)
+    _bench_log(f"auto result: {result.task_id} -> {result.outcome} (score={score}, evaluator={result.evaluation.status})", flush=True)
     if result.harness.status != "ok" and result.harness.error:
-        print(f"[bench] reason: {result.harness.error}", flush=True)
+        _bench_log(f"reason: {result.harness.error}", flush=True)
     provenance = details.get("provenance")
     if isinstance(provenance, dict):
         auto_gate = provenance.get("auto_gate")
         if isinstance(auto_gate, dict) and not auto_gate.get("safe_to_grade", True):
             reason = auto_gate.get("reason") or "blocked"
-            print(f"[bench] blocked: auto gate {reason}", flush=True)
+            _bench_log(f"blocked: auto gate {reason}", flush=True)
     result_json = details.get("result_json")
     if isinstance(result_json, str) and result_json:
-        print(f"[bench] result: {result_json}", flush=True)
+        _bench_log(f"result: {result_json}", flush=True)
     artifacts = details.get("artifacts")
     if isinstance(artifacts, dict):
         harness = artifacts.get("harness")
         if isinstance(harness, dict):
             root = harness.get("root")
             if isinstance(root, str) and root:
-                print(f"[bench] artifacts: {root}", flush=True)
+                _bench_log(f"artifacts: {root}", flush=True)
 
 
 def _suite_summary_payload(suite_name: str, results: list[TaskResult]) -> dict[str, Any]:
@@ -412,10 +417,10 @@ def _run_task_session(
         catalog_label=args.catalog_label,
         runtime_snapshot=sync_summary,
     )
-    print(f"[bench] task: {task.task_id}")
-    print(f"[bench] prompt: {task.prompt_path.name}")
+    _bench_log(f"task: {task.task_id}")
+    _bench_log(f"prompt: {task.prompt_path.name}")
     print(prompt_text)
-    print("[bench] opening harness...")
+    _bench_log("opening harness...")
     workdir = _prepare_task_workdir(
         task.task_id,
         {
@@ -496,9 +501,9 @@ def _run_task_session(
     )
     write_json_atomic(prepared.run_paths.result_json, partial_result)
     if harness_result.status != "ok":
-        print(f"[bench] harness failed: {harness_result.error or 'lifecycle_failed'}")
-        print(f"[bench] result: {prepared.run_paths.result_json}")
-        print(f"[bench] artifacts: {prepared.run_paths.artifacts_dir}")
+        _bench_log(f"harness failed: {harness_result.error or 'lifecycle_failed'}")
+        _bench_log(f"result: {prepared.run_paths.result_json}")
+        _bench_log(f"artifacts: {prepared.run_paths.artifacts_dir}")
         return int(completed.returncode)
     result = grade_run(task, prepared.run_paths, prior_result=partial_result)
     result.details = {
@@ -517,9 +522,9 @@ def _run_task_session(
             },
         },
     }
-    print(f"[bench] graded: {result.outcome} (score={result.evaluation.score or 'n/a'}, evaluator={result.evaluation.status})")
-    print(f"[bench] result: {prepared.run_paths.result_json}")
-    print(f"[bench] artifacts: {prepared.run_paths.artifacts_dir}")
+    _bench_log(f"graded: {result.outcome} (score={result.evaluation.score or 'n/a'}, evaluator={result.evaluation.status})")
+    _bench_log(f"result: {prepared.run_paths.result_json}")
+    _bench_log(f"artifacts: {prepared.run_paths.artifacts_dir}")
     return int(completed.returncode)
 
 
@@ -1043,7 +1048,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     if args.auto:
-        print(f"[bench] auto: {task.task_id}", flush=True)
+        _bench_log(f"auto: {task.task_id}", flush=True)
         result = _run_single_task(args, task, stream_output=getattr(args, "verbose", False))
         _print_auto_result(result)
         return 0 if result.outcome == "pass" else 1
@@ -1121,15 +1126,15 @@ def cmd_run_suite(args: argparse.Namespace, tasks: list[Any] | None = None) -> i
         return 0
 
     catalog, resolved = _resolve_catalog_and_harness(args)
-    print(f"[bench] auto suite: {suite_name} ({len(resolved_tasks)} tasks)", flush=True)
+    _bench_log(f"auto suite: {suite_name} ({len(resolved_tasks)} tasks)", flush=True)
     results = []
     for task in resolved_tasks:
-        print(f"[bench] auto: {task.task_id}", flush=True)
+        _bench_log(f"auto: {task.task_id}", flush=True)
         result = _run_single_task(args, task, catalog=catalog, resolved=resolved, stream_output=getattr(args, "verbose", False))
         results.append(result)
         _print_auto_result(result)
     summary = _suite_summary_payload(suite_name, results)
-    print(f"[bench] suite complete: passed={summary['passed']} failed={summary['failed']}", flush=True)
+    _bench_log(f"suite complete: passed={summary['passed']} failed={summary['failed']}", flush=True)
     return int(summary["return_code"])
 
 
@@ -1137,7 +1142,7 @@ def cmd_run_all_suites(args: argparse.Namespace) -> int:
     suites = list_suites(args.tasks_root)
     if not suites:
         raise ValueError("no suites found")
-    print(f"[bench] auto all: {len(suites)} suites", flush=True)
+    _bench_log(f"auto all: {len(suites)} suites", flush=True)
     return_code = 0
     for suite in suites:
         suite_args = argparse.Namespace(**vars(args))
@@ -1145,7 +1150,7 @@ def cmd_run_all_suites(args: argparse.Namespace) -> int:
         suite_code = _run_auto_inside_container(suite_args) if not _inside_container() else cmd_run_suite(suite_args)
         if suite_code != 0:
             return_code = 1
-    print(f"[bench] all complete: suites={len(suites)} status={'pass' if return_code == 0 else 'fail'}", flush=True)
+    _bench_log(f"all complete: suites={len(suites)} status={'pass' if return_code == 0 else 'fail'}", flush=True)
     return return_code
 
 

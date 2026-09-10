@@ -246,7 +246,8 @@ def test_results_dash_is_default_and_supports_common_filters(tmp_path: Path, mon
 
     assert main(["results", "--root", str(results_root), "--tasks-root", str(task_root)]) == 0
     output = capsys.readouterr().out
-    assert "=== orchestra-bench dashboard ===" in output
+    assert "=== orchestra-bench " in output
+    assert " dashboard ===" in output
     assert "runs       : 2" in output
 
     assert main(["results", "dash", "--root", str(results_root), "--tasks-root", str(task_root), "--suite", "SMOKE", "--model", "MODEL-A", "--result", "PASS", "--orchestra", "yes", "--filter", "backend:PI,notes:READY", "--role", "Buil"]) == 0
@@ -485,11 +486,11 @@ def test_run_known_task_opens_prompted_session_before_harness(tmp_path: Path, mo
         "PI_ORCHESTRA_RUNTIME_DIR": f"{tmp_path}/.pi/home/{run_id}/.pi/agent/orchestra",
     }
     output = capsys.readouterr().out
-    assert "[bench] task: alpha-run" in output
+    assert "] task: alpha-run" in output
     assert "Prompt.md" in output
     assert "Do the thing." in output
     assert "task session output" in output
-    assert "[bench] graded: pass" in output
+    assert "] graded: pass" in output
     assert str(tmp_path / "results" / f"{run_id}-alpha-run" / "result.json") in output
 
 
@@ -545,8 +546,8 @@ def test_run_task_session_skips_grading_and_copies_harness_failure_output(tmp_pa
     assert calls[0]["env"]["BENCH_RUN_ID"] == run_id
     assert calls[2]["env"]["HOME"] == f"{tmp_path}/.pi/home/{run_id}"
     output = capsys.readouterr().out
-    assert "[bench] harness failed:" in output
-    assert "[bench] graded:" not in output
+    assert "] harness failed:" in output
+    assert "] graded:" not in output
 
 
 def test_container_copyback_scripts_chown_results_trees_to_the_host_user(tmp_path: Path, monkeypatch) -> None:
@@ -707,10 +708,10 @@ def test_run_suite_routes_batch_execution(tmp_path: Path, monkeypatch, capsys) -
         == 0
     )
     output = capsys.readouterr().out
-    assert "[bench] auto suite: smoke (2 tasks)" in output
-    assert "[bench] auto: alpha-run" in output
-    assert "[bench] auto: beta-run" in output
-    assert "[bench] suite complete: passed=2 failed=0" in output
+    assert "] auto suite: smoke (2 tasks)" in output
+    assert "] auto: alpha-run" in output
+    assert "] auto: beta-run" in output
+    assert "] suite complete: passed=2 failed=0" in output
     assert [call[0] for call in calls] == ["list_tasks", "resolve", "harness", "run_and_grade", "harness", "run_and_grade"]
 
 
@@ -752,10 +753,10 @@ def test_run_all_routes_suites_in_order(tmp_path: Path, monkeypatch, capsys) -> 
     assert main(["run", "all", "--tasks-root", str(task_root), "--root", str(tmp_path), "--catalog", str(catalog_path), "--auto"]) == 0
 
     output = capsys.readouterr().out
-    assert "[bench] auto all: 3 suites" in output
-    assert "[bench] auto suite: smoke (1 tasks)" in output
-    assert "[bench] auto suite: capability-easy (1 tasks)" in output
-    assert "[bench] auto suite: capability-normal (1 tasks)" in output
+    assert "] auto all: 3 suites" in output
+    assert "] auto suite: smoke (1 tasks)" in output
+    assert "] auto suite: capability-easy (1 tasks)" in output
+    assert "] auto suite: capability-normal (1 tasks)" in output
     assert calls == ["smoke-task", "easy-task", "normal-task"]
 
 
@@ -929,7 +930,7 @@ def test_auto_run_routes_inside_container_and_maps_catalog(tmp_path: Path, monke
                 assert run_id == "run-1"
                 self.stdout = _sync_summary_payload(tmp_path, run_id) + "\n"
             else:
-                self.stdout = "[bench] auto: alpha-run\n[bench] auto result: ok\n"
+                self.stdout = "[12:34] auto: alpha-run\n[12:34] auto result: ok\n"
             self.stderr = ""
             if verbose and self.stdout:
                 sys.stdout.write(self.stdout)
@@ -957,7 +958,7 @@ def test_auto_run_routes_inside_container_and_maps_catalog(tmp_path: Path, monke
         },
     ]
     output = capsys.readouterr().out
-    assert "[bench] auto result:" in output
+    assert "] auto result:" in output
     assert "{" not in output
 
 
@@ -1037,8 +1038,8 @@ def test_auto_run_prints_concise_milestones_without_json(tmp_path: Path, monkeyp
 
     assert main(["run", "--auto", "alpha-run"]) == 0
     output = capsys.readouterr().out
-    assert "[bench] auto: alpha-run" in output
-    assert "[bench] auto result: alpha-run -> pass" in output
+    assert "] auto: alpha-run" in output
+    assert "] auto result: alpha-run -> pass" in output
     assert "{" not in output
     assert seen["stream_output"] is False
 
@@ -1081,7 +1082,7 @@ def test_auto_run_verbose_streams_inner_output_and_plumbs_stream_flag(tmp_path: 
     output = capsys.readouterr().out
     assert seen["stream_output"] is True
     assert "inner harness line" in output
-    assert "[bench] auto result: alpha-run -> pass" in output
+    assert "] auto result: alpha-run -> pass" in output
 
 
 def test_auto_run_propagates_synced_runtime_summary_into_run_path(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1145,8 +1146,8 @@ def test_auto_run_propagates_synced_runtime_summary_into_run_path(tmp_path: Path
 
     assert main(["run", "--auto", "alpha-run"]) == 0
     output = capsys.readouterr().out
-    assert "[bench] auto: alpha-run" in output
-    assert "[bench] auto result: alpha-run -> pass" in output
+    assert "] auto: alpha-run" in output
+    assert "] auto result: alpha-run -> pass" in output
     assert str(tmp_path / "results" / "run-1-alpha-run" / "result.json") in output
     assert seen["runtime_snapshot"] == runtime_summary
     assert seen["env"] == {
@@ -1556,10 +1557,10 @@ def test_auto_suite_continues_serially_and_returns_failure_code_when_any_task_fa
 
     assert main(["run", "--auto", "smoke"]) == 1
     output = capsys.readouterr().out
-    assert "[bench] auto suite: smoke (2 tasks)" in output
-    assert "[bench] auto: alpha-run" in output
-    assert "[bench] auto: beta-run" in output
-    assert "[bench] suite complete: passed=1 failed=1" in output
+    assert "] auto suite: smoke (2 tasks)" in output
+    assert "] auto: alpha-run" in output
+    assert "] auto: beta-run" in output
+    assert "] suite complete: passed=1 failed=1" in output
     assert run_order == ["alpha-run", "beta-run"]
 
 

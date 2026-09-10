@@ -874,7 +874,7 @@ class PiRpcHarness(BaseHarness):
         active = "unknown"
         if isinstance(snapshot, dict) and snapshot.get("active_runs") is not None:
             active = str(snapshot.get("active_runs"))
-        print(f"[bench] waiting for children: active={active}", flush=True)
+        print(f"[{time.strftime('%H:%M')}] waiting for children: active={active}", flush=True)
 
     def wait_for_orchestra_children(self, timeout: float | None = None) -> bool:
         grace_seconds = self._parent_done_grace_seconds()

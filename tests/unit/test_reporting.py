@@ -679,7 +679,8 @@ def test_reporting_formatters_render_dashboard_runs_detail_tokens_and_timing(rep
     detail = format_run_detail(detail_entry)
     detail_fail = format_run_detail(detail_fail_entry)
 
-    assert "orchestra-bench dashboard" in dashboard
+    assert dashboard.startswith("=== orchestra-bench ")
+    assert " dashboard ===" in dashboard
     assert "runs       : 3" in dashboard
     assert "passed     : 3" in dashboard
     assert "failed     : 0" in dashboard
@@ -689,7 +690,8 @@ def test_reporting_formatters_render_dashboard_runs_detail_tokens_and_timing(rep
     assert "20250101T010103" in runs
     assert "model-b" in runs
 
-    assert detail.startswith("=== run 20250101T010103 ===\n")
+    assert detail.startswith("=== orchestra-bench ")
+    assert " run 20250101T010103 ===\n" in detail
     assert "task      : task-a" in detail
     assert "suite     : smoke" in detail
     # Lifecycle/harness state and evaluation state are separate axes, not one `result` line.
@@ -736,7 +738,8 @@ def test_reporting_formatters_render_dashboard_runs_detail_tokens_and_timing(rep
     assert "subagents" not in detail
     assert "True" not in detail
 
-    assert detail_fail.startswith("=== run 20250101T010104 ===\n")
+    assert detail_fail.startswith("=== orchestra-bench ")
+    assert " run 20250101T010104 ===\n" in detail_fail
     # Harness failed and the evaluator never produced a verdict: both axes are shown.
     assert "lifecycle : lifecycle_failed" in detail_fail
     assert "evaluation: failed" in detail_fail
@@ -884,7 +887,7 @@ def test_reporting_compare_selectors_and_formatters_cover_run_group_and_modes(tm
     assert run_vs_group["mode"] == "run-vs-group"
 
     formatted = format_comparison_results(run_vs_group)
-    assert "=== compare ===" in formatted
+    assert " compare ===" in formatted
     assert "mode      : run-vs-group" in formatted
     assert "parent    : run 20250101T010101-task-a" in formatted
     assert "children  : model=model-b" in formatted
