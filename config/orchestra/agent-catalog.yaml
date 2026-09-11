@@ -57,7 +57,7 @@ roles:
     nested_dispatch_depth: 2
   researcher:
     harness_config: pi
-    model: lmstudio/LOADED
+    model: lmstudio/ornith-1.5-35b-a3b
     dispatch_hint: Gather evidence with sources from docs, web, or code. Do not
       change code. Update only the explicitly assigned RESEARCH.md section when requested. Return
       the compact schema only.
@@ -71,7 +71,7 @@ roles:
     - researcher
   builder:
     harness_config: pi
-    model: lmstudio/LOADED
+    model: lmstudio/ornith-1.5-35b-a3b
     skills:
     - builder
     dispatch_hint: Implement the assigned task only. Stay in scope. Run focused
@@ -99,7 +99,7 @@ roles:
       HINDSIGHT4PI_AUTO_RECALL: '0'
   reviewer:
     harness_config: pi
-    model: lmstudio/LOADED
+    model: lmstudio/ornith-1.5-35b-a3b
     skills:
     - reviewer
     dispatch_hint: Independently review whether the change is correct, maintainable,
@@ -113,7 +113,7 @@ roles:
       HINDSIGHT4PI_AUTO_RECALL: '0'
   appsec:
     harness_config: pi
-    model: lmstudio/LOADED
+    model: lmstudio/ornith-1.5-35b-a3b
     skills:
     - appsec
     dispatch_hint: Independently identify realistic vulnerabilities across changed
@@ -126,7 +126,7 @@ roles:
       HINDSIGHT4PI_AUTO_RECALL: '0'
   intern:
     harness_config: pi
-    model: lmstudio/LOADED
+    model: lmstudio/ornith-1.5-35b-a3b
     dispatch_hint: Focus on the assigned task and return a compact result.
     enabled_workflow_hint: Use the intern role for any task that doesn't require special skills, generic testing, lightweight tasks.
     enabled: true

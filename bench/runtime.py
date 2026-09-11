@@ -21,6 +21,7 @@ from bench.ownership import host_ownership_env
 from bench.paths import validate_task_id
 from bench.provenance import snapshot_aux_skills, snapshot_files, snapshot_orchestra_config
 from bench.tasks import TaskDefinition
+from bench.version import display_version
 from bench.workspace import visible_task_files
 
 
@@ -591,10 +592,12 @@ def build_image(root: Path | str = ".", image_name: str | None = None, *, stream
         raise FileNotFoundError(f"docker/Dockerfile not found under {root_path}")
     image = _image_name(image_name)
     cache_bust = str(int(time.time()))
+    version = display_version()
     _run_docker(
         [
             "build",
             "--build-arg", f"SOURCE_PLUGIN_CACHE_BUST={cache_bust}",
+            "--build-arg", f"ORCHESTRA_BENCH_VERSION={version}",
             "-f", str(dockerfile),
             "-t", image,
             str(root_path),

@@ -191,11 +191,12 @@ class _PiHarness:
         return HarnessResult(status="ok", exit_code=0, details={"steps": 1})
 
 
-def test_make_request_uses_disabled_tools_prompt_wording_only_for_auto_no_orchestra(tmp_path: Path) -> None:
+def test_make_request_preserves_current_task_prompt_wording(tmp_path: Path) -> None:
+    current_instruction = "Create a plan and write to PLAN.md, then Dispatch and execute the plan."
     task_dir = tmp_path / "tasks" / "alpha-run"
     _write_task(task_dir)
     (task_dir / "Prompt.md").write_text(
-        "Read the fixture.\nDispatch and proceed until finished.\n",
+        f"Read the fixture.\n{current_instruction}\n",
         encoding="utf-8",
     )
     task = load_task(task_dir, tmp_path / "tasks")
@@ -203,11 +204,11 @@ def test_make_request_uses_disabled_tools_prompt_wording_only_for_auto_no_orches
     _write_catalog(catalog_path)
 
     modes = [
-        ({"auto": True, "orchestra": False, "no_orchestra": True}, True),
-        ({"auto": True, "orchestra": False, "no_orchestra": False}, False),
-        ({"auto": True, "orchestra": True, "no_orchestra": False}, False),
+        {"auto": True, "orchestra": False, "no_orchestra": True},
+        {"auto": True, "orchestra": False, "no_orchestra": False},
+        {"auto": True, "orchestra": True, "no_orchestra": False},
     ]
-    for index, (mode, disabled_tools) in enumerate(modes):
+    for index, mode in enumerate(modes):
         provenance = build_run_metadata(
             task_id=task.task_id,
             run_id=f"20250101T01020{index}",
@@ -222,12 +223,7 @@ def test_make_request_uses_disabled_tools_prompt_wording_only_for_auto_no_orches
         )
 
         prompt = _make_request(prepared).prompt
-        if disabled_tools:
-            assert "Proceed until finished." in prompt
-            assert "Dispatch and proceed until finished." not in prompt
-        else:
-            assert "Dispatch and proceed until finished." in prompt
-            assert "Proceed until finished." not in prompt
+        assert current_instruction in prompt
         assert "Benchmark completion protocol:" in prompt
         assert "BENCH_PARENT_DONE" in prompt
 

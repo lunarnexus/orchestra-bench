@@ -28,17 +28,18 @@ This register currently captures decisions made in the active V2 rebuild session
 
 ## Operator workflow
 
-### D-UX-001 — Public operator UX is exactly three numbered scripts
+### D-UX-001 — Public operator UX is four numbered commands
 
 **Decision:** The public numbered operator workflow is exactly:
 
 ```text
-scripts/01-start
-scripts/02-run
-scripts/03-results
+01-start
+02-run
+03-results
+04-debug
 ```
 
-No public numbered `03-grade`, `04-suite`, `04-results`, `04-run-suite`, or `05-results` path is part of the standard workflow.
+The `scripts/` directory may keep wrappers for compatibility, but public examples use the root commands. `03-results` owns results, filtering, dashboards, and comparisons. `04-debug` owns single-run debug/session trace views. No public numbered `03-grade`, `04-suite`, `04-results`, `04-run-suite`, or `05-results` path is part of the standard workflow.
 
 ### D-UX-002 — Bare `01-start` performs complete setup
 
@@ -48,9 +49,9 @@ No public numbered `03-grade`, `04-suite`, `04-results`, `04-run-suite`, or `05-
 
 **Decision:** `scripts/02-run` is the single operator surface for manual harness commands and automatic benchmark runs.
 
-### D-UX-004 — `03-results` owns results and debugging views
+### D-UX-004 — `03-results` owns results; `04-debug` owns traces
 
-**Decision:** `scripts/03-results` shows grades, results, debug artifacts, and comparisons.
+**Decision:** `03-results` shows grades, dashboards, filtering, result details, and comparisons. `04-debug` shows single-run debug artifacts, parent session traces, full parent/child session traces, and raw session/debug output.
 
 ### D-UX-005 — Standalone grading is internal/private
 

@@ -46,7 +46,7 @@ def _write_harness_fallback_artifacts(run_dir: Path) -> tuple[Path, Path]:
         '{"message": "enable orchestra tools", "type": "prompt"}\n'
         "prompt: # Run Prompt\n"
         "Read `PRD.md`, inspect the fixture, implement the requested behavior, and leave the workspace in a runnable state.\n"
-        "Dispatch and proceed until finished.\n",
+        "Create a plan and write to PLAN.md, then Dispatch and execute the plan.\n",
         encoding="utf-8",
     )
     return events_path, transcript_path

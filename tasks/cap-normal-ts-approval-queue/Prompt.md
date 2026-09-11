@@ -1,7 +1,7 @@
 # Run Prompt
 Work in the current directory. Edit the task files here.
 Read `PRD.md`, inspect the fixture and KB files, and finish the TypeScript approval queue.
-Dispatch and proceed until finished.
+Create a plan and write to PLAN.md, then Dispatch and execute the plan.
 
 Requirements:
 - make the provided Node tests pass

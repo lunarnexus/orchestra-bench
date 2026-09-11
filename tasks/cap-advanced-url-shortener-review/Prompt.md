@@ -2,7 +2,7 @@
 Work in the current directory. Edit the task files here.
 
 Read `PRD.md` and `kb/url_safety.md`, inspect the fixture, and finish ShortLink Desk.
-Dispatch and proceed until finished.
+Create a plan and write to PLAN.md, then Dispatch and execute the plan.
 
 Requirements:
 - make the FastAPI app runnable with `uvicorn app:app --host 127.0.0.1 --port 8123`

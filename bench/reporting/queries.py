@@ -383,6 +383,10 @@ def _summarize_selection(entries: Sequence[ReportEntry]) -> dict[str, Any]:
         for row in rows
         if row.outcome != "pass" and str(row.failure_reason).strip()
     )
+    versions = Counter(
+        str(row.provenance.get("orchestra_bench_version") or "unknown").strip() or "unknown"
+        for row in rows
+    )
 
     return {
         "runs": len(rows),
@@ -397,6 +401,7 @@ def _summarize_selection(entries: Sequence[ReportEntry]) -> dict[str, Any]:
         "elapsed": _series_stats([row.elapsed_seconds for row in rows if row.elapsed_seconds is not None]),
         "orchestra": orchestra,
         "failure_reasons": [{"reason": reason, "count": count} for reason, count in failure_reasons.most_common()],
+        "orchestra_bench_versions": dict(sorted(versions.items())),
     }
 
 

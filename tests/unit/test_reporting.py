@@ -48,6 +48,7 @@ def _write_result(
     finished_at: str = "2025-01-01T00:10:00Z",
     total_tokens: int | None = None,
     elapsed_seconds: float | None = None,
+    orchestra_bench_version: str | None = None,
 ) -> Path:
     result = TaskResult(
         run_meta=RunMeta(run_id=run_id, task_id=task_id, batch=batch, started_at=started_at, finished_at=finished_at),
@@ -57,7 +58,12 @@ def _write_result(
         score_numeric=score_numeric,
         score_display=score_display,
         details={
-            "provenance": {"model": model, "orchestra": orchestra, "notes": notes},
+            "provenance": {
+                "model": model,
+                "orchestra": orchestra,
+                "notes": notes,
+                **({"orchestra_bench_version": orchestra_bench_version} if orchestra_bench_version else {}),
+            },
             "tokens": {"total": total_tokens} if total_tokens is not None else {},
             "timing": {"elapsed_seconds": elapsed_seconds} if elapsed_seconds is not None else {},
             "notes": notes,
@@ -2145,3 +2151,39 @@ def test_dashboard_warns_about_duplicate_selected_task_ids_when_selection_includ
     # A selection without retries must not carry the warning.
     clean = format_dashboard([entries[0]])
     assert "duplicates" not in clean
+
+def test_dashboard_lists_all_selected_run_versions(tmp_path: Path) -> None:
+    from bench.reporting.formatters import format_dashboard, format_run_detail, format_runs, format_timing, format_tokens
+    from bench.reporting.queries import collect_results
+
+    tasks_root = tmp_path / "tasks"
+    results_root = tmp_path / "results"
+    _write_task(tasks_root, "task-a", batch="smoke")
+    _write_task(tasks_root, "task-b", batch="smoke")
+    _write_result(
+        results_root,
+        "20250101T010101",
+        "task-a",
+        batch="smoke",
+        total_tokens=10,
+        elapsed_seconds=1.0,
+        orchestra_bench_version="v0.2.0",
+    )
+    _write_result(
+        results_root,
+        "20250101T010102",
+        "task-b",
+        batch="smoke",
+        total_tokens=20,
+        elapsed_seconds=2.0,
+        orchestra_bench_version="v0.2.0-1-gae891e6",
+    )
+
+    entries = collect_results(results_root, tasks_dir=tasks_root)
+
+    for output in (format_dashboard(entries), format_runs(entries), format_tokens(entries), format_timing(entries)):
+        assert output.startswith("=== orchestra-bench mixed versions ")
+        assert "run versions: v0.2.0 x1, v0.2.0-1-gae891e6 x1" in output
+
+    detail = format_run_detail(entries[0])
+    assert detail.startswith(f"=== orchestra-bench {entries[0].provenance['orchestra_bench_version']} run {entries[0].run_id} ===")

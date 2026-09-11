@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any, Iterable
 
-from bench.version import product_title
+from bench.version import display_version
 
 from .queries import ReportEntry, canonical_functionality_checks
 
@@ -61,6 +61,40 @@ def _fmt_seconds(value: float | None) -> str:
         return f"{value:.1f}s"
     minutes, seconds = divmod(value, 60)
     return f"{int(minutes)}m{seconds:04.1f}s"
+
+
+def _entry_bench_version(entry: ReportEntry) -> str:
+    provenance = entry.provenance if isinstance(entry.provenance, dict) else {}
+    if not provenance:
+        details = entry.result.details if isinstance(entry.result.details, dict) else {}
+        fallback = details.get("provenance")
+        if isinstance(fallback, dict):
+            provenance = fallback
+    version = str(provenance.get("orchestra_bench_version") or "").strip()
+    return version or "unknown"
+
+
+def _result_versions(entries: Iterable[ReportEntry]) -> Counter[str]:
+    return Counter(_entry_bench_version(entry) for entry in entries)
+
+
+def _versioned_title(view: str, entries: Iterable[ReportEntry]) -> str:
+    counts = _result_versions(entries)
+    if not counts:
+        version = display_version()
+    elif len(counts) == 1:
+        version = next(iter(counts))
+    else:
+        version = "mixed versions"
+    return f"orchestra-bench {version} {view}"
+
+
+def _version_summary_lines(entries: Iterable[ReportEntry]) -> list[str]:
+    counts = _result_versions(entries)
+    if len(counts) <= 1:
+        return []
+    parts = [f"{version} x{count}" for version, count in sorted(counts.items())]
+    return [f"run versions: {', '.join(parts)}"]
 
 
 def _fmt_timestamp(value: str | None) -> str:
@@ -596,7 +630,8 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
     usage_rows.append(("elapsed", _summary_stats([float(value) for value in elapsed_values], formatter=_fmt_seconds)))
 
     body = [
-        f"=== {product_title('dashboard')} ===",
+        f"=== {_versioned_title('dashboard', rows)} ===",
+        *_version_summary_lines(rows),
         _format_label("runs", str(total)),
         _format_label("passed", str(passed)),
         _format_label("failed", str(failed)),
@@ -644,7 +679,7 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
 
 def format_runs(entries: Iterable[ReportEntry]) -> str:
     rows = _as_list(entries)
-    body = [f"=== {product_title('recent runs')} ==="]
+    body = [f"=== {_versioned_title('recent runs', rows)} ===", *_version_summary_lines(rows)]
     if not rows:
         body.append("no runs found")
         return _lines(*body)
@@ -705,7 +740,7 @@ def format_run_detail(entry: ReportEntry) -> str:
         evaluation_state = "not_run" if (entry.score_numeric is None and not entry.score_display) else "unknown"
     scored = _entry_is_scored(entry)
     body = [
-        f"=== {product_title(f'run {entry.run_id}')} ===",
+        f"=== {_versioned_title(f'run {entry.run_id}', [entry])} ===",
         f"task      : {entry.task_id}",
         f"suite     : {entry.batch or 'unlabeled'}",
         f"lifecycle : {lifecycle_state}",
@@ -925,7 +960,7 @@ def format_tokens(entries: Iterable[ReportEntry]) -> str:
     rows = [row for row in entries if row.total_tokens is not None]
     totals = [float(row.total_tokens or 0) for row in rows]
     total = sum(totals)
-    body = [f"=== {product_title('token usage')} ===", f"runs: {len(rows)}", f"total_tokens: {_fmt_number(total)}"]
+    body = [f"=== {_versioned_title('token usage', rows)} ===", *_version_summary_lines(rows), f"runs: {len(rows)}", f"total_tokens: {_fmt_number(total)}"]
     if rows:
         body.append(f"min_total_tokens: {_fmt_number(min(totals))}")
         body.append(f"max_total_tokens: {_fmt_number(max(totals))}")
@@ -936,7 +971,7 @@ def format_tokens(entries: Iterable[ReportEntry]) -> str:
 def format_timing(entries: Iterable[ReportEntry]) -> str:
     rows = [row for row in entries if row.elapsed_seconds is not None]
     values = [row.elapsed_seconds for row in rows if row.elapsed_seconds is not None]
-    body = [f"=== {product_title('timing')} ===", f"runs: {len(rows)}"]
+    body = [f"=== {_versioned_title('timing', rows)} ===", *_version_summary_lines(rows), f"runs: {len(rows)}"]
     for row in rows:
         body.append(f"{row.run_id:<18} {row.task_id:<34} {_fmt_seconds(row.elapsed_seconds)}")
     if values:
@@ -981,6 +1016,38 @@ def _format_ratio(summary: dict[str, Any] | None) -> str:
     if not isinstance(available, int) or available <= 0 or not isinstance(true_count, int):
         return "n/a"
     return f"{true_count}/{available}"
+
+
+def _summary_version_counts(*summaries: dict[str, Any]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for summary in summaries:
+        versions = summary.get("orchestra_bench_versions") if isinstance(summary, dict) else None
+        if not isinstance(versions, dict):
+            continue
+        for version, count in versions.items():
+            try:
+                counts[str(version)] += int(count)
+            except (TypeError, ValueError):
+                continue
+    return counts
+
+
+def _summary_versioned_title(view: str, *summaries: dict[str, Any]) -> str:
+    counts = _summary_version_counts(*summaries)
+    if not counts:
+        version = display_version()
+    elif len(counts) == 1:
+        version = next(iter(counts))
+    else:
+        version = "mixed versions"
+    return f"orchestra-bench {version} {view}"
+
+
+def _summary_version_lines(*summaries: dict[str, Any]) -> list[str]:
+    counts = _summary_version_counts(*summaries)
+    if len(counts) <= 1:
+        return []
+    return ["run versions: " + ", ".join(f"{version} x{count}" for version, count in sorted(counts.items()))]
 
 
 def _format_metric_line(label: str, parent: str, children: str, delta: str) -> str:
@@ -1042,7 +1109,8 @@ def format_comparison_results(summary: dict[str, Any]) -> str:
     children = summary.get("children") if isinstance(summary.get("children"), dict) else {}
     mode = str(summary.get("mode") or "n/a")
     body = [
-        f"=== {product_title('compare')} ===",
+        f"=== {_summary_versioned_title('compare', parent, children)} ===",
+        *_summary_version_lines(parent, children),
         f"mode      : {mode}",
         f"parent    : {parent.get('label') or parent.get('selector') or 'n/a'} ({_format_number(parent.get('runs'))} runs)",
         f"children  : {children.get('label') or children.get('selector') or 'n/a'} ({_format_number(children.get('runs'))} runs)",

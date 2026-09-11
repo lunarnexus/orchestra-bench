@@ -4,6 +4,7 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
+from bench import provenance as provenance_module
 from bench.provenance import (
     build_run_metadata,
     collect_aux_skills_snapshot,
@@ -66,7 +67,7 @@ def test_snapshot_aux_skills_and_orchestra_config_helpers(tmp_path: Path) -> Non
     assert collect_orchestra_config_snapshot(config_dir) == orchestra_snapshot
 
 
-def test_snapshot_catalog_runtime_and_run_metadata_merge_provenance(tmp_path: Path) -> None:
+def test_snapshot_catalog_runtime_and_run_metadata_merge_provenance(tmp_path: Path, monkeypatch) -> None:
     catalog = tmp_path / "agent-catalog.yaml"
     catalog.write_text(
         "default_role: builder\n"
@@ -92,6 +93,8 @@ def test_snapshot_catalog_runtime_and_run_metadata_merge_provenance(tmp_path: Pa
         "    model: qwen/small\n"
     )
 
+    monkeypatch.setattr(provenance_module, "display_version", lambda: "v9.9.9-test")
+
     snapshot = snapshot_catalog_runtime(catalog)
     metadata = build_run_metadata(
         task_id="smoke",
@@ -113,6 +116,7 @@ def test_snapshot_catalog_runtime_and_run_metadata_merge_provenance(tmp_path: Pa
 
     assert metadata["task_id"] == "smoke"
     assert metadata["run_id"] == "run-1"
+    assert metadata["orchestra_bench_version"] == "v9.9.9-test"
     assert metadata["role"] == "builder"
     assert metadata["default_role"] == "builder"
     assert metadata["model"] == "qwen/big"

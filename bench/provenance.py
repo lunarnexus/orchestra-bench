@@ -4,6 +4,7 @@ import json
 from hashlib import sha256
 from pathlib import Path
 from .config import load_catalog, resolve_harness_for_role
+from .version import display_version
 
 
 def _stable_object_sha256(value: object) -> str:
@@ -147,6 +148,7 @@ def build_run_metadata(
     meta = {
         "run_id": run_id,
         "task_id": task_id,
+        "orchestra_bench_version": display_version(),
         **resolve_harness_for_role(catalog_path, role=role),
         "orchestra": orchestra,
         # Explicit mode flags so the three auto modes are distinguishable from raw JSON alone.

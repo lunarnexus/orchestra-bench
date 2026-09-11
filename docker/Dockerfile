@@ -23,6 +23,8 @@ ENV NODE_PATH=/usr/local/lib/node_modules:/usr/lib/node_modules
 RUN gem install --no-document sinatra sqlite3 rack-test minitest
 
 ARG SOURCE_PLUGIN_CACHE_BUST="manual"
+ARG ORCHESTRA_BENCH_VERSION="0+unknown"
+ENV ORCHESTRA_BENCH_VERSION=$ORCHESTRA_BENCH_VERSION
 
 RUN echo "source/plugin cache bust: $SOURCE_PLUGIN_CACHE_BUST" && \
     git clone "$ORCHESTRA_REPO_URL" "$ORCHESTRA_HOME/src" && \
@@ -50,7 +52,8 @@ ENV BENCH_TASKS=/bench/task-materials-source \
     PI_HERMES_RUNTIME_DIR=/root/.hermes \
     PI_OPENCODE_RUNTIME_DIR=/root/.config/opencode
 
-RUN mkdir -p "$BENCH_TASKS" "$BENCH_RESULTS" "$BENCH_ARTIFACTS" "$BENCH_WORKSPACE" /bench/orchestra-config /bench/skills /bench/pi /bench/hermes /bench/opencode /root/.pi/agent /root/.hermes /root/.config/opencode
+RUN mkdir -p "$BENCH_TASKS" "$BENCH_RESULTS" "$BENCH_ARTIFACTS" "$BENCH_WORKSPACE" /bench/orchestra-config /bench/skills /bench/pi /bench/hermes /bench/opencode /root/.pi/agent /root/.hermes /root/.config/opencode /opt/orchestra-bench && \
+    printf '%s\n' "$ORCHESTRA_BENCH_VERSION" > /opt/orchestra-bench/VERSION
 
 COPY bench/ /opt/orchestra-bench/bench/
 COPY docker/entrypoint.sh /usr/local/bin/bench-entrypoint

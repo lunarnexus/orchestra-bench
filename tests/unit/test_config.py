@@ -78,7 +78,7 @@ def test_catalog_parser_ignores_orchestra_owned_unknown_keys(tmp_path: Path) -> 
         "  builder:\n"
         "    harness_config: pi\n"
         "    model: example/model\n"
-        "    dispatch_hint: Dispatch and proceed until finished.\n"
+        "    dispatch_hint: Create a plan and write to PLAN.md, then Dispatch and execute the plan.\n"
         "model_limits:\n"
         "  example/model:\n"
         "    concurrency: 2\n"

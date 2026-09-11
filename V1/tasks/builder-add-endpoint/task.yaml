@@ -1,7 +1,0 @@
-task_id: builder-add-endpoint
-description: "Implement a focused endpoint change"
-family: builder
-batch: role-focused
-scoring_type: pass_fail
-timeout_minutes: 8
-evaluator: evaluate/run.sh

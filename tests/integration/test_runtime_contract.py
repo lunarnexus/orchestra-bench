@@ -662,6 +662,7 @@ def test_build_image_invokes_docker_with_repo_context(tmp_path: Path, monkeypatc
     log = _write_fake_docker(bin_dir)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
+    monkeypatch.setenv("ORCHESTRA_BENCH_VERSION", "v9.9.9-test")
 
     report = build_image(root)
 
@@ -672,6 +673,7 @@ def test_build_image_invokes_docker_with_repo_context(tmp_path: Path, monkeypatc
     command = command_lines[0].split()
     assert command[:1] == ["build"]
     assert "--build-arg" in command and any(part.startswith("SOURCE_PLUGIN_CACHE_BUST=") for part in command)
+    assert "--build-arg" in command and "ORCHESTRA_BENCH_VERSION=v9.9.9-test" in command
     assert str(root / "docker" / "Dockerfile") in command
     assert DEFAULT_IMAGE_NAME in command
     assert str(root) in command
