@@ -2,6 +2,18 @@
 
 Container-isolated benchmark for comparing agent harnesses and measuring whether Orchestra improves parent/child agent work.
 
+## Operations Summary
+
+Extensive testing has shown some fairly obvious things.
+
+- Smaller "dumber" models need more help to accomplish complex tasks, more guardrails, more workflow structure, more extensive planning.  
+- Larger models don't need as much of these things if you're only concerned about the end result, and trust the model to pick any solution that works. 
+- If you have specific security concerns, specific structure/architecture, or compliance needs, guardrails and workflow become more important again regardless of model size.  
+
+- Orchestra was originailly designed with small models in mind, so LOTs of hints and guardrails were put in place.  This isn't needed with larger models, so features like auto_verify can be turned off with a sacrifice in output quality.
+
+
+
 ## Public commands
 
 Use the root commands:

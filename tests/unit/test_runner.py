@@ -191,8 +191,9 @@ class _PiHarness:
         return HarnessResult(status="ok", exit_code=0, details={"steps": 1})
 
 
-def test_make_request_preserves_current_task_prompt_wording(tmp_path: Path) -> None:
+def test_make_request_rewrites_dispatch_instruction_only_for_no_orchestra(tmp_path: Path) -> None:
     current_instruction = "Create a plan and write to PLAN.md, then Dispatch and execute the plan."
+    no_orchestra_instruction = "Create a plan and write to PLAN.md, then proceed with the PLAN.md until finished."
     task_dir = tmp_path / "tasks" / "alpha-run"
     _write_task(task_dir)
     (task_dir / "Prompt.md").write_text(
@@ -223,7 +224,12 @@ def test_make_request_preserves_current_task_prompt_wording(tmp_path: Path) -> N
         )
 
         prompt = _make_request(prepared).prompt
-        assert current_instruction in prompt
+        if mode["no_orchestra"] is True:
+            assert no_orchestra_instruction in prompt
+            assert current_instruction not in prompt
+            assert "Dispatch" not in prompt
+        else:
+            assert current_instruction in prompt
         assert "Benchmark completion protocol:" in prompt
         assert "BENCH_PARENT_DONE" in prompt
 
@@ -479,6 +485,8 @@ def test_run_and_grade_stable_parent_timeout_evaluates_and_preserves_lifecycle_f
     assert result.harness.status == "lifecycle_failed"
     assert result.harness.error == "parent did not emit BENCH_PARENT_DONE before the completion timeout"
     assert result.harness.details["last_settle_status"] == "parent_not_done"
+    assert result.reliability["failure_class"] == "harness_timeout"
+    assert result.details["failure_classification"]["scope"] == "harness"
     # The stable workspace was still evaluated.
     assert result.evaluation.status == "ok"
     assert result.evaluation.score == "pass"

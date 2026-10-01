@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import re
@@ -20,9 +21,9 @@ import yaml
 from bench.ownership import host_ownership_env
 from bench.paths import validate_task_id
 from bench.provenance import snapshot_aux_skills, snapshot_files, snapshot_orchestra_config
-from bench.tasks import TaskDefinition
+from bench.tasks import TaskDefinition, list_tasks
 from bench.version import display_version
-from bench.workspace import visible_task_files
+from bench.workspace import WorkspaceError, visible_task_files
 
 
 # Long-lived benchmark container defaults (V1 build-env/start-env semantics,
@@ -32,6 +33,10 @@ CONTAINER_NAME = "orchestra-bench-runner"
 PROJECT_CATALOG_RELPATH = Path("config") / "orchestra" / "agent-catalog.yaml"
 VISIBLE_TASKS_SOURCE_ROOTS = (Path("tasks"),)
 VISIBLE_TASKS_TARGET = Path("/bench/task-materials-source")
+# Host-side build dir holding the sanitized agent-visible task copy.
+# Evaluator source is never mounted into the runner container; the host stages
+# it into a container temp dir only during the grading phase.
+VISIBLE_TASKS_BUILD_DIR = Path("visible-tasks")
 ORCHESTRA_CONFIG_TARGET = Path("/bench/orchestra-config")
 PI_CONFIG_TARGET = Path("/bench/pi")
 HERMES_CONFIG_TARGET = Path("/bench/hermes")
@@ -46,6 +51,8 @@ CONTAINER_CONTEXT_ENV = "BENCH_IN_CONTAINER"
 RUNTIME_CONFIG_SYNC_FILENAME = "runtime-config-sync.json"
 PI_AGENT_STATE_SRC = Path("/root/.pi/agent")
 DEFAULT_ORCHESTRA_EXTENSION_SRC = Path("/opt/orchestra/src/extensions/pi/orchestra")
+# Default Orchestra branch used by in-container runtime sync when BENCH_ORCHESTRA_REF is unset.
+DEFAULT_ORCHESTRA_REF = "test"
 
 
 def _now_run_id() -> str:
@@ -320,7 +327,12 @@ def _require_orchestra_catalog_source(env: RuntimeEnvironment) -> Path:
     return catalog
 
 
-def _require_orchestra_extension_source(env: RuntimeEnvironment) -> Path:
+def _require_orchestra_extension_source(env: RuntimeEnvironment, *, prefer_checkout: bool = False) -> Path:
+    if prefer_checkout:
+        source = _default_orchestra_extension_src()
+        if source.is_dir():
+            return source
+        raise FileNotFoundError(f"orchestra extension source not found: {source}")
     candidates = []
     if env.orchestra_extension_src is not None:
         candidates.append(env.orchestra_extension_src)
@@ -363,7 +375,11 @@ def _apply_orchestra_tools_override(env: RuntimeEnvironment) -> bool | None:
         loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         if isinstance(loaded, dict):
             data = dict(loaded)
-    data["tools_enabled_by_default"] = enabled
+    # Orchestra's Pi extension activates tools whenever mode is not "off".
+    # Keep the extension/config present for runtime consistency, but force mode
+    # off for benchmark no-orchestra baselines.
+    data.pop("tools_enabled_by_default", None)
+    data["mode"] = "orchestrate" if enabled else "off"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return enabled
@@ -396,6 +412,101 @@ def load_runtime_config_summary(env: RuntimeEnvironment | None = None) -> dict[s
     return {}
 
 
+def _orchestra_runtime_version() -> str:
+    try:
+        return str(importlib.metadata.version("orchestra")).strip()
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    try:
+        import orchestra  # type: ignore[import-not-found]
+    except Exception:
+        return ""
+    return str(getattr(orchestra, "__version__", "") or "").strip()
+
+
+def _orchestra_home() -> Path:
+    return Path(os.environ.get("ORCHESTRA_HOME") or "/opt/orchestra")
+
+
+def _orchestra_source_dir() -> Path:
+    return _orchestra_home() / "src"
+
+
+def _default_orchestra_extension_src() -> Path:
+    return _orchestra_source_dir() / "extensions" / "pi" / "orchestra"
+
+
+def _orchestra_ref() -> str | None:
+    """Effective Orchestra ref.
+
+    `BENCH_ORCHESTRA_REF` is an optional override; when unset, in-container
+    runtime sync defaults to the `test` branch. Outside the container (host
+    tooling/tests) an unset override means no ref switch.
+    """
+    ref = (os.environ.get("BENCH_ORCHESTRA_REF") or "").strip()
+    if ref:
+        return ref
+    if os.environ.get(CONTAINER_CONTEXT_ENV) == "1":
+        return DEFAULT_ORCHESTRA_REF
+    return None
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+
+def _pip_install_editable(src: Path) -> subprocess.CompletedProcess[str]:
+    pip = _orchestra_home() / ".venv" / "bin" / "pip"
+    return subprocess.run([str(pip), "install", "-e", f"{src}[dev]"], capture_output=True, text=True)
+
+
+def _git_ref_provenance(src: Path, requested_ref: str) -> dict[str, object]:
+    sha = _git(src, "rev-parse", "HEAD").stdout.strip()
+    branch = _git(src, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    dirty = _git(src, "status", "--porcelain").stdout.strip() != ""
+    return {
+        "orchestra_source_dir": str(src),
+        "orchestra_requested_ref": requested_ref,
+        "orchestra_branch": branch,
+        "orchestra_sha": sha,
+        "orchestra_dirty": dirty,
+    }
+
+
+def _apply_orchestra_ref() -> dict[str, object] | None:
+    """Switch the in-container Orchestra checkout to the effective ref.
+
+    The ref is the `BENCH_ORCHESTRA_REF` override, or the default `test`
+    branch when running in-container without an override. Runs before
+    `orchestra init pi --copy --force` so the CLI/package and the Pi
+    extension both come from the same checkout/ref. Returns None when no
+    ref applies (no override outside the container).
+    """
+    ref = _orchestra_ref()
+    if not ref:
+        return None
+    src = _orchestra_source_dir()
+    if not (src / ".git").exists():
+        raise RuntimeError(f"orchestra source checkout not found: {src}")
+    fetch = _git(src, "fetch", "origin")
+    if fetch.returncode != 0:
+        raise RuntimeError(f"git fetch origin failed ({fetch.returncode}): {fetch.stderr.strip()}")
+    local = _git(src, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    if local.returncode == 0:
+        checkout = _git(src, "checkout", "--force", ref)
+    else:
+        remote = _git(src, "rev-parse", "--verify", "--quiet", f"origin/{ref}^{{commit}}")
+        if remote.returncode != 0:
+            raise RuntimeError(f"orchestra ref not found after fetch: {ref}")
+        checkout = _git(src, "checkout", "--force", "-B", ref, f"origin/{ref}")
+    if checkout.returncode != 0:
+        raise RuntimeError(f"git checkout {ref} failed ({checkout.returncode}): {checkout.stderr.strip()}")
+    install = _pip_install_editable(src)
+    if install.returncode != 0:
+        raise RuntimeError(f"editable reinstall failed ({install.returncode}): {install.stderr.strip()}")
+    return _git_ref_provenance(src, ref)
+
+
 def sync_runtime_config(env: RuntimeEnvironment) -> dict[str, object]:
     """Copy benchmark-owned runtime inputs into the live Pi/Orchestra runtime."""
     catalog_source = _require_orchestra_catalog_source(env)
@@ -406,6 +517,11 @@ def sync_runtime_config(env: RuntimeEnvironment) -> dict[str, object]:
     env.lmstudio_runtime_file.parent.mkdir(parents=True, exist_ok=True)
     env.hermes_runtime_dir.mkdir(parents=True, exist_ok=True)
     env.opencode_runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    # Switch the Orchestra checkout to the effective ref (and reinstall the
+    # editable package) before `orchestra init` so CLI/package and extension
+    # share one checkout. No-op only when no ref applies.
+    orchestra_provenance = _apply_orchestra_ref()
 
     init_env = os.environ.copy()
     init_env.update(
@@ -450,7 +566,11 @@ def sync_runtime_config(env: RuntimeEnvironment) -> dict[str, object]:
 
     orchestra_tools_enabled = _apply_orchestra_tools_override(env)
     orchestra_snapshot = snapshot_orchestra_config(env.orchestra_config_src)
-    orchestra_extension_source = _require_orchestra_extension_source(env)
+    # When a ref is configured the extension must come from the same checkout
+    # as the package (avoids a host-mounted branch mismatch).
+    orchestra_extension_source = _require_orchestra_extension_source(
+        env, prefer_checkout=orchestra_provenance is not None
+    )
     orchestra_extension_target = _copy_tree_overlay(orchestra_extension_source, pi_runtime_dir / "extensions" / "orchestra")
     orchestra_extension_snapshot = _snapshot_tree(orchestra_extension_source)
     pi_snapshot = _snapshot_tree(pi_source)
@@ -460,6 +580,8 @@ def sync_runtime_config(env: RuntimeEnvironment) -> dict[str, object]:
 
     summary: dict[str, object] = {
         "home_dir": str(home_dir),
+        "orchestra_runtime_version": _orchestra_runtime_version(),
+        "orchestra_provenance": orchestra_provenance or {},
         "orchestra_runtime_dir": str(env.orchestra_runtime_dir),
         "orchestra_tools_enabled_by_default": orchestra_tools_enabled,
         "pi_runtime_dir": str(pi_runtime_dir),
@@ -640,6 +762,41 @@ def _tasks_mount_source(root: Path) -> Path:
     raise FileNotFoundError(f"visible task source missing: {source}")
 
 
+def _refuse_symlinked_task_source(task_dir: Path) -> None:
+    """Refuse symlinked entries in a task source tree.
+
+    shutil.copytree dereferences symlinks by default, so a link pointing
+    outside the task tree (e.g. into evaluate/solved) would leak hidden
+    content into the agent-visible copy.
+    """
+    for dirpath, dirnames, filenames in os.walk(task_dir):
+        for name in (*dirnames, *filenames):
+            if (Path(dirpath) / name).is_symlink():
+                raise WorkspaceError(f"refusing to copy symlinked source: {Path(dirpath) / name}")
+
+
+def prepare_visible_tasks_root(root: Path | str) -> Path:
+    """Build the sanitized agent-visible copy of the task source.
+
+    Copies each task directory tree verbatim (task.yaml, PRD.md, Prompt.md,
+    fixture/, kb/, kb.md, and any other task files) so load_task() sees the
+    original task schema; evaluate/ (including solved/) stays exclusively in
+    the hidden evaluator source and generated __pycache__ is dropped.
+    """
+    source = _tasks_mount_source(root)
+    target = Path(root) / VISIBLE_TASKS_BUILD_DIR
+    shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True, exist_ok=True)
+    for task in list_tasks(source):
+        _refuse_symlinked_task_source(task.task_dir)
+        shutil.copytree(
+            task.task_dir,
+            target / task.task_id,
+            ignore=shutil.ignore_patterns("evaluate", "__pycache__"),
+        )
+    return target
+
+
 def _container_mounts(root: Path, catalog: Path) -> list[str]:
     orchestra_dir = root / "config" / "orchestra"
     pi_dir = root / "config" / "pi"
@@ -647,7 +804,7 @@ def _container_mounts(root: Path, catalog: Path) -> list[str]:
     opencode_dir = root / "config" / "opencode"
     skills_dir = root / "config" / "skills"
     orchestra_extension_dir = root.parent / "orchestra" / "extensions" / "pi" / "orchestra"
-    tasks_dir = _tasks_mount_source(root)
+    visible_dir = prepare_visible_tasks_root(root)
     for source in (orchestra_dir, pi_dir, hermes_dir, opencode_dir, skills_dir):
         source.mkdir(parents=True, exist_ok=True)
     mounts = [
@@ -658,7 +815,7 @@ def _container_mounts(root: Path, catalog: Path) -> list[str]:
         "-v", f"{hermes_dir}:{HERMES_CONFIG_TARGET}:ro",
         "-v", f"{opencode_dir}:{OPENCODE_CONFIG_TARGET}:ro",
         "-v", f"{skills_dir}:{SKILLS_CONFIG_TARGET}:ro",
-        "-v", f"{tasks_dir}:{VISIBLE_TASKS_TARGET}:ro",
+        "-v", f"{visible_dir}:{VISIBLE_TASKS_TARGET}:ro",
     ]
     if orchestra_extension_dir.is_dir():
         mounts.extend(["-v", f"{orchestra_extension_dir}:/bench/orchestra-extension:ro"])
@@ -726,10 +883,13 @@ def _parse_json_summary_from_stdout(stdout: str) -> dict[str, Any]:
 
 
 def _sync_runtime_config_inside_container() -> dict[str, Any]:
+    env = {CONTAINER_CONTEXT_ENV: "1"}
+    if ref := os.environ.get("BENCH_ORCHESTRA_REF"):
+        env["BENCH_ORCHESTRA_REF"] = ref
     completed = container_exec(
         ["python3", "-m", "bench.runtime", "init-runtime"],
         workdir=CONTAINER_ROOT,
-        env={CONTAINER_CONTEXT_ENV: "1"},
+        env=env,
         verbose=False,
     )
     if completed.returncode != 0:
@@ -767,6 +927,7 @@ def prepare_startup(
             "pi_runtime_dir": runtime_summary.get("pi_runtime_dir"),
             "orchestra_runtime_dir": runtime_summary.get("orchestra_runtime_dir"),
         },
+        "orchestra": runtime_summary.get("orchestra_provenance"),
     }
 
 
@@ -798,10 +959,14 @@ def run_in_workdir(task_id: str, command: Sequence[str] | None = None, env: Runt
 
 
 def cleanup_workdir(task_id: str | None = None, env: RuntimeEnvironment | None = None) -> list[Path]:
+    from bench.workspace import _remove_pycache_dirs
+
     runtime = RuntimeEnvironment.from_env() if env is None else env
     removed: list[Path] = []
     if task_id:
         workdir = runtime.workdir(task_id)
+        if workdir.is_dir():
+            _remove_pycache_dirs(workdir)
         shutil.rmtree(workdir, ignore_errors=True)
         removed.append(workdir)
         return removed
@@ -812,6 +977,7 @@ def cleanup_workdir(task_id: str | None = None, env: RuntimeEnvironment | None =
     run_dir_pattern = re.compile(r"^\d{8}T\d{6}-")
     for entry in sorted(runtime.workspace_root.iterdir()):
         if entry.is_dir() and run_dir_pattern.match(entry.name):
+            _remove_pycache_dirs(entry)
             shutil.rmtree(entry, ignore_errors=True)
             removed.append(entry)
     return removed

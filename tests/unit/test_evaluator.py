@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from bench.evaluator import EvaluationError, grade_run
+from bench.evaluator import EvaluationError, evaluator_staging_root, grade_run
 from bench.paths import RepoPaths
 from bench.result import EvaluationResult, HarnessResult, RunMeta, TaskResult, load_result, write_json_atomic
 from bench.tasks import load_task
 from bench.workspace import prepare_workspace
 
 
-def _write_task(task_dir: Path, *, task_id: str = "alpha") -> None:
+def _write_task(task_dir: Path, *, task_id: str = "alpha", with_evaluate: bool = True) -> None:
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "task.yaml").write_text(
         "task_id: {task_id}\n"
@@ -26,10 +28,140 @@ def _write_task(task_dir: Path, *, task_id: str = "alpha") -> None:
     )
     (task_dir / "PRD.md").write_text("Product requirements.\n")
     (task_dir / "Prompt.md").write_text("Do the thing.\n")
-    (task_dir / "fixture").mkdir()
-    (task_dir / "evaluate").mkdir()
-    (task_dir / "evaluate" / "run.sh").write_text("#!/bin/sh\nexit 0\n")
+    (task_dir / "fixture").mkdir(exist_ok=True)
+    if with_evaluate:
+        (task_dir / "evaluate").mkdir(exist_ok=True)
+        (task_dir / "evaluate" / "run.sh").write_text("#!/bin/sh\nexit 0\n")
 
+
+def test_grade_run_stages_evaluator_from_hidden_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grading resolves evaluate/ from the hidden evaluator root, not the visible task tree."""
+    visible_root = tmp_path / "tasks-visible"
+    hidden_root = tmp_path / "tasks-hidden"
+    hidden_dir = hidden_root / "alpha"
+    _write_task(hidden_dir)
+    (hidden_dir / "evaluate" / "run.sh").write_text("#!/bin/sh\necho hidden-evaluator\n")
+    visible_dir = visible_root / "alpha"
+    _write_task(visible_dir, with_evaluate=False)
+    monkeypatch.setenv("BENCH_EVALUATOR_TASKS", str(hidden_root))
+
+    task = load_task(visible_dir, visible_root)
+    assert task.evaluate_path == hidden_dir / "evaluate"
+    assert not (visible_dir / "evaluate").exists()
+
+    repo = RepoPaths(tmp_path)
+    run_paths = repo.run("20250101T010203", "alpha")
+    workspace = prepare_workspace(task, run_paths)
+    write_json_atomic(
+        run_paths.result_json,
+        TaskResult(
+            run_meta=RunMeta(run_id=run_paths.run_id, task_id=task.task_id, batch=task.batch),
+            harness=HarnessResult(status="ok", exit_code=0),
+            evaluation=EvaluationResult(status="not_run"),
+            outcome="not_run",
+        ),
+    )
+
+    def fake_runner(command, **kwargs):
+        staged = Path(kwargs["env"]["BENCH_REPO_ROOT"]) / "evaluate"
+        assert staged.is_dir()
+        assert (staged / "run.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho hidden-evaluator\n"
+        Path(kwargs["env"]["BENCH_RESULT_JSON"]).write_text('{"status": "ok", "score": "pass"}')
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = grade_run(task, run_paths, runner=fake_runner)
+
+    assert result.evaluation.status == "ok"
+    assert result.outcome == "pass"
+
+
+def test_grade_run_uses_run_scoped_staging_root_and_removes_it_after(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The evaluator is staged in /tmp/bench-eval-<run_id>-<task_id> only during grading."""
+    repo = RepoPaths(tmp_path)
+    task_dir = tmp_path / "tasks" / "alpha"
+    _write_task(task_dir)
+    task = load_task(task_dir, tmp_path / "tasks")
+
+    run_paths = repo.run("20250101T010203", "alpha")
+    workspace = prepare_workspace(task, run_paths)
+    write_json_atomic(
+        run_paths.result_json,
+        TaskResult(
+            run_meta=RunMeta(run_id=run_paths.run_id, task_id=task.task_id, batch=task.batch),
+            harness=HarnessResult(status="ok", exit_code=0),
+            evaluation=EvaluationResult(status="not_run"),
+            outcome="not_run",
+        ),
+    )
+
+    staging = evaluator_staging_root(run_paths.run_id, task.task_id)
+    assert staging == Path(tempfile.gettempdir()) / "bench-eval-20250101T010203-alpha"
+    observed: dict[str, object] = {}
+
+    def fake_runner(command, **kwargs):
+        observed["repo_root"] = Path(kwargs["env"]["BENCH_REPO_ROOT"])
+        # Check the staged copy while it still exists (removed in grade_run's finally).
+        observed["staged_copy_present"] = (Path(kwargs["env"]["BENCH_REPO_ROOT"]) / "evaluate" / "run.sh").is_file()
+        observed["staging_exists_during"] = staging.is_dir()
+        Path(kwargs["env"]["BENCH_RESULT_JSON"]).write_text('{"status": "ok", "score": "pass"}')
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = grade_run(task, run_paths, runner=fake_runner)
+
+    assert result.outcome == "pass"
+    assert observed["repo_root"] == staging
+    assert observed["staged_copy_present"] is True
+    assert observed["staging_exists_during"] is True
+    # The staged evaluator is removed once grading completes.
+    assert not staging.exists()
+
+
+
+def test_grade_run_uses_pre_staged_evaluator_in_run_staging_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host-pre-staged evaluator at the run staging root must be used, not deleted.
+
+    Regression: grade_run used to rmtree the staging root before checking whether
+    task.evaluate_path was already the staged dir, deleting the pre-staged
+    evaluator and failing with missing_evaluator.
+    """
+    repo = RepoPaths(tmp_path)
+    task_dir = tmp_path / "tasks" / "alpha"
+    _write_task(task_dir)
+    task = load_task(task_dir, tmp_path / "tasks")
+
+    run_paths = repo.run("20250101T010203", "alpha")
+    workspace = prepare_workspace(task, run_paths)
+    write_json_atomic(
+        run_paths.result_json,
+        TaskResult(
+            run_meta=RunMeta(run_id=run_paths.run_id, task_id=task.task_id, batch=task.batch),
+            harness=HarnessResult(status="ok", exit_code=0),
+            evaluation=EvaluationResult(status="not_run"),
+            outcome="not_run",
+        ),
+    )
+
+    # Host pre-stages the evaluator at the run's own staging root.
+    staging = evaluator_staging_root(run_paths.run_id, task.task_id)
+    staged_eval = staging / "evaluate"
+    staged_eval.mkdir(parents=True)
+    (staged_eval / "run.sh").write_text("#!/bin/sh\necho pre-staged\n")
+    task = replace(task, evaluate_path=staged_eval)
+
+    def fake_runner(command, **kwargs):
+        assert Path(kwargs["env"]["BENCH_REPO_ROOT"]) == staging
+        assert (staging / "evaluate" / "run.sh").is_file()
+        Path(kwargs["env"]["BENCH_RESULT_JSON"]).write_text('{"status": "ok", "score": "pass"}')
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = grade_run(task, run_paths, runner=fake_runner)
+
+    assert result.evaluation.status == "ok"
+    assert result.outcome == "pass"
+    # Staging root is still cleaned up after grading.
+    assert not staging.exists()
 
 
 def test_grade_run_uses_system_path_for_grader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -64,6 +196,71 @@ def test_grade_run_uses_system_path_for_grader(tmp_path: Path, monkeypatch: pyte
     env = captured["env"]
     assert env["PATH"] == "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     assert env["BENCH_WORKDIR"] == str(workspace)
+
+
+def test_grade_run_sets_pythondontwritebytecode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evaluator subprocess must not write bytecode cache files into the workspace."""
+    repo = RepoPaths(tmp_path)
+    task_dir = tmp_path / "tasks" / "alpha"
+    _write_task(task_dir)
+    task = load_task(task_dir, tmp_path / "tasks")
+
+    run_paths = repo.run("20250101T010203", "alpha")
+    prepare_workspace(task, run_paths)
+    write_json_atomic(
+        run_paths.result_json,
+        TaskResult(
+            run_meta=RunMeta(run_id=run_paths.run_id, task_id=task.task_id, batch=task.batch),
+            harness=HarnessResult(status="ok", exit_code=0),
+            evaluation=EvaluationResult(status="not_run"),
+            outcome="not_run",
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_runner(command, **kwargs):
+        captured["env"] = dict(kwargs["env"])
+        Path(kwargs["env"]["BENCH_RESULT_JSON"]).write_text('{"status": "ok", "score": "pass"}')
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    grade_run(task, run_paths, runner=fake_runner)
+
+    assert captured["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+def test_grade_run_flags_fastapi_form_dependency_missing_from_requirements(tmp_path: Path) -> None:
+    repo = RepoPaths(tmp_path)
+    task_dir = tmp_path / "tasks" / "alpha"
+    _write_task(task_dir)
+    (task_dir / "fixture" / "app.py").write_text(
+        "from fastapi import FastAPI, Form\n"
+        "app = FastAPI()\n"
+        "@app.post('/submit')\n"
+        "def submit(name: str = Form(...)): return {'name': name}\n"
+    )
+    (task_dir / "fixture" / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    task = load_task(task_dir, tmp_path / "tasks")
+
+    run_paths = repo.run("20250101T010203", "alpha")
+    prepare_workspace(task, run_paths)
+    write_json_atomic(
+        run_paths.result_json,
+        TaskResult(
+            run_meta=RunMeta(run_id=run_paths.run_id, task_id=task.task_id, batch=task.batch),
+            harness=HarnessResult(status="ok", exit_code=0),
+            evaluation=EvaluationResult(status="not_run"),
+            outcome="not_run",
+        ),
+    )
+
+    with pytest.raises(EvaluationError) as exc_info:
+        grade_run(task, run_paths, runner=lambda *args, **kwargs: pytest.fail("runner should not execute"))
+
+    assert exc_info.value.classification == "undeclared_dependency"
+    manifest = json.loads((run_paths.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["classification"] == "undeclared_dependency"
+    assert "python-multipart" in manifest["error"]
 
 
 def test_grade_run_updates_result_and_captures_artifacts(tmp_path: Path) -> None:

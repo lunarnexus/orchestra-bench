@@ -1,0 +1,12 @@
+task_id: cap-advanced-merchant-reconciliation-suite
+description: Build Merchant Reconciliation Desk, a FastAPI + SQLite service that imports ledger and settlement data, reconciles it against a large policy corpus, and exposes exception review, audit history, and reports/exports
+family: capability
+batch: capability-advanced
+required_roles:
+  - builder
+  - verifier
+scoring_type: numeric
+timeout_minutes: 90
+evaluator: evaluate/run.sh
+split: dev
+source_benchmark: Adyen/Stripe settlement reconciliation docs-inspired

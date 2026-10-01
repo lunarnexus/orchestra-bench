@@ -9,6 +9,7 @@ __pycache__/
 # Generated benchmark output
 artifacts/
 results/
+visible-tasks/
 
 # Local env files
 .env

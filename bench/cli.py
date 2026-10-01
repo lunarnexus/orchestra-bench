@@ -10,6 +10,7 @@ import shutil
 import sys
 import textwrap
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -44,16 +45,19 @@ from .reporting.debug import format_child_session_section
 from .reporting.formatters import format_comparison_results
 from .reporting.queries import compare_selected_results, parse_since_filter
 from .artifacts import EvaluatorArtifactPaths
+from .evaluator import evaluator_staging_root
 from .result import HarnessResult, TaskResult, load_result, write_json_atomic
 from .runner import grade_run, prepare_run, run_and_grade
 from .runtime import (
+    CONTAINER_NAME,
     _now_run_id,
+    _run_docker,
     container_exec,
     doctor as runtime_doctor,
     load_runtime_config_summary,
     prepare_startup,
 )
-from .tasks import TaskLoadError, list_suites, list_tasks, load_task
+from .tasks import TaskLoadError, _default_tasks_root, list_suites, list_tasks, load_task
 from .workspace import workspace_dir
 
 
@@ -602,6 +606,8 @@ def _print_run_help() -> None:
                 "",
                 "Options:",
                 "  --auto <task-or-suite|all>  run and score an automatic task, suite, or all suites",
+                "  --role <role>           run with a role from config/orchestra/agent-catalog.yaml",
+                "  --notes <text>          store operator notes in run provenance/results",
                 "  --verbose               stream the full session output for a real target",
                 "Orchestra tools are available by default.",
                 "  --no-orchestra          disable Orchestra tools for this run (only opt-out)",
@@ -703,6 +709,9 @@ def _consume_run_option(args: argparse.Namespace, raw_args: Sequence[str], index
             raise ValueError("--auto-harness requires a value")
         args.auto_harness = raw_args[index]
         return index + 1
+    if token == "--agent-phase":
+        args.agent_phase = True
+        return index + 1
     if token == "--auto":
         args.auto = True
         index += 1
@@ -745,6 +754,7 @@ def _parse_run_argv(raw_args: Sequence[str]) -> argparse.Namespace:
         notes="",
         catalog_label=None,
         auto=False,
+        agent_phase=False,
         auto_harness=None,
         list=False,
         raw=False,
@@ -906,6 +916,7 @@ def _auto_inner_argv(args: argparse.Namespace) -> list[str]:
         inner_args.append("--dry-run")
     if getattr(args, "auto", False):
         inner_args.append("--auto")
+        inner_args.append("--agent-phase")
     return inner_args
 
 
@@ -922,7 +933,87 @@ def _run_auto_inside_container(args: argparse.Namespace):  # type: ignore[no-unt
         env={CONTAINER_CONTEXT_ENV: "1", **_runtime_env_from_summary(sync_summary), "BENCH_RUN_ID": run_id},
         verbose=True,
     )
-    return completed.returncode
+    return _host_initiated_grading(args, run_id, completed.returncode)
+
+
+def _stage_container_evaluator(run_id: str, task_id: str, evaluator_source: Path) -> Path:
+    """Copy the host-side task evaluator into a run-scoped temp dir in the container."""
+    staging_root = evaluator_staging_root(run_id, task_id)
+    container_exec(["mkdir", "-p", str(staging_root)], workdir=CONTAINER_ROOT, verbose=False)
+    _run_docker(["cp", str(evaluator_source), f"{CONTAINER_NAME}:{staging_root}/evaluate"])
+    return staging_root
+
+
+def _remove_container_evaluator(run_id: str, task_id: str) -> None:
+    staging_root = evaluator_staging_root(run_id, task_id)
+    container_exec(["rm", "-rf", str(staging_root)], workdir=CONTAINER_ROOT, verbose=False)
+
+
+def _grade_run_in_container(run_id: str, task_id: str, *, verbose: bool = False) -> int:
+    staging_root = evaluator_staging_root(run_id, task_id)
+    completed = container_exec(
+        [
+            "python3",
+            "-m",
+            "bench.cli",
+            "grade",
+            f"{run_id}-{task_id}",
+            "--root",
+            str(CONTAINER_ROOT),
+            "--tasks-root",
+            str(CONTAINER_TASKS_ROOT),
+            "--evaluator-dir",
+            str(staging_root / "evaluate"),
+        ],
+        workdir=CONTAINER_ROOT,
+        env={CONTAINER_CONTEXT_ENV: "1", "BENCH_RUN_ID": run_id},
+        verbose=verbose,
+    )
+    return int(completed.returncode)
+
+
+def _final_run_outcome(run_dir: Path) -> int:
+    """Map the result.json written by in-container grading to a process exit code."""
+    result_path = run_dir / "result.json"
+    if not result_path.is_file():
+        return 1
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    return 0 if payload.get("outcome") == "pass" else 1
+
+
+def _host_initiated_grading(args: argparse.Namespace, run_id: str, agent_rc: int) -> int:
+    """Grade deferred runs from the host after the in-container agent phase.
+
+    The container only ran the agent phase (defer_grading). For every run dir
+    carrying a ready agent-phase marker, stage the host task evaluator into the
+    container temp dir, run the in-container grade against the staged
+    evaluator, and remove the temp dir again.
+    """
+    root = Path(args.root) if args.root is not None else Path.cwd()
+    tasks_root = Path(args.tasks_root) if args.tasks_root is not None else _default_tasks_root()
+    results_dir = root / "results"
+    candidates = sorted(results_dir.glob(f"{run_id}-*")) if results_dir.is_dir() else []
+    worst = int(agent_rc)
+    for entry in candidates:
+        marker = entry / "artifacts" / "agent-phase.json"
+        if not marker.is_file():
+            continue
+        try:
+            marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if not marker_payload.get("ready_to_grade"):
+            continue
+        task_id = entry.name[len(run_id) + 1:]
+        task = load_task(task_id, tasks_root)
+        _bench_log(f"grading: {task_id}", flush=True)
+        _stage_container_evaluator(run_id, task_id, task.evaluate_path)
+        try:
+            _grade_run_in_container(run_id, task_id, verbose=bool(getattr(args, "verbose", False)))
+        finally:
+            _remove_container_evaluator(run_id, task_id)
+        worst = max(worst, _final_run_outcome(entry))
+    return worst
 
 
 def _derive_orchestra_tools_available(
@@ -943,6 +1034,7 @@ def _run_single_task(
     catalog: Path | None = None,
     resolved: dict[str, object] | None = None,
     stream_output: bool = False,
+    defer_grading: bool = False,
 ) -> TaskResult:
     catalog_path, resolved_config = (
         (catalog, resolved)
@@ -996,6 +1088,7 @@ def _run_single_task(
         stream_output=stream_output,
         request_metadata={"orchestra_tools_enabled": tools_enabled},
         on_settled=on_settled,
+        defer_grading=defer_grading,
     )
 
 
@@ -1049,7 +1142,12 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     if args.auto:
         _bench_log(f"auto: {task.task_id}", flush=True)
-        result = _run_single_task(args, task, stream_output=getattr(args, "verbose", False))
+        result = _run_single_task(
+            args,
+            task,
+            stream_output=getattr(args, "verbose", False),
+            defer_grading=bool(getattr(args, "agent_phase", False)),
+        )
         _print_auto_result(result)
         return 0 if result.outcome == "pass" else 1
 
@@ -1130,7 +1228,14 @@ def cmd_run_suite(args: argparse.Namespace, tasks: list[Any] | None = None) -> i
     results = []
     for task in resolved_tasks:
         _bench_log(f"auto: {task.task_id}", flush=True)
-        result = _run_single_task(args, task, catalog=catalog, resolved=resolved, stream_output=getattr(args, "verbose", False))
+        result = _run_single_task(
+            args,
+            task,
+            catalog=catalog,
+            resolved=resolved,
+            stream_output=getattr(args, "verbose", False),
+            defer_grading=bool(getattr(args, "agent_phase", False)),
+        )
         results.append(result)
         _print_auto_result(result)
     summary = _suite_summary_payload(suite_name, results)
@@ -1157,6 +1262,9 @@ def cmd_run_all_suites(args: argparse.Namespace) -> int:
 def cmd_grade(args: argparse.Namespace) -> int:
     run_paths = _resolve_run_paths(args.root, args.run_ref)
     task = load_task(run_paths.task_id, args.tasks_root)
+    evaluator_dir = getattr(args, "evaluator_dir", None)
+    if evaluator_dir:
+        task = replace(task, evaluate_path=Path(evaluator_dir))
     result = grade_run(task, run_paths, prior_result=_load_result_or_none(run_paths.result_json))
     _print_json(result.to_dict())
     return 0
@@ -1528,6 +1636,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--catalog-label", default=None, help=argparse.SUPPRESS)
     run_parser.add_argument("--auto-harness", default=None, help=argparse.SUPPRESS)
     run_parser.add_argument("--auto", action="store_true")
+    run_parser.add_argument("--agent-phase", action="store_true", help=argparse.SUPPRESS)
     run_parser.add_argument("--dry-run", action="store_true")
     run_parser.add_argument("--verbose", action="store_true")
     orchestra_group = run_parser.add_mutually_exclusive_group()
@@ -1546,6 +1655,7 @@ def build_parser() -> argparse.ArgumentParser:
     grade_parser.add_argument("run_ref")
     grade_parser.add_argument("--tasks-root", type=Path, default=None)
     grade_parser.add_argument("--root", type=Path, default=None)
+    grade_parser.add_argument("--evaluator-dir", type=Path, default=None, help=argparse.SUPPRESS)
     grade_parser.set_defaults(_handler=cmd_grade)
 
     suite_parser = subparsers.add_parser("suite", help=argparse.SUPPRESS)

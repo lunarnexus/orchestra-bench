@@ -37,6 +37,10 @@ Runtime config sources:
 
 Runtime sync records provenance outside public `results/` so result listings contain run dirs only.
 
+### Orchestra ref / branch selection
+
+Orchestra checkout selection: in-container runtime sync (part of `01-start`) uses the `BENCH_ORCHESTRA_REF` override when set, otherwise defaults to the `test` branch. Before `orchestra init pi --copy --force`, it fetches and switches `/opt/orchestra/src` to that ref (branch, tag, or SHA), reinstalls the editable package, and sources the Pi extension from the same checkout (`/opt/orchestra/src/extensions/pi/orchestra`) rather than the host-mounted `/bench/orchestra-extension`. This keeps the CLI/package and extension on one ref so benchmarks are not mixed-version. Effective provenance (source dir, requested ref, branch, SHA, dirty state) is recorded in the runtime-config-sync summary and merged into run metadata as `orchestra_provenance`. Outside the container, an unset `BENCH_ORCHESTRA_REF` means no ref switch (empty `orchestra_provenance`), so host-side tooling/tests are unaffected.
+
 Pi uses run-scoped HOME directories:
 
 ```text

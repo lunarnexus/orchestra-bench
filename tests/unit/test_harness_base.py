@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from bench.harnesses.base import BaseHarness, HarnessArtifactPaths, HarnessRequest, LifecycleEvent
-from bench.harnesses.process import ProcessTranscript
+from bench.harnesses.process import ProcessTranscript, build_process_env
 from bench.paths import RunPaths
 from bench.result import HarnessResult
 
@@ -68,3 +68,9 @@ def test_fake_harness_writes_transcript_events_and_summary(tmp_path: Path) -> No
         "status": "ok",
     }
     assert request.artifacts.log_path.read_text(encoding="utf-8") == "warning: nothing to do\n"
+
+
+def test_build_process_env_sets_pythondontwritebytecode() -> None:
+    """Harness process env must prevent Python bytecode cache in the workspace."""
+    env = build_process_env()
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"

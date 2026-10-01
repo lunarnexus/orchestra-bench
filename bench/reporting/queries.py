@@ -742,6 +742,11 @@ def _summarize_reason(value: Any) -> str:
 
 
 def _extract_failure_reason(result: TaskResult) -> str:
+    reliability = result.reliability if isinstance(result.reliability, dict) else {}
+    failure_class = str(reliability.get("failure_class") or "").strip()
+    if failure_class and result.harness.status != "ok":
+        message = str(result.harness.error or "").strip()
+        return f"{failure_class}: {message}" if message else failure_class
     details = getattr(result.evaluation, "details", None)
     if isinstance(details, dict):
         functionality = details.get("functionality")

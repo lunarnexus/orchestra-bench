@@ -166,3 +166,25 @@ def test_cleanup_workspace_removes_only_run_workspace(tmp_path: Path) -> None:
 
     assert not workspace.exists()
     assert (run_paths.artifacts_dir / "keep.txt").exists()
+
+
+def test_cleanup_workspace_removes_pycache_dirs(tmp_path: Path) -> None:
+    """cleanup_workspace must remove __pycache__ directories before rmtree."""
+    repo = RepoPaths(tmp_path)
+    run_paths = repo.run("20250101T010203", "alpha")
+    workspace = workspace_dir(run_paths)
+    workspace.mkdir(parents=True)
+    (workspace / "app.py").write_text("print('hello')\n")
+    # Simulate root-owned __pycache__ created by container subprocesses
+    pycache = workspace / "__pycache__"
+    pycache.mkdir()
+    (pycache / "app.cpython-311.pyc").write_text("fake bytecode")
+    nested_pycache = workspace / "sub" / "__pycache__"
+    nested_pycache.mkdir(parents=True)
+    (nested_pycache / "mod.cpython-311.pyc").write_text("fake bytecode")
+
+    cleanup_workspace(run_paths)
+
+    assert not workspace.exists()
+    assert not (workspace / "__pycache__").exists()
+    assert not (workspace / "sub" / "__pycache__").exists()

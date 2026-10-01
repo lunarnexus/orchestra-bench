@@ -74,5 +74,17 @@ def prepare_workspace(task: TaskDefinition, run_paths: RunPaths, *, dry_run: boo
     return workspace
 
 
+def _remove_pycache_dirs(root: Path) -> None:
+    """Remove __pycache__ directories that may have been created by root-owned
+    subprocesses.  These files block host-side cleanup when the container ran
+    as root but the host process is non-root."""
+    for pycache in sorted(root.rglob("__pycache__")):
+        if pycache.is_dir():
+            shutil.rmtree(pycache, ignore_errors=True)
+
+
 def cleanup_workspace(run_paths: RunPaths) -> None:
-    shutil.rmtree(workspace_dir(run_paths), ignore_errors=True)
+    workspace = workspace_dir(run_paths)
+    if workspace.is_dir():
+        _remove_pycache_dirs(workspace)
+    shutil.rmtree(workspace, ignore_errors=True)

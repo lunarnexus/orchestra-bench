@@ -34,6 +34,9 @@ def build_process_env(
         value = os.environ.get(key)
         if value is not None:
             env[key] = value
+    # Prevent Python from writing bytecode cache files into the workspace,
+    # which would be root-owned in container runs and block host cleanup.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     for source in (configured_env, request_env):
         if source is None:
             continue

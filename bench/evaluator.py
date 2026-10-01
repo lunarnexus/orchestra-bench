@@ -96,15 +96,22 @@ def _evaluate_artifacts(run_paths: RunPaths) -> EvaluatorArtifactPaths:
     return EvaluatorArtifactPaths.for_run_paths(run_paths).ensure()
 
 
-def _stage_evaluator_sources(task: TaskDefinition, staging_root: Path) -> Path:
-    staged_eval = staging_root / "evaluate"
-    shutil.copytree(task.evaluate_path, staged_eval)
+def _copy_evaluator_support_files(staging_root: Path) -> None:
     support_root = Path(__file__).resolve().parent.parent
     for support_name in ("capability_helpers.py", "rubric_helpers.py", "evaluator_helpers.py"):
         support_path = support_root / support_name
         if support_path.is_file():
             shutil.copy2(support_path, staging_root / support_name)
-    return staged_eval
+
+
+def evaluator_staging_root(run_id: str, task_id: str) -> Path:
+    """Run-scoped temp dir holding the evaluator only during grading.
+
+    V1 contract: the evaluator is copied into /tmp/bench-eval-<run_id>-<task_id>/evaluate
+    for the duration of grading and removed afterward; it is never present in the
+    container during the agent phase.
+    """
+    return Path(tempfile.gettempdir()) / f"bench-eval-{run_id}-{task_id}"
 
 
 def _default_command(staged_eval_dir: Path, evaluator: str) -> list[str]:
@@ -112,6 +119,48 @@ def _default_command(staged_eval_dir: Path, evaluator: str) -> list[str]:
     if script.suffix == ".sh" or not script.exists():
         return ["bash", str(script)]
     return [str(script)]
+
+
+def _declared_python_requirements(workspace: Path) -> set[str]:
+    requirements = workspace / "requirements.txt"
+    if not requirements.is_file():
+        return set()
+    declared: set[str] = set()
+    for raw_line in requirements.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.split("#", 1)[0].strip().lower()
+        if not line:
+            continue
+        name = line
+        for marker in ("==", ">=", "<=", "~=", "!=", ">", "<", "[", ";"):
+            if marker in name:
+                name = name.split(marker, 1)[0]
+        declared.add(name.strip().replace("_", "-"))
+    return declared
+
+
+def _audit_declared_python_runtime_deps(workspace: Path) -> None:
+    """Catch known import-time runtime dependencies before grading.
+
+    FastAPI validates Form/File dependencies while importing the app. If a task
+    solution uses those features without declaring python-multipart, verifier
+    environments can pass accidentally while the evaluator fails at startup.
+    """
+    py_files = [path for path in workspace.rglob("*.py") if path.is_file() and not path.is_symlink()]
+    if not py_files:
+        return
+    declared = _declared_python_requirements(workspace)
+    uses_fastapi_form = False
+    for path in py_files:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "fastapi" in text and ("Form(" in text or "File(" in text or "UploadFile" in text):
+            uses_fastapi_form = True
+            break
+    if uses_fastapi_form and "python-multipart" not in declared:
+        raise EvaluationError(
+            "workspace uses FastAPI form/file handling but requirements.txt does not declare python-multipart",
+            classification="undeclared_dependency",
+            details={"dependency": "python-multipart", "requirements": str(workspace / "requirements.txt")},
+        )
 
 
 def _write_manifest(
@@ -155,86 +204,127 @@ def grade_run(
     result = _result_from_run(task, run_paths)
     runner = runner or subprocess.run
     result_json_path: Path | None = None
+    staging_root = evaluator_staging_root(run_paths.run_id, task.task_id)
+    staged_eval = staging_root / "evaluate"
+    pre_staged = task.evaluate_path.resolve() == staged_eval.resolve()
+    # Start from a clean staging dir unless the evaluator is already staged here
+    # (e.g. a host pre-staged it at the run staging root); removing it first would
+    # delete the very evaluator we are about to validate and use.
+    if not pre_staged:
+        shutil.rmtree(staging_root, ignore_errors=True)
+    staging_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        with tempfile.TemporaryDirectory(prefix=".evaluator-", dir=artifacts.root) as temp_dir:
-            staging_root = Path(temp_dir)
-            staged_eval = _stage_evaluator_sources(task, staging_root)
-            command = _default_command(staged_eval, task.evaluator)
-            result_file_handle = tempfile.NamedTemporaryFile(
-                prefix=".result-", suffix=".json", dir=artifacts.root, delete=False
+        try:
+            _audit_declared_python_runtime_deps(workspace)
+        except EvaluationError as exc:
+            _write_text(artifacts.stdout_path, "")
+            _write_text(artifacts.stderr_path, "")
+            _write_text(
+                artifacts.log_path,
+                f"workspace: {workspace}\nclassification: {exc.classification}\nerror: {exc}\n",
             )
-            result_file_handle.close()
-            result_json_path = Path(result_file_handle.name)
-            # Inherit the process environment, but run evaluators with the app/runtime
-            # toolchain instead of Orchestra's agent virtualenv.
-            env = os.environ.copy()
-            env.update(
-                {
-                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                    "BENCH_REPO_ROOT": str(staging_root),
-                    "BENCH_RESULT_JSON": str(result_json_path),
-                    "BENCH_RUN_ID": run_paths.run_id,
-                    "BENCH_TASK_ID": task.task_id,
-                    "BENCH_TASKS": str(task.task_dir.parent),
-                    "BENCH_WORKDIR": str(workspace),
-                }
+            _write_manifest(
+                artifacts,
+                command=[],
+                classification=exc.classification,
+                returncode=None,
+                source="preflight",
+                result_path=None,
+                error=str(exc),
             )
-            timeout_seconds = max(1.0, task.timeout_minutes * 60.0)
-            try:
-                completed = runner(
-                    command,
-                    cwd=workspace,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=timeout_seconds,
-                )
-            except subprocess.TimeoutExpired as exc:
-                stdout_text = _coerce_text(getattr(exc, "output", ""))
-                stderr_text = _coerce_text(getattr(exc, "stderr", ""))
-                _write_text(artifacts.stdout_path, stdout_text)
-                _write_text(artifacts.stderr_path, stderr_text)
-                _write_text(
-                    artifacts.log_path,
-                    f"command: {' '.join(command)}\nworkspace: {workspace}\nclassification: timeout\n",
-                )
-                _write_manifest(
-                    artifacts,
-                    command=command,
-                    classification="timeout",
-                    returncode=None,
-                    source="stdout",
-                    result_path=None,
-                    error=f"evaluator timed out after {timeout_seconds} seconds",
-                )
+            raise
+        if not pre_staged:
+            if not task.evaluate_path.is_dir():
                 raise EvaluationError(
-                    f"evaluator timed out after {timeout_seconds} seconds",
-                    classification="timeout",
-                    details={"command": command, "workspace": str(workspace)},
-                ) from exc
-            except Exception as exc:
-                _write_text(artifacts.stdout_path, "")
-                _write_text(artifacts.stderr_path, "")
-                _write_text(
-                    artifacts.log_path,
-                    f"command: {' '.join(command)}\nworkspace: {workspace}\nclassification: crash\nerror: {exc}\n",
+                    f"evaluator source missing: {task.evaluate_path}",
+                    classification="missing_evaluator",
+                    details={"evaluator": str(task.evaluate_path)},
                 )
-                _write_manifest(
-                    artifacts,
-                    command=command,
-                    classification="crash",
-                    returncode=None,
-                    source="stdout",
-                    result_path=None,
-                    error=str(exc),
-                )
-                raise EvaluationError(
-                    f"evaluator crashed: {exc}",
-                    classification="crash",
-                    details={"command": command, "workspace": str(workspace), "exception_type": type(exc).__name__},
-                ) from exc
+            shutil.copytree(task.evaluate_path, staged_eval)
+        elif not staged_eval.is_dir():
+            raise EvaluationError(
+                f"evaluator source missing: {task.evaluate_path}",
+                classification="missing_evaluator",
+                details={"evaluator": str(task.evaluate_path)},
+            )
+        _copy_evaluator_support_files(staging_root)
+        command = _default_command(staged_eval, task.evaluator)
+        result_file_handle = tempfile.NamedTemporaryFile(
+            prefix=".result-", suffix=".json", dir=artifacts.root, delete=False
+        )
+        result_file_handle.close()
+        result_json_path = Path(result_file_handle.name)
+        # Inherit the process environment, but run evaluators with the app/runtime
+        # toolchain instead of Orchestra's agent virtualenv.
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "BENCH_REPO_ROOT": str(staging_root),
+                "BENCH_RESULT_JSON": str(result_json_path),
+                "BENCH_RUN_ID": run_paths.run_id,
+                "BENCH_TASK_ID": task.task_id,
+                "BENCH_TASKS": str(task.task_dir.parent),
+                "BENCH_WORKDIR": str(workspace),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        timeout_seconds = max(1.0, task.timeout_minutes * 60.0)
+        try:
+            completed = runner(
+                command,
+                cwd=workspace,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout_text = _coerce_text(getattr(exc, "output", ""))
+            stderr_text = _coerce_text(getattr(exc, "stderr", ""))
+            _write_text(artifacts.stdout_path, stdout_text)
+            _write_text(artifacts.stderr_path, stderr_text)
+            _write_text(
+                artifacts.log_path,
+                f"command: {' '.join(command)}\nworkspace: {workspace}\nclassification: timeout\n",
+            )
+            _write_manifest(
+                artifacts,
+                command=command,
+                classification="timeout",
+                returncode=None,
+                source="stdout",
+                result_path=None,
+                error=f"evaluator timed out after {timeout_seconds} seconds",
+            )
+            raise EvaluationError(
+                f"evaluator timed out after {timeout_seconds} seconds",
+                classification="timeout",
+                details={"command": command, "workspace": str(workspace)},
+            ) from exc
+        except Exception as exc:
+            _write_text(artifacts.stdout_path, "")
+            _write_text(artifacts.stderr_path, "")
+            _write_text(
+                artifacts.log_path,
+                f"command: {' '.join(command)}\nworkspace: {workspace}\nclassification: crash\nerror: {exc}\n",
+            )
+            _write_manifest(
+                artifacts,
+                command=command,
+                classification="crash",
+                returncode=None,
+                source="stdout",
+                result_path=None,
+                error=str(exc),
+            )
+            raise EvaluationError(
+                f"evaluator crashed: {exc}",
+                classification="crash",
+                details={"command": command, "workspace": str(workspace), "exception_type": type(exc).__name__},
+            ) from exc
 
         stdout_text = _coerce_text(getattr(completed, "stdout", ""))
         stderr_text = _coerce_text(getattr(completed, "stderr", ""))
@@ -357,3 +447,6 @@ def grade_run(
     finally:
         if result_json_path is not None:
             result_json_path.unlink(missing_ok=True)
+        # The evaluator is only present in the container during grading; remove
+        # the staged copy once grading has completed (or failed).
+        shutil.rmtree(staging_root, ignore_errors=True)

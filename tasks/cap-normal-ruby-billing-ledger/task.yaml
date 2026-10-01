@@ -6,6 +6,6 @@ required_roles:
   - builder
   - verifier
 scoring_type: numeric
-timeout_minutes: 35
+timeout_minutes: 45
 evaluator: evaluate/run.sh
 split: dev

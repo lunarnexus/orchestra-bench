@@ -1,0 +1,217 @@
+{
+  "source": "settlements",
+  "network": "network_c",
+  "batch_id": "NETC-2026-01",
+  "records": [
+    {
+      "record_id": "S-C-0001",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5003",
+      "original_transaction_id": null,
+      "amount": 84.0,
+      "currency": "USD",
+      "settled_on": "2026-01-08"
+    },
+    {
+      "record_id": "S-C-0002",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5006",
+      "original_transaction_id": null,
+      "amount": 195.0,
+      "currency": "USD",
+      "settled_on": "2026-01-11"
+    },
+    {
+      "record_id": "S-C-0003",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5009",
+      "original_transaction_id": null,
+      "amount": 306.0,
+      "currency": "USD",
+      "settled_on": "2026-01-06"
+    },
+    {
+      "record_id": "S-C-0004",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5012",
+      "original_transaction_id": null,
+      "amount": 417.0,
+      "currency": "USD",
+      "settled_on": "2026-01-09"
+    },
+    {
+      "record_id": "S-C-0005",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5015",
+      "original_transaction_id": null,
+      "amount": 528.0,
+      "currency": "USD",
+      "settled_on": "2026-01-12"
+    },
+    {
+      "record_id": "S-C-0006",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5018",
+      "original_transaction_id": null,
+      "amount": 639.0,
+      "currency": "USD",
+      "settled_on": "2026-01-07"
+    },
+    {
+      "record_id": "S-C-0007",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5021",
+      "original_transaction_id": null,
+      "amount": 750.0,
+      "currency": "USD",
+      "settled_on": "2026-01-10"
+    },
+    {
+      "record_id": "S-C-0008",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5024",
+      "original_transaction_id": null,
+      "amount": 861.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-C-0009",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5027",
+      "original_transaction_id": null,
+      "amount": 72.0,
+      "currency": "USD",
+      "settled_on": "2026-01-08"
+    },
+    {
+      "record_id": "S-C-0010",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5030",
+      "original_transaction_id": null,
+      "amount": 183.0,
+      "currency": "USD",
+      "settled_on": "2026-01-11"
+    },
+    {
+      "record_id": "S-C-0011",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5033",
+      "original_transaction_id": null,
+      "amount": 294.0,
+      "currency": "USD",
+      "settled_on": "2026-01-06"
+    },
+    {
+      "record_id": "S-C-0012",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5036",
+      "original_transaction_id": null,
+      "amount": 405.0,
+      "currency": "USD",
+      "settled_on": "2026-01-09"
+    },
+    {
+      "record_id": "S-C-0013",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5039",
+      "original_transaction_id": null,
+      "amount": 516.0,
+      "currency": "USD",
+      "settled_on": "2026-01-12"
+    },
+    {
+      "record_id": "S-C-0014",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5042",
+      "original_transaction_id": null,
+      "amount": 627.0,
+      "currency": "USD",
+      "settled_on": "2026-01-07"
+    },
+    {
+      "record_id": "S-C-0015",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5045",
+      "original_transaction_id": null,
+      "amount": 738.0,
+      "currency": "USD",
+      "settled_on": "2026-01-10"
+    },
+    {
+      "record_id": "S-C-0016",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5048",
+      "original_transaction_id": null,
+      "amount": 849.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-C-0017",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5051",
+      "original_transaction_id": null,
+      "amount": 60.0,
+      "currency": "USD",
+      "settled_on": "2026-01-08"
+    },
+    {
+      "record_id": "S-C-0018",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5054",
+      "original_transaction_id": null,
+      "amount": 171.0,
+      "currency": "USD",
+      "settled_on": "2026-01-11"
+    },
+    {
+      "record_id": "S-C-0019",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5057",
+      "original_transaction_id": null,
+      "amount": 282.0,
+      "currency": "USD",
+      "settled_on": "2026-01-06"
+    },
+    {
+      "record_id": "S-C-0020",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-5060",
+      "original_transaction_id": null,
+      "amount": 393.0,
+      "currency": "USD",
+      "settled_on": "2026-01-09"
+    },
+    {
+      "record_id": "S-C-0061",
+      "batch_id": "NETC-2026-01",
+      "network": "network_c",
+      "transaction_id": "TX-9101",
+      "original_transaction_id": null,
+      "amount": 20.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    }
+  ]
+}

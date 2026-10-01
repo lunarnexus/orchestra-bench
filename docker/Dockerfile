@@ -15,7 +15,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git curl ca-certificates openssh-client python3 python3-pip python3-venv ruby ruby-dev build-essential libsqlite3-dev pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn pytest httpx django pyyaml
+RUN python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn python-multipart pytest httpx django pyyaml
 RUN npm install -g @earendil-works/pi-coding-agent@latest express
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 RUN npm install -g opencode-ai
@@ -35,7 +35,7 @@ RUN echo "source/plugin cache bust: $SOURCE_PLUGIN_CACHE_BUST" && \
 
 ENV PATH="/opt/orchestra/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-RUN pi install "$PI_LMSTUDIO_PLUGIN_URL"
+#RUN pi install "$PI_LMSTUDIO_PLUGIN_URL"
 #RUN pi install "$PI_CODEGRAPH_PLUGIN_URL"
 #RUN pi install "$PI_WEB_TOOLS_PLUGIN_URL"
 

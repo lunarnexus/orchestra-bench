@@ -59,6 +59,18 @@ def _default_tasks_root() -> Path:
     return _REPO_ROOT / "tasks"
 
 
+def _default_evaluator_tasks_root() -> Path:
+    """Hidden evaluator source root, separate from the agent-visible task root.
+
+    Defaults to the tasks root so host-side runs keep working when no hidden
+    root is configured (e.g. the repo checkout, which contains evaluate/).
+    """
+    env = os.environ.get("BENCH_EVALUATOR_TASKS")
+    if env:
+        return Path(env).expanduser()
+    return _default_tasks_root()
+
+
 def _resolve_tasks_root(tasks_root: Path | str | None) -> Path:
     if tasks_root is None:
         return _default_tasks_root()
@@ -123,6 +135,27 @@ def _require_int(data: dict[str, Any], key: str, path: Path, default: int) -> in
     return timeout
 
 
+def _resolve_evaluate_path(task_dir: Path) -> Path:
+    """Resolve the task's evaluator source, preferring the hidden evaluator root.
+
+    The visible task tree (mounted at /bench/task-materials-source) excludes
+    evaluate/, so grading resolves the evaluator from BENCH_EVALUATOR_TASKS
+    when it is a separate root. Falls back to the task directory itself when
+    both roots coincide (host-side runs). A missing evaluate/ directory is
+    tolerated at load time: the agent phase never needs the evaluator, and
+    grading fails with a clear error if the source is unavailable then.
+    """
+    evaluator_root = _default_evaluator_tasks_root()
+    if evaluator_root != task_dir.parent:
+        candidate = evaluator_root / task_dir.name / "evaluate"
+        if candidate.is_dir():
+            return candidate
+    candidate = task_dir / "evaluate"
+    if candidate.exists() and not candidate.is_dir():
+        raise TaskLoadError(f"missing evaluate directory: {candidate}")
+    return candidate
+
+
 def load_task(task_path: Path | str, tasks_root: Path | str | None = None) -> TaskDefinition:
     task_dir = _task_dir_for(task_path, tasks_root)
     task_yaml_path = task_dir / "task.yaml"
@@ -148,7 +181,7 @@ def load_task(task_path: Path | str, tasks_root: Path | str | None = None) -> Ta
     fixture_path = task_dir / "fixture" if (task_dir / "fixture").exists() else None
     kb_dir_path = task_dir / "kb" if (task_dir / "kb").is_dir() else None
     kb_md_path = task_dir / "kb.md" if (task_dir / "kb.md").is_file() else None
-    evaluate_path = task_dir / "evaluate"
+    evaluate_path = _resolve_evaluate_path(task_dir)
 
     if not prd_path.is_file():
         raise TaskLoadError(f"missing PRD.md: {prd_path}")
@@ -156,8 +189,6 @@ def load_task(task_path: Path | str, tasks_root: Path | str | None = None) -> Ta
         raise TaskLoadError(f"missing Prompt.md: {prompt_path}")
     if fixture_path is not None and not fixture_path.exists():
         fixture_path = None
-    if not evaluate_path.is_dir():
-        raise TaskLoadError(f"missing evaluate directory: {evaluate_path}")
 
     return TaskDefinition(
         task_id=task_id,

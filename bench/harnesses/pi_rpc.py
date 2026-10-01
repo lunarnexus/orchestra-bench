@@ -158,6 +158,10 @@ def _orchestra_dispatch_seen(events: Sequence[dict[str, Any]]) -> bool:
     return any(event.get("type") == "tool_execution_end" and event.get("toolName") == "orch_dispatch" and not event.get("isError") for event in events)
 
 
+def _accepted_dispatch_count(events: Sequence[dict[str, Any]]) -> int:
+    return sum(1 for event in events if event.get("type") == "tool_execution_end" and event.get("toolName") == "orch_dispatch" and not event.get("isError"))
+
+
 def _current_epoch_consolidated_report_seen(events: Sequence[dict[str, Any]]) -> bool:
     report_seen = False
     for event in events:
@@ -457,12 +461,14 @@ class PiRpcHarness(BaseHarness):
         }
 
     def _orchestra_status_snapshot(self) -> dict[str, Any] | None:
-        # Authoritative CLI status is returned as-is: direct-return
+        dispatch_generation = _accepted_dispatch_count(self.events)
+        # Authoritative CLI status is returned as-is for active child state: direct-return
         # notifications must never override authoritative active descendants.
         cli_snapshot = self._status_from_orchestra_cli(self.session_id)
         if cli_snapshot is not None:
+            cli_snapshot = dict(cli_snapshot)
+            cli_snapshot["dispatch_generation"] = dispatch_generation
             if _current_epoch_consolidated_report_seen(self.events):
-                cli_snapshot = dict(cli_snapshot)
                 cli_snapshot["session_report_available"] = True
                 cli_snapshot["session_report_delivered"] = True
                 cli_snapshot["event_stream_consolidated_report_delivered"] = True
@@ -485,7 +491,7 @@ class PiRpcHarness(BaseHarness):
                 try:
                     payload = json.loads(text)
                 except json.JSONDecodeError:
-                    return {"raw_text": text}
+                    return {"raw_text": text, "dispatch_generation": dispatch_generation}
                 active_runs = payload.get("active_runs")
                 active_count = active_runs.get("count") if isinstance(active_runs, dict) else active_runs
                 descendants_terminal = payload.get("descendants_terminal")
@@ -500,6 +506,7 @@ class PiRpcHarness(BaseHarness):
                     "descendants_terminal": descendants_terminal,
                     "session_report_available": payload.get("session_report_available"),
                     "session_report_delivered": payload.get("session_report_delivered"),
+                    "dispatch_generation": dispatch_generation,
                     "raw_text": text,
                 }
         dispatches = 0
@@ -535,6 +542,7 @@ class PiRpcHarness(BaseHarness):
                 "descendants_terminal": True,
                 "session_report_available": True,
                 "session_report_delivered": True,
+                "dispatch_generation": dispatch_generation,
                 "post_report_dispatches": 0,
                 "raw_text": f"dispatches={dispatches} direct_returns={direct_returns} consolidated_return=1 fallback_contract",
             }
@@ -547,6 +555,7 @@ class PiRpcHarness(BaseHarness):
             "descendants_terminal": False,
             "session_report_available": direct_returns > 0 or consolidated_return_seen,
             "session_report_delivered": False,
+            "dispatch_generation": dispatch_generation,
             "post_report_dispatches": dispatches_after_consolidated,
             "raw_text": (
                 f"dispatches={dispatches} direct_returns={direct_returns} "
@@ -884,7 +893,7 @@ class PiRpcHarness(BaseHarness):
         grace_until = None
         quiet_until = None
         finalize_granted = False
-        handled_post_report_dispatches = 0
+        handled_dispatch_generation = 0
         last_wait_announcement = 0.0
         while True:
             doneish_seen = _parent_doneish_seen(self.events)
@@ -892,13 +901,13 @@ class PiRpcHarness(BaseHarness):
             status_unavailable = isinstance(snapshot, dict) and snapshot.get("state") == "status_unavailable"
             children_cleared = self._children_cleared(snapshot)
             children_active = (snapshot is not None and not children_cleared) or status_unavailable
-            post_report_dispatches = 0
-            if isinstance(snapshot, dict) and isinstance(snapshot.get("post_report_dispatches"), (int, float)):
-                post_report_dispatches = int(snapshot["post_report_dispatches"])
-            if post_report_dispatches > handled_post_report_dispatches:
-                # A new dispatch after a consolidated report starts a new child-wait
-                # epoch; the older parent-finalization window no longer applies.
-                handled_post_report_dispatches = post_report_dispatches
+            dispatch_generation = 0
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("dispatch_generation"), (int, float)):
+                dispatch_generation = int(snapshot["dispatch_generation"])
+            if dispatch_generation > handled_dispatch_generation:
+                # A new accepted dispatch starts a new child-wait epoch; older
+                # parent-finalization windows and quiet windows no longer apply.
+                handled_dispatch_generation = dispatch_generation
                 finalize_granted = False
                 quiet_until = None
                 deadline = time.monotonic() + self._child_wait_seconds(timeout)

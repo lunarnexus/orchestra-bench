@@ -1,0 +1,33 @@
+{
+  "providers": {
+    "vllm": {
+      "baseUrl": "http://192.168.1.237:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "vllm",
+      "models": [
+        {
+          "id": "LOADED",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "xhigh",
+            "xhigh": "xhigh",
+            "max": "xhigh"
+          },
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 262144,
+          "compat": {
+            "supportsDeveloperRole": false,
+            "maxTokensField": "max_tokens"
+          }
+        }
+      ]
+    }
+  }
+}

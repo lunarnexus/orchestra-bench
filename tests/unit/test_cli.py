@@ -281,7 +281,9 @@ def test_run_help_shows_public_wrapper_modes_and_examples(capsys) -> None:
     assert "02-run --auto smoke --verbose" in output
     assert "02-run --verbose" not in output
     assert "./scripts/" not in output
-    for needle in ["bench run", "--root", "--tasks-root", "--run-id", "--role", "--catalog-label"]:
+    assert "  --role <role>           run with a role from config/orchestra/agent-catalog.yaml" in output
+    assert "  --notes <text>          store operator notes in run provenance/results" in output
+    for needle in ["bench run", "--root", "--tasks-root", "--run-id", "--catalog-label"]:
         assert needle not in output
 
 
@@ -917,6 +919,9 @@ def test_run_rejects_host_side_benchmark_runs_without_auto(monkeypatch, capsys, 
 
 def test_auto_run_routes_inside_container_and_maps_catalog(tmp_path: Path, monkeypatch, capsys, argv, expected_command) -> None:
     monkeypatch.chdir(tmp_path)
+    # The inner agent-phase run defers grading to the host; the flag is always
+    # appended by _auto_inner_argv for auto runs.
+    expected_command = [*expected_command, "--agent-phase"]
 
     calls: list[dict[str, object]] = []
 
@@ -987,6 +992,110 @@ def test_auto_run_verbose_passes_verbose_flag_to_container_exec(tmp_path: Path, 
     assert main(["run", "--auto", "alpha-run", "--verbose"]) == 0
     assert calls[1]["verbose"] is True
     assert capsys.readouterr().out == "full harness session\n"
+
+
+def test_host_initiated_grading_stages_evaluator_grades_and_removes_temp(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Host grading docker cp's the task evaluator in, grades in-container, and removes the temp."""
+    tasks_root = tmp_path / "tasks"
+    _write_task(tasks_root / "alpha", task_id="alpha")
+    run_dir = tmp_path / "results" / "20250101T010203-alpha"
+    (run_dir / "artifacts").mkdir(parents=True)
+    (run_dir / "artifacts" / "agent-phase.json").write_text(
+        json.dumps({"ready_to_grade": True, "reason": "safe_to_grade"}), encoding="utf-8"
+    )
+    (run_dir / "result.json").write_text(json.dumps({"outcome": "not_run"}), encoding="utf-8")
+
+    exec_calls: list[list[str]] = []
+    docker_calls: list[list[str]] = []
+
+    def fake_container_exec(command, **kwargs):  # type: ignore[no-untyped-def]
+        exec_calls.append(list(command))
+        if list(command)[3:4] == ["grade"]:
+            (run_dir / "result.json").write_text(json.dumps({"outcome": "pass"}), encoding="utf-8")
+        return subprocess.CompletedProcess(list(command), 0, stdout="", stderr="")
+
+    def fake_run_docker(args, **kwargs):  # type: ignore[no-untyped-def]
+        docker_calls.append(list(args))
+        return subprocess.CompletedProcess(list(args), 0, stdout="", stderr="")
+
+    staging_root = tmp_path / "staging" / "bench-eval-20250101T010203-alpha"
+    monkeypatch.setattr("bench.cli.container_exec", fake_container_exec, raising=False)
+    monkeypatch.setattr("bench.cli._run_docker", fake_run_docker, raising=False)
+    monkeypatch.setattr(
+        "bench.cli.evaluator_staging_root",
+        lambda run_id, task_id: tmp_path / "staging" / f"bench-eval-{run_id}-{task_id}",
+        raising=False,
+    )
+
+    args = SimpleNamespace(root=tmp_path, tasks_root=tasks_root, verbose=False)
+    rc = bench_cli._host_initiated_grading(args, "20250101T010203", 0)
+
+    assert rc == 0
+    assert exec_calls[0] == ["mkdir", "-p", str(staging_root)]
+    assert docker_calls == [["cp", str(tasks_root / "alpha" / "evaluate"), f"orchestra-bench-runner:{staging_root}/evaluate"]]
+    grade_call = exec_calls[1]
+    assert grade_call[:5] == ["python3", "-m", "bench.cli", "grade", "20250101T010203-alpha"]
+    assert grade_call[grade_call.index("--evaluator-dir") + 1] == str(staging_root / "evaluate")
+    assert exec_calls[2] == ["rm", "-rf", str(staging_root)]
+
+
+def test_host_initiated_grading_skips_unready_and_markerless_runs(tmp_path: Path, monkeypatch) -> None:
+    tasks_root = tmp_path / "tasks"
+    _write_task(tasks_root / "alpha", task_id="alpha")
+    _write_task(tasks_root / "beta", task_id="beta")
+    unready = tmp_path / "results" / "run-1-alpha"
+    (unready / "artifacts").mkdir(parents=True)
+    (unready / "artifacts" / "agent-phase.json").write_text(
+        json.dumps({"ready_to_grade": False, "reason": "lifecycle_failed"}), encoding="utf-8"
+    )
+    markerless = tmp_path / "results" / "run-1-beta"
+    (markerless / "artifacts").mkdir(parents=True)
+
+    exec_calls: list[list[str]] = []
+    docker_calls: list[list[str]] = []
+
+    def fake_container_exec(command, **kwargs):  # type: ignore[no-untyped-def]
+        exec_calls.append(list(command))
+        return subprocess.CompletedProcess(list(command), 0, stdout="", stderr="")
+
+    def fake_run_docker(args, **kwargs):  # type: ignore[no-untyped-def]
+        docker_calls.append(list(args))
+        return subprocess.CompletedProcess(list(args), 0, stdout="", stderr="")
+
+    monkeypatch.setattr("bench.cli.container_exec", fake_container_exec, raising=False)
+    monkeypatch.setattr("bench.cli._run_docker", fake_run_docker, raising=False)
+
+    args = SimpleNamespace(root=tmp_path, tasks_root=tasks_root, verbose=False)
+    rc = bench_cli._host_initiated_grading(args, "run-1", 1)
+
+    # Not-ready and markerless runs are never staged or graded; the agent rc wins.
+    assert rc == 1
+    assert exec_calls == []
+    assert docker_calls == []
+
+
+def test_grade_command_overrides_evaluator_with_staged_dir(tmp_path: Path, monkeypatch, capsys) -> None:
+    tasks_root = tmp_path / "tasks"
+    _write_task(tasks_root / "alpha", task_id="alpha")
+    monkeypatch.chdir(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_grade_run(task, run_paths, **kwargs):  # type: ignore[no-untyped-def]
+        captured["task"] = task
+        return TaskResult(
+            run_meta=RunMeta(run_id=run_paths.run_id, task_id=task.task_id, batch=task.batch),
+            harness=HarnessResult(status="ok", exit_code=0),
+            evaluation=EvaluationResult(status="ok", score="pass"),
+            outcome="pass",
+        )
+
+    monkeypatch.setattr("bench.cli.grade_run", fake_grade_run, raising=False)
+    staged_dir = tmp_path / "staged-eval"
+    staged_dir.mkdir()
+
+    assert main(["grade", "20250101T010203-alpha", "--tasks-root", str(tasks_root), "--evaluator-dir", str(staged_dir)]) == 0
+    assert captured["task"].evaluate_path == staged_dir
+    assert json.loads(capsys.readouterr().out)["outcome"] == "pass"
 
 
 def test_auto_run_rejects_ambiguous_task_and_suite_targets(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1161,6 +1270,8 @@ def test_auto_run_propagates_synced_runtime_summary_into_run_path(tmp_path: Path
 
 def test_auto_run_inside_container_no_orchestra_disables_tools_default(tmp_path: Path, monkeypatch) -> None:
     args = SimpleNamespace(
+        root=tmp_path,
+        tasks_root=tmp_path / "tasks",
         run_id="run-1",
         task_id="alpha-run",
         role=None,

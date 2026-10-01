@@ -343,6 +343,7 @@ def _make_request(
     prompt = prepared.task.prompt_path.read_text(encoding="utf-8")
     if provenance.get("auto") is True and provenance.get("no_orchestra") is True:
         prompt = prompt.replace("Dispatch and proceed until finished.", "Proceed until finished.")
+        prompt = prompt.replace("Dispatch and execute the plan.", "proceed with the PLAN.md until finished.")
     if provenance.get("auto") is True:
         prompt = prompt.rstrip() + (
             "\n\nBenchmark completion protocol:\n"
@@ -367,8 +368,31 @@ def _make_request(
     )
 
 
+def _harness_failure_classification(harness: HarnessResult) -> str:
+    if harness.status == "ok":
+        return ""
+    details = harness.details if isinstance(harness.details, dict) else {}
+    settle_status = str(details.get("last_settle_status") or "").strip()
+    error = str(harness.error or "").lower()
+    if settle_status in {"timeout", "children_active_timeout", "parent_not_done"} or "timeout" in error:
+        return "harness_timeout"
+    if settle_status in {"missing_settled", "authoritative_status_unavailable"}:
+        return "harness_protocol"
+    if "runtime error" in error:
+        return "runtime_error"
+    return "lifecycle_failure"
+
+
 def _partial_result(prepared: PreparedRun, request: HarnessRequest, harness: HarnessResult) -> TaskResult:
     details = _result_details(prepared, request)
+    failure_class = _harness_failure_classification(harness)
+    if failure_class:
+        details["failure_classification"] = {
+            "scope": "harness",
+            "class": failure_class,
+            "message": harness.error,
+            "last_settle_status": (harness.details if isinstance(harness.details, dict) else {}).get("last_settle_status"),
+        }
     run_meta = RunMeta(
         run_id=prepared.run_paths.run_id,
         task_id=prepared.task.task_id,
@@ -381,6 +405,7 @@ def _partial_result(prepared: PreparedRun, request: HarnessRequest, harness: Har
         harness=harness,
         evaluation=EvaluationResult(status="not_run"),
         outcome="error" if harness.status != "ok" else "not_run",
+        reliability={"failure_class": failure_class, "failure_scope": "harness"} if failure_class else {},
         details=details,
     )
 
@@ -635,6 +660,15 @@ def _lifecycle_failure_is_stable(result: TaskResult, harness: Harness, prepared:
     return True
 
 
+def _write_agent_phase_marker(run_paths: RunPaths, *, ready: bool, reason: str) -> None:
+    """Record whether the agent phase finished in a state the host may grade.
+
+    The host reads this marker after the in-container agent phase to decide
+    whether to stage the evaluator and initiate grading.
+    """
+    _write_json_atomic(run_paths.artifacts_dir / "agent-phase.json", {"ready_to_grade": ready, "reason": reason})
+
+
 def run_and_grade(
     task: TaskDefinition,
     harness: Harness,
@@ -662,6 +696,7 @@ def run_and_grade(
     request_metadata: Mapping[str, Any] | None = None,
     no_orchestra: bool | None = None,
     orchestra_tools_available: bool | None = None,
+    defer_grading: bool = False,
 ) -> TaskResult:
     prepared = prepared or prepare_run(
         task,
@@ -699,7 +734,12 @@ def run_and_grade(
             # Stable workspace despite the lifecycle failure (e.g. parent completion
             # timeout with no active children): still grade it; the lifecycle failure
             # metadata stays intact on result.harness.
+            if defer_grading:
+                _write_agent_phase_marker(prepared.run_paths, ready=True, reason="stable_lifecycle_failure")
+                return result
             return grade_run(task, prepared.run_paths, runner=runner, prior_result=result)
+        if defer_grading:
+            _write_agent_phase_marker(prepared.run_paths, ready=False, reason=str(result.harness.error or "lifecycle_failed"))
         return result
     effective_auto = auto if auto is not None else bool(prepared.provenance.get("auto"))
     effective_orchestra = orchestra if orchestra is not None else bool(prepared.provenance.get("orchestra"))
@@ -744,7 +784,14 @@ def run_and_grade(
         _attach_auto_gate(result, gate_result)
         write_json_atomic(prepared.run_paths.result_json, result)
         if not gate_result.safe_to_grade:
+            if defer_grading:
+                _write_agent_phase_marker(prepared.run_paths, ready=False, reason=str(gate_result.reason))
             return result
+    if defer_grading:
+        # Agent/harness phase only: the host stages the evaluator and initiates
+        # grading after this in-container process exits.
+        _write_agent_phase_marker(prepared.run_paths, ready=True, reason="safe_to_grade")
+        return result
     return grade_run(task, prepared.run_paths, runner=runner, prior_result=prepared.prior_result)
 
 

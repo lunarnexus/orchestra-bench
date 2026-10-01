@@ -1,13 +1,13 @@
 default_role: intern
 model_limits:
-  lmstudio/llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved:
+  "lmstudio/llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved":
     concurrency: 2
-  lmstudio/llmfan46/qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved:
+  "lmstudio/llmfan46/qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved":
     concurrency: 2
-  lmstudio/qwen/qwen3.8-27b:
+  "lmstudio/qwen/qwen3.8-27b":
     concurrency: 1
-  lmstudio/LOADED:
-    concurrency: 1
+  "vllm/LOADED":
+    concurrency: 3
 harness_configs:
   pi:
     harness: pi
@@ -42,7 +42,8 @@ roles:
     - planner
   planner:
     harness_config: pi
-    model: openai-codex/gpt-5.5
+    model: "openai-codex/gpt-5.5"
+    pass_parent_context: true
     skills:
     - planner
     dispatch_hint: Plan the work. Ask numbered questions for unknowns. May dispatch
@@ -57,7 +58,8 @@ roles:
     nested_dispatch_depth: 2
   researcher:
     harness_config: pi
-    model: lmstudio/ornith-1.5-35b-a3b
+    model: "vllm/LOADED"
+    pass_parent_context: true
     dispatch_hint: Gather evidence with sources from docs, web, or code. Do not
       change code. Update only the explicitly assigned RESEARCH.md section when requested. Return
       the compact schema only.
@@ -71,7 +73,8 @@ roles:
     - researcher
   builder:
     harness_config: pi
-    model: lmstudio/ornith-1.5-35b-a3b
+    model: "vllm/LOADED"
+    pass_parent_context: true
     skills:
     - builder
     dispatch_hint: Implement the assigned task only. Stay in scope. Run focused
@@ -85,7 +88,8 @@ roles:
       HINDSIGHT4PI_AUTO_RECALL: '0'
   verifier:
     harness_config: pi
-    model: lmstudio/LOADED
+    model: "vllm/LOADED"
+    pass_parent_context: true
     skills:
     - verifier
     dispatch_hint: Independently prove whether the work satisfies its scope and
@@ -99,7 +103,8 @@ roles:
       HINDSIGHT4PI_AUTO_RECALL: '0'
   reviewer:
     harness_config: pi
-    model: lmstudio/ornith-1.5-35b-a3b
+    model: "vllm/LOADED"
+    pass_parent_context: true
     skills:
     - reviewer
     dispatch_hint: Independently review whether the change is correct, maintainable,
@@ -113,7 +118,8 @@ roles:
       HINDSIGHT4PI_AUTO_RECALL: '0'
   appsec:
     harness_config: pi
-    model: lmstudio/ornith-1.5-35b-a3b
+    model: "vllm/LOADED"
+    pass_parent_context: true
     skills:
     - appsec
     dispatch_hint: Independently identify realistic vulnerabilities across changed
@@ -126,7 +132,8 @@ roles:
       HINDSIGHT4PI_AUTO_RECALL: '0'
   intern:
     harness_config: pi
-    model: lmstudio/ornith-1.5-35b-a3b
+    model: "vllm/LOADED"
+    pass_parent_context: true
     dispatch_hint: Focus on the assigned task and return a compact result.
     enabled_workflow_hint: Use the intern role for any task that doesn't require special skills, generic testing, lightweight tasks.
     enabled: true
@@ -136,6 +143,7 @@ roles:
   critic:
     harness_config: hermes
     profile: mina
+    pass_parent_context: true
     dispatch_hint: Focus on the assigned task and return a compact result.
     enabled: false
     env:

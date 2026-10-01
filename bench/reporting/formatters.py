@@ -78,6 +78,26 @@ def _result_versions(entries: Iterable[ReportEntry]) -> Counter[str]:
     return Counter(_entry_bench_version(entry) for entry in entries)
 
 
+def _entry_orchestra_runtime_version(entry: ReportEntry) -> str:
+    provenance = entry.provenance if isinstance(entry.provenance, dict) else {}
+    version = str(provenance.get("orchestra_runtime_version") or "").strip()
+    return version
+
+
+def _orchestra_runtime_versions(entries: Iterable[ReportEntry]) -> Counter[str]:
+    return Counter(version for entry in entries if (version := _entry_orchestra_runtime_version(entry)))
+
+
+def _orchestra_runtime_version_line(entries: Iterable[ReportEntry]) -> str | None:
+    counts = _orchestra_runtime_versions(entries)
+    if not counts:
+        return None
+    if len(counts) == 1:
+        return _format_label("version", next(iter(counts)))
+    parts = [f"{version} x{count}" for version, count in sorted(counts.items())]
+    return _format_label("versions", ", ".join(parts))
+
+
 def _versioned_title(view: str, entries: Iterable[ReportEntry]) -> str:
     counts = _result_versions(entries)
     if not counts:
@@ -619,6 +639,7 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
         reason_lines.append(_reason_line("rejects", _honest_rejection_counts(reject_reasons)))
     if child_fail_reasons:
         reason_lines.append(_reason_line("child fails", child_fail_reasons))
+    orchestra_version_line = _orchestra_runtime_version_line(rows)
 
     usage_rows: list[tuple[str, str]] = []
     for bucket in ("all", "main", "children"):
@@ -664,6 +685,7 @@ def format_dashboard(entries: Iterable[ReportEntry]) -> str:
             *_usage_lines(usage_rows),
             "",
             "=== orchestra ===",
+            *([orchestra_version_line] if orchestra_version_line else []),
             _format_label("dispatches", f"attempts={_fmt_decimal(dispatch_attempts)} accepted={_fmt_decimal(dispatch_accepted)} rejected={_fmt_decimal(dispatch_rejected)}"),
             _format_label("children", f"completed={_fmt_decimal(child_completed)} failed={_fmt_decimal(child_failed)} timed_out={_fmt_decimal(child_timed_out)} reconciled={_fmt_decimal(child_reconciled)} active={_fmt_decimal(child_active)} inferred_active={_fmt_decimal(child_inferred_active)}"),
             *reason_lines,

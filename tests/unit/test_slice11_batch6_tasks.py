@@ -65,7 +65,7 @@ def test_capability_normal_task_metadata_declares_numeric_scoring(task_id: str) 
     assert task_yaml["batch"] == "capability-normal"
     assert task_yaml["required_roles"] == ["builder", "verifier"]
     assert task_yaml["scoring_type"] == "numeric"
-    assert task_yaml["timeout_minutes"] == 35
+    assert task_yaml["timeout_minutes"] == 45
     assert task_yaml["evaluator"] == "evaluate/run.sh"
     assert task_yaml["split"] == "dev"
 

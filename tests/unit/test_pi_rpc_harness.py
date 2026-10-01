@@ -727,6 +727,27 @@ def test_parent_doneish_before_later_dispatch_does_not_count_as_final_completion
     assert _parent_doneish_seen(events) is False
 
 
+def test_accepted_dispatch_count_is_monotonic_across_report_epochs() -> None:
+    from bench.harnesses.pi_rpc import _accepted_dispatch_count
+
+    events = [
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 1 subagents returned]"}]},
+        },
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 1 subagents returned]"}]},
+        },
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": True},
+    ]
+
+    assert _accepted_dispatch_count(events) == 3
+
+
 def test_status_provider_invalidates_consolidated_return_after_later_dispatch(tmp_path: Path) -> None:
     from bench.harnesses.pi_rpc import PiRpcHarness
 
@@ -841,6 +862,64 @@ def test_run_quiet_window_catches_dispatch_after_apparent_completion(
 
     assert result.status == "lifecycle_failed"
     assert result.details["last_settle_status"] == "authoritative_status_unavailable"
+
+
+def test_run_refreshes_child_wait_for_repeated_post_report_dispatch_epochs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    monkeypatch.setenv("BENCH_AUTO_CHILD_WAIT_SECONDS", "0.25")
+    monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
+    monkeypatch.setenv("BENCH_PARENT_FINALIZE_WINDOW_SECONDS", "0")
+    monkeypatch.setenv("BENCH_ORCHESTRA_QUIET_SECONDS", "0")
+
+    def on_send(process: _FakeJsonlProcess, command: dict[str, object]) -> None:
+        if command.get("type") == "get_state":
+            process.chunks.append('{"type":"response","command":"get_state","success":true,"data":{"sessionId":"sess-1"}}\n')
+            return
+        if command.get("type") != "prompt":
+            return
+        process.chunks.extend(
+            [
+                '{"type":"response","command":"prompt","success":true}\n',
+                '{"type":"agent_start","message":"boot"}\n',
+                '{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n',
+                '{"type":"agent_settled","message":"parent settled after first dispatch"}\n',
+            ]
+        )
+
+    consolidated = json.dumps(
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 1 subagents returned]"}]},
+        }
+    )
+    process = _GatedJsonlProcess(
+        gates=[
+            (0.05, [consolidated + "\n"]),
+            (0.10, ['{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n']),
+            (0.15, [consolidated + "\n"]),
+            (0.30, ['{"type":"tool_execution_end","toolName":"orch_dispatch","isError":false}\n']),
+            (
+                0.45,
+                [
+                    consolidated + "\n",
+                    '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BENCH_PARENT_DONE"}]}}\n',
+                    '{"type":"agent_settled","message":"final settled"}\n',
+                ],
+            ),
+        ]
+    )
+    process.on_send = lambda command: on_send(process, command)
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+    request = _request(tmp_path / "repeated-dispatch-refresh", timeout_seconds=2.0)
+
+    result = harness.run(request)
+
+    assert result.status == "ok"
+    assert result.details["last_settle_status"] == "settled"
 
 
 def test_run_grants_parent_finalize_window_when_consolidated_report_arrives_near_child_deadline(
@@ -1064,6 +1143,42 @@ def test_orchestra_status_cli_uses_supported_status_args(tmp_path: Path, monkeyp
     assert command[-3:] == ["--session-id", "pi:sess-1", "--json"]
     assert snapshot is not None
     assert snapshot["state"] == "settled"
+
+
+def test_orchestra_status_cli_snapshot_includes_dispatch_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bench.harnesses.pi_rpc import PiRpcHarness
+
+    harness = PiRpcHarness(["pi"])
+    harness._state["sessionId"] = "sess-1"
+    monkeypatch.setattr(
+        harness,
+        "_status_from_orchestra_cli",
+        lambda session_id: {
+            "state": "running",
+            "parsed": True,
+            "active_runs": 1,
+            "descendants_terminal": False,
+            "session_report_available": True,
+            "session_report_delivered": False,
+            "raw_text": '{"active_runs":1}',
+        },
+    )
+    harness.events = [
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+        {
+            "type": "message",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[orchestra: 1 subagents returned]"}]},
+        },
+        {"type": "tool_execution_end", "toolName": "orch_dispatch", "isError": False},
+    ]
+
+    snapshot = harness._orchestra_status_snapshot()
+
+    assert snapshot is not None
+    assert snapshot["state"] == "running"
+    assert snapshot["active_runs"] == 1
+    assert snapshot["dispatch_generation"] == 2
+    assert harness._children_cleared(snapshot) is False
 
 
 def test_orchestra_status_preserves_authoritative_cli_despite_direct_returns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

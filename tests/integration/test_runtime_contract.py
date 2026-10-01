@@ -42,6 +42,7 @@ def test_static_runtime_contract_files_encode_thin_entrypoint_and_image_contract
     assert "COPY bench/ /opt/orchestra-bench/bench/" in dockerfile
     assert "ENV PYTHONPATH=/opt/orchestra-bench" in dockerfile
     assert "BENCH_TASKS=/bench/task-materials-source" in dockerfile
+    assert "BENCH_EVALUATOR_TASKS" not in dockerfile
     assert "BENCH_ORCHESTRA_EXTENSION_SRC=/bench/orchestra-extension" in dockerfile
     assert "PI_CODING_AGENT_DIR=/workspace/.pi/agent" not in dockerfile
     assert "PI_ORCHESTRA_RUNTIME_DIR=/workspace/.pi/agent/orchestra" not in dockerfile
@@ -53,7 +54,7 @@ def test_static_runtime_contract_files_encode_thin_entrypoint_and_image_contract
     assert (REPO_ROOT / "config" / "pi" / "settings.json").is_file()
     assert (REPO_ROOT / "config" / "skills").is_dir()
     assert "pkg-config" in dockerfile
-    assert "python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn pytest httpx django pyyaml" in dockerfile
+    assert "python3 -m pip install --break-system-packages --no-cache-dir fastapi uvicorn python-multipart pytest httpx django pyyaml" in dockerfile
     assert "python3 -m pip install -e \"/opt/orchestra/src[dev]\"" in dockerfile
     assert '"orchestra", "init", "pi", "--copy", "--force"' in runtime
     assert "agent-catalog.yaml" in runtime
@@ -367,6 +368,8 @@ def test_init_runtime_overlays_regular_config_directories_and_records_provenance
 
 
 def test_init_runtime_mirrors_run_scoped_pi_config_without_clobbering_existing_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as _sp
+
     orchestra_src = tmp_path / "orchestra-config"
     pi_src = tmp_path / "pi-config"
     skills = tmp_path / "skills"
@@ -380,6 +383,23 @@ def test_init_runtime_mirrors_run_scoped_pi_config_without_clobbering_existing_s
 
     for path in (orchestra_src, pi_src, skills, bin_dir, mirrored_pi_runtime):
         path.mkdir(parents=True, exist_ok=True)
+
+    # In-container sync defaults to the `test` branch; mirror the real container
+    # by pointing ORCHESTRA_HOME at a checkout and no-oping git/pip.
+    orch_home = tmp_path / "orchestra-home"
+    orch_src = orch_home / "src"
+    (orch_src / ".git").mkdir(parents=True)
+    (orch_src / "extensions" / "pi" / "orchestra").mkdir(parents=True)
+
+    def fake_git(cwd: Path, *args: str) -> _sp.CompletedProcess[str]:  # type: ignore[no-untyped-def]
+        return _sp.CompletedProcess(args=["git", *args], returncode=0, stdout="", stderr="")
+
+    def fake_pip_install_editable(src_path: Path) -> _sp.CompletedProcess[str]:
+        return _sp.CompletedProcess(args=["pip", "install", "-e", str(src_path)], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("bench.runtime._git", fake_git)
+    monkeypatch.setattr("bench.runtime._pip_install_editable", fake_pip_install_editable)
+    monkeypatch.setenv("ORCHESTRA_HOME", str(orch_home))
 
     (orchestra_src / "agent-catalog.yaml").write_text("default_role: builder\n")
     (pi_src / "settings.json").write_text('{"enableInstallTelemetry": false}\n')
@@ -431,6 +451,261 @@ def test_init_runtime_mirrors_run_scoped_pi_config_without_clobbering_existing_s
     assert (pi_runtime / "lmstudio.json").read_text(encoding="utf-8") == '{"url": "http://localhost:1234"}\n'
     assert (pi_runtime / "settings.json").read_text(encoding="utf-8") == '{\n  "enableInstallTelemetry": false\n}\n'
     assert (pi_runtime / "orchestra" / "agent-catalog.yaml").read_text(encoding="utf-8") == "default_role: builder\n"
+
+
+def test_init_runtime_applies_orchestra_ref_before_init_and_records_provenance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as _sp
+
+    def git(*args: str, cwd: Path | None = None) -> None:
+        _sp.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+    # A real git checkout under a temp ORCHESTRA_HOME so the ref switch is real.
+    orch_home = tmp_path / "orchestra"
+    src = orch_home / "src"
+    ext = src / "extensions" / "pi" / "orchestra"
+    ext.mkdir(parents=True)
+    (ext / "index.ts").write_text('ctx.ui.setStatus("orchestra", "checkout-ext")\n', encoding="utf-8")
+    (src / "README.md").write_text("orchestra\n", encoding="utf-8")
+    origin = tmp_path / "origin.git"
+    _sp.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True, text=True)
+    git("init", "-b", "main", cwd=src)
+    git("config", "user.email", "t@t", cwd=src)
+    git("config", "user.name", "t", cwd=src)
+    git("remote", "add", "origin", str(origin), cwd=src)
+    (src / "marker.txt").write_text("v1\n", encoding="utf-8")
+    git("add", "-A", cwd=src)
+    git("commit", "-m", "base", cwd=src)
+    git("push", "origin", "main", cwd=src)
+    git("checkout", "-b", "feature-branch", cwd=src)
+    (src / "marker.txt").write_text("v2\n", encoding="utf-8")
+    git("add", "-A", cwd=src)
+    git("commit", "-m", "feature", cwd=src)
+    git("push", "origin", "feature-branch", cwd=src)
+    # Start on main (marker=v1) so the ref switch to feature-branch (v2) is observable.
+    git("checkout", "main", cwd=src)
+
+    # A host-mounted extension that must NOT be used when a ref is configured.
+    host_ext = tmp_path / "host-orchestra-extension"
+    host_ext.mkdir()
+    (host_ext / "index.ts").write_text('ctx.ui.setStatus("orchestra", "host-ext")\n', encoding="utf-8")
+
+    orch_config = tmp_path / "orchestra-config"
+    skills = tmp_path / "skills"
+    orch_config.mkdir()
+    skills.mkdir()
+    (orch_config / "agent-catalog.yaml").write_text("default_role: builder\n", encoding="utf-8")
+    (skills / "builder.md").write_text("skill\n", encoding="utf-8")
+    home_dir = tmp_path / "home" / "run"
+    pi_runtime = home_dir / ".pi" / "agent"
+    runtime_dir = pi_runtime / "orchestra"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "orchestra.log"
+    marker_at_init = tmp_path / "orchestra-marker-at-init"
+
+    # Fake orchestra records the checkout marker at the moment `init` runs so the
+    # test can prove the ref checkout happened before `orchestra init`.
+    _write_executable(
+        bin_dir / "orchestra",
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        'printf \'%s\\n\' "$*" >> "$ORCHESTRA_LOG"\n'
+        'if [ "${1:-}" = "init" ]; then cp "$ORCHESTRA_MARKER" "$ORCHESTRA_MARKER_AT_INIT"; fi\n',
+    )
+
+    def fake_pip_install_editable(src_path: Path) -> _sp.CompletedProcess[str]:
+        return _sp.CompletedProcess(args=["pip", "install", "-e", str(src_path)], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("bench.runtime._pip_install_editable", fake_pip_install_editable)
+    monkeypatch.setenv("ORCHESTRA_HOME", str(orch_home))
+    monkeypatch.setenv("BENCH_ORCHESTRA_REF", "feature-branch")
+    monkeypatch.setenv("BENCH_ORCHESTRA_EXTENSION_SRC", str(host_ext))
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("ORCHESTRA_LOG", str(log))
+    monkeypatch.setenv("ORCHESTRA_MARKER", str(src / "marker.txt"))
+    monkeypatch.setenv("ORCHESTRA_MARKER_AT_INIT", str(marker_at_init))
+
+    lmstudio_source = tmp_path / "config" / "pi" / "lmstudio.json"
+    runtime = RuntimeEnvironment(
+        tasks_root=tmp_path / "tasks",
+        results_root=tmp_path / "results",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_root=tmp_path / "workspace",
+        orchestra_config_src=orch_config,
+        lmstudio_config_src=lmstudio_source,
+        pi_skills_src=skills,
+        home_dir=home_dir,
+        orchestra_runtime_dir=runtime_dir,
+        lmstudio_runtime_file=pi_runtime / "lmstudio.json",
+        hermes_runtime_dir=tmp_path / "hermes",
+        opencode_runtime_dir=tmp_path / "opencode",
+        run_id="run",
+    )
+    lmstudio_source.parent.mkdir(parents=True, exist_ok=True)
+    lmstudio_source.write_text('{"url": "http://localhost:1234"}\n', encoding="utf-8")
+
+    summary = init_runtime(runtime)
+
+    # Ordering: the checkout (marker=v2) was already applied when `orchestra init` ran.
+    assert (src / "marker.txt").read_text(encoding="utf-8") == "v2\n"
+    assert marker_at_init.read_text(encoding="utf-8") == "v2\n"
+    assert "init pi --copy --force" in log.read_text(encoding="utf-8").splitlines()
+    # Extension alignment: the runtime extension came from the checkout, not the host mount.
+    ext_text = (pi_runtime / "extensions" / "orchestra" / "index.ts").read_text(encoding="utf-8")
+    assert "checkout-ext" in ext_text
+    assert "host-ext" not in ext_text
+    # Metadata: requested ref, branch, SHA, dirty state recorded.
+    provenance = summary["orchestra_provenance"]
+    assert provenance["orchestra_requested_ref"] == "feature-branch"
+    assert provenance["orchestra_branch"] == "feature-branch"
+    assert provenance["orchestra_dirty"] is False
+    assert provenance["orchestra_sha"]
+    assert provenance["orchestra_source_dir"] == str(src)
+    # Provenance is persisted for run metadata.
+    record = json.loads((tmp_path / "artifacts" / "runtime-config-sync.json").read_text(encoding="utf-8"))
+    assert record["orchestra_provenance"]["orchestra_requested_ref"] == "feature-branch"
+
+
+def test_init_runtime_without_ref_leaves_checkout_and_uses_configured_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    orch_config = tmp_path / "orchestra-config"
+    ext_source = tmp_path / "orchestra-extension-src"
+    skills = tmp_path / "skills"
+    orch_config.mkdir()
+    ext_source.mkdir()
+    skills.mkdir()
+    (orch_config / "agent-catalog.yaml").write_text("default_role: builder\n", encoding="utf-8")
+    (ext_source / "index.ts").write_text('ctx.ui.setStatus("orchestra", "configured-ext")\n', encoding="utf-8")
+    (skills / "builder.md").write_text("skill\n", encoding="utf-8")
+    home_dir = tmp_path / "home" / "run"
+    pi_runtime = home_dir / ".pi" / "agent"
+    runtime_dir = pi_runtime / "orchestra"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "orchestra.log"
+    _write_executable(
+        bin_dir / "orchestra",
+        "#!/usr/bin/env bash\nset -eu\nprintf '%s\\n' \"$*\" >> \"$ORCHESTRA_LOG\"\n",
+    )
+
+    git_calls: list[str] = []
+
+    def fake_git(cwd: Path, *args: str) -> _sp.CompletedProcess[str]:  # type: ignore[no-untyped-def]
+        git_calls.append(" ".join(args))
+        return _sp.CompletedProcess(args=["git", *args], returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr("bench.runtime._git", fake_git)
+    monkeypatch.delenv("BENCH_ORCHESTRA_REF", raising=False)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("ORCHESTRA_LOG", str(log))
+
+    lmstudio_source = tmp_path / "config" / "pi" / "lmstudio.json"
+    runtime = RuntimeEnvironment(
+        tasks_root=tmp_path / "tasks",
+        results_root=tmp_path / "results",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_root=tmp_path / "workspace",
+        orchestra_config_src=orch_config,
+        lmstudio_config_src=lmstudio_source,
+        pi_skills_src=skills,
+        orchestra_extension_src=ext_source,
+        home_dir=home_dir,
+        orchestra_runtime_dir=runtime_dir,
+        lmstudio_runtime_file=pi_runtime / "lmstudio.json",
+        hermes_runtime_dir=tmp_path / "hermes",
+        opencode_runtime_dir=tmp_path / "opencode",
+        run_id="run",
+    )
+    lmstudio_source.parent.mkdir(parents=True, exist_ok=True)
+    lmstudio_source.write_text('{"url": "http://localhost:1234"}\n', encoding="utf-8")
+
+    summary = init_runtime(runtime)
+
+    # No ref configured: no git operations, configured extension used, empty provenance.
+    assert git_calls == []
+    assert (pi_runtime / "extensions" / "orchestra" / "index.ts").read_text(encoding="utf-8") == 'ctx.ui.setStatus("orchestra", "configured-ext")\n'
+    assert summary["orchestra_provenance"] == {}
+
+
+def test_init_runtime_in_container_defaults_to_test_branch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as _sp
+
+    orch_home = tmp_path / "orchestra"
+    src = orch_home / "src"
+    (src / ".git").mkdir(parents=True)
+    ext = src / "extensions" / "pi" / "orchestra"
+    ext.mkdir(parents=True)
+    (ext / "index.ts").write_text('ctx.ui.setStatus("orchestra", "checkout-ext")\n', encoding="utf-8")
+
+    host_ext = tmp_path / "host-orchestra-extension"
+    host_ext.mkdir()
+    (host_ext / "index.ts").write_text('ctx.ui.setStatus("orchestra", "host-ext")\n', encoding="utf-8")
+
+    orch_config = tmp_path / "orchestra-config"
+    skills = tmp_path / "skills"
+    orch_config.mkdir()
+    skills.mkdir()
+    (orch_config / "agent-catalog.yaml").write_text("default_role: builder\n", encoding="utf-8")
+    (skills / "builder.md").write_text("skill\n", encoding="utf-8")
+    home_dir = tmp_path / "home" / "run"
+    pi_runtime = home_dir / ".pi" / "agent"
+    runtime_dir = pi_runtime / "orchestra"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "orchestra.log"
+    _write_executable(
+        bin_dir / "orchestra",
+        "#!/usr/bin/env bash\nset -eu\nprintf '%s\\n' \"$*\" >> \"$ORCHESTRA_LOG\"\n",
+    )
+
+    git_calls: list[str] = []
+
+    def fake_git(cwd: Path, *args: str) -> _sp.CompletedProcess[str]:  # type: ignore[no-untyped-def]
+        git_calls.append(" ".join(args))
+        return _sp.CompletedProcess(args=["git", *args], returncode=0, stdout="", stderr="")
+
+    def fake_pip_install_editable(src_path: Path) -> _sp.CompletedProcess[str]:
+        return _sp.CompletedProcess(args=["pip", "install", "-e", str(src_path)], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("bench.runtime._git", fake_git)
+    monkeypatch.setattr("bench.runtime._pip_install_editable", fake_pip_install_editable)
+    monkeypatch.setenv("ORCHESTRA_HOME", str(orch_home))
+    monkeypatch.delenv("BENCH_ORCHESTRA_REF", raising=False)
+    monkeypatch.setenv("BENCH_IN_CONTAINER", "1")
+    monkeypatch.setenv("BENCH_ORCHESTRA_EXTENSION_SRC", str(host_ext))
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("ORCHESTRA_LOG", str(log))
+
+    lmstudio_source = tmp_path / "config" / "pi" / "lmstudio.json"
+    runtime = RuntimeEnvironment(
+        tasks_root=tmp_path / "tasks",
+        results_root=tmp_path / "results",
+        artifacts_root=tmp_path / "artifacts",
+        workspace_root=tmp_path / "workspace",
+        orchestra_config_src=orch_config,
+        lmstudio_config_src=lmstudio_source,
+        pi_skills_src=skills,
+        home_dir=home_dir,
+        orchestra_runtime_dir=runtime_dir,
+        lmstudio_runtime_file=pi_runtime / "lmstudio.json",
+        hermes_runtime_dir=tmp_path / "hermes",
+        opencode_runtime_dir=tmp_path / "opencode",
+        run_id="run",
+    )
+    lmstudio_source.parent.mkdir(parents=True, exist_ok=True)
+    lmstudio_source.write_text('{"url": "http://localhost:1234"}\n', encoding="utf-8")
+
+    summary = init_runtime(runtime)
+
+    # No override set: in-container sync defaults to the `test` branch.
+    assert "fetch origin" in git_calls
+    assert "checkout --force test" in git_calls
+    # Extension comes from the same checkout, not the host mount.
+    ext_text = (pi_runtime / "extensions" / "orchestra" / "index.ts").read_text(encoding="utf-8")
+    assert "checkout-ext" in ext_text
+    assert "host-ext" not in ext_text
+    provenance = summary["orchestra_provenance"]
+    assert provenance["orchestra_requested_ref"] == "test"
+    assert provenance["orchestra_source_dir"] == str(src)
 
 
 def test_init_runtime_command_prints_json_summary_for_host_passthrough(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -783,10 +1058,14 @@ def test_start_container_creates_fresh_with_v2_mounts(tmp_path: Path, monkeypatc
         f"{root / 'config' / 'hermes'}:/bench/hermes:ro",
         f"{root / 'config' / 'opencode'}:/bench/opencode:ro",
         f"{root / 'config' / 'skills'}:/bench/skills:ro",
-        f"{root / 'tasks'}:/bench/task-materials-source:ro",
+        f"{root / 'visible-tasks'}:/bench/task-materials-source:ro",
     ]
     for expected in expected_mounts:
         assert "-v" in mounts and expected in mounts
+    # The evaluator is never mounted into the container; it is docker cp'd into
+    # a run-scoped temp dir only during host-initiated grading.
+    assert not any("/bench/evaluator-tasks" in token for token in mounts)
+    assert not any(token.startswith(f"{root / 'tasks'}:") for token in mounts)
     assert all("V1/tasks" not in token for token in mounts)
     assert (root / "results").is_dir()
     assert (root / "artifacts").is_dir()
@@ -871,6 +1150,7 @@ def test_prepare_startup_builds_recreates_and_syncs_in_order(tmp_path: Path, mon
             "pi_runtime_dir": "/workspace/.pi/home/20250101T010203/.pi/agent",
             "orchestra_runtime_dir": "/workspace/.pi/home/20250101T010203/.pi/agent/orchestra",
         },
+        "orchestra": None,
     }
 
 

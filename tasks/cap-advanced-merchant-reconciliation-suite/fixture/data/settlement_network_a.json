@@ -1,0 +1,297 @@
+{
+  "source": "settlements",
+  "network": "network_a",
+  "batch_id": "NETA-2026-01",
+  "records": [
+    {
+      "record_id": "S-A-0001",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5001",
+      "original_transaction_id": null,
+      "amount": 10.0,
+      "currency": "USD",
+      "settled_on": "2026-01-06"
+    },
+    {
+      "record_id": "S-A-0002",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5004",
+      "original_transaction_id": null,
+      "amount": 121.0,
+      "currency": "USD",
+      "settled_on": "2026-01-09"
+    },
+    {
+      "record_id": "S-A-0003",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5007",
+      "original_transaction_id": null,
+      "amount": 232.0,
+      "currency": "USD",
+      "settled_on": "2026-01-12"
+    },
+    {
+      "record_id": "S-A-0004",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5010",
+      "original_transaction_id": null,
+      "amount": 343.0,
+      "currency": "USD",
+      "settled_on": "2026-01-07"
+    },
+    {
+      "record_id": "S-A-0005",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5013",
+      "original_transaction_id": null,
+      "amount": 454.0,
+      "currency": "USD",
+      "settled_on": "2026-01-10"
+    },
+    {
+      "record_id": "S-A-0006",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5016",
+      "original_transaction_id": null,
+      "amount": 565.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0007",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5019",
+      "original_transaction_id": null,
+      "amount": 676.0,
+      "currency": "USD",
+      "settled_on": "2026-01-08"
+    },
+    {
+      "record_id": "S-A-0008",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5022",
+      "original_transaction_id": null,
+      "amount": 787.0,
+      "currency": "USD",
+      "settled_on": "2026-01-11"
+    },
+    {
+      "record_id": "S-A-0009",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5025",
+      "original_transaction_id": null,
+      "amount": 898.0,
+      "currency": "USD",
+      "settled_on": "2026-01-06"
+    },
+    {
+      "record_id": "S-A-0010",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5028",
+      "original_transaction_id": null,
+      "amount": 109.0,
+      "currency": "USD",
+      "settled_on": "2026-01-09"
+    },
+    {
+      "record_id": "S-A-0011",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5031",
+      "original_transaction_id": null,
+      "amount": 220.0,
+      "currency": "USD",
+      "settled_on": "2026-01-12"
+    },
+    {
+      "record_id": "S-A-0012",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5034",
+      "original_transaction_id": null,
+      "amount": 331.0,
+      "currency": "USD",
+      "settled_on": "2026-01-07"
+    },
+    {
+      "record_id": "S-A-0013",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5037",
+      "original_transaction_id": null,
+      "amount": 442.0,
+      "currency": "USD",
+      "settled_on": "2026-01-10"
+    },
+    {
+      "record_id": "S-A-0014",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5040",
+      "original_transaction_id": null,
+      "amount": 553.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0015",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5043",
+      "original_transaction_id": null,
+      "amount": 664.0,
+      "currency": "USD",
+      "settled_on": "2026-01-08"
+    },
+    {
+      "record_id": "S-A-0016",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5046",
+      "original_transaction_id": null,
+      "amount": 775.0,
+      "currency": "USD",
+      "settled_on": "2026-01-11"
+    },
+    {
+      "record_id": "S-A-0017",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5049",
+      "original_transaction_id": null,
+      "amount": 886.0,
+      "currency": "USD",
+      "settled_on": "2026-01-06"
+    },
+    {
+      "record_id": "S-A-0018",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5052",
+      "original_transaction_id": null,
+      "amount": 97.0,
+      "currency": "USD",
+      "settled_on": "2026-01-09"
+    },
+    {
+      "record_id": "S-A-0019",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5055",
+      "original_transaction_id": null,
+      "amount": 208.0,
+      "currency": "USD",
+      "settled_on": "2026-01-12"
+    },
+    {
+      "record_id": "S-A-0020",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-5058",
+      "original_transaction_id": null,
+      "amount": 319.0,
+      "currency": "USD",
+      "settled_on": "2026-01-07"
+    },
+    {
+      "record_id": "S-A-0061",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-1001",
+      "original_transaction_id": null,
+      "amount": 100.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0062",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-1002",
+      "original_transaction_id": null,
+      "amount": 50.01,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0063",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-2001",
+      "original_transaction_id": null,
+      "amount": 1000.99,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0064",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-4001",
+      "original_transaction_id": null,
+      "amount": 75.0,
+      "currency": "EUR",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0065",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-7001",
+      "original_transaction_id": null,
+      "amount": 10.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0066",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-6001",
+      "original_transaction_id": null,
+      "amount": 60.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0067",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "SETTLE-RF-1",
+      "original_transaction_id": "TX-1001",
+      "amount": -40.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0068",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "SETTLE-RF-2",
+      "original_transaction_id": "TX-9999",
+      "amount": -15.0,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    },
+    {
+      "record_id": "S-A-0069",
+      "batch_id": "NETA-2026-01",
+      "network": "network_a",
+      "transaction_id": "TX-1201",
+      "original_transaction_id": null,
+      "amount": 80.2,
+      "currency": "USD",
+      "settled_on": "2026-01-13"
+    }
+  ]
+}

@@ -17,7 +17,8 @@ def test_role_focused_suite_is_not_advertised() -> None:
     assert suites == ["smoke", "capability-easy", "capability-normal", "capability-advanced"]
 
 
-def test_v2_inventory_has_thirteen_tasks() -> None:
+def test_v2_inventory_has_fourteen_tasks() -> None:
     discovered = [path.name for path in discover_tasks(TASKS_ROOT)]
-    assert len(discovered) == 13
+    assert len(discovered) == 14
     assert "cap-advanced-url-shortener-review" in discovered
+    assert "cap-advanced-merchant-reconciliation-suite" in discovered
