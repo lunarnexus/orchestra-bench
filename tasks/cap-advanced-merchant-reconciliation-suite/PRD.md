@@ -104,6 +104,7 @@ Use these to verify your implementation before finalizing.
 - Decision on a non-pending exception returns `409`.
 - Decision on an unknown exception id returns `404`.
 - All decisions write audit events.
+- Restarting the app must preserve the decisions themselves, not just their terminal status: approved stays approved and manually adjusted stays manually adjusted. Reports and audit history must continue to reflect those saved decisions.
 
 ## Reports
 

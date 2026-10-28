@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess as sp
 import sys
@@ -15,6 +16,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
 
 
@@ -155,7 +157,9 @@ def _json(body: str) -> dict:
 
 
 def _has_route_reference(payload: str, method: str, path: str) -> bool:
-    """Accept literal route documentation or ordinary HTML controls/links."""
+    """Accept route documentation or HTML controls with equivalent parameter names."""
+    payload = re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "{parameter}", payload)
+    path = re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "{parameter}", path)
     lowered = payload.lower()
     if f"{method} {path}" in payload:
         return True
@@ -267,6 +271,50 @@ def _find_number(payload: dict, *keys: str) -> float | None:
                 found = _find_number(value, *keys)
                 if found is not None:
                     return found
+    return None
+
+
+def _audit_section(body: str) -> str:
+    marker = body.lower().find("audit")
+    return body[marker:] if marker >= 0 else ""
+
+
+def _report_state_counts(payload: object) -> dict[str, float] | None:
+    """Read documented exception-state counts independently of response wrappers."""
+    states = ("pending", "approved", "rejected", "manually_adjusted")
+    if isinstance(payload, str):
+        try:
+            return _report_state_counts(json.loads(payload))
+        except ValueError:
+            pass
+        parts = []
+
+        class ReportText(HTMLParser):
+            def handle_data(self, data):
+                parts.append(data)
+
+        parser = ReportText()
+        parser.feed(payload)
+        text = " ".join(parts).lower()
+        marker = re.search(r"(?:counts\s+by\s+state|state\s+counts)", text)
+        if marker is None:
+            return None
+        pairs = re.findall(r"\b(pending|approved|rejected|manually_adjusted)\b\s*:?\s*(\d+(?:\.\d+)?)\b", text[marker.end():])
+        counts = {}
+        for state, count in pairs:
+            counts.setdefault(state, float(count))
+        return {state: counts.get(state, 0) for state in states} if counts else None
+    if not isinstance(payload, dict):
+        return None
+    if any(state in payload for state in states):
+        counts = {state: payload.get(state, 0) for state in states}
+        if all(isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+               for value in counts.values()):
+            return counts
+    for value in payload.values():
+        found = _report_state_counts(value)
+        if found is not None:
+            return found
     return None
 
 
@@ -464,15 +512,12 @@ def _run_functional_checks(workspace: Path) -> tuple[dict[str, bool], dict[str, 
 
         # 12. Audit history newest first (approve on TX-1201 is newer than manual_adjust on TX-1101).
         merchant_m100_status, merchant_m100_headers, merchant_m100_body = _request(port, "GET", "/reports/merchant/M-100")
-        audit_section = ""
-        marker = merchant_m100_body.lower().find("audit")
-        if marker >= 0:
-            audit_section = merchant_m100_body[marker:]
+        audit_section = _audit_section(merchant_m100_body)
+        approval_position = audit_section.find("evaluator approval")
+        manual_position = audit_section.find("evaluator manual adjustment")
         checks["audit_history_newest_first"] = (
             merchant_m100_status == 200
-            and "approved" in audit_section
-            and "manual_adjust" in audit_section
-            and audit_section.find("approved") < audit_section.find("manual_adjust")
+            and 0 <= approval_position < manual_position
         )
 
         # 13. Daily report executive totals exclude training merchants.
@@ -526,20 +571,46 @@ def _run_functional_checks(workspace: Path) -> tuple[dict[str, bool], dict[str, 
             and "<script>alert(1)</script>" not in xss_body
         )
 
-        # 17. Data survives an app restart.
+        # 17. Data and decision meaning survive an app restart.
+        states_status, _, states_body = _request(port, "GET", "/reports/exceptions")
+        decision_states = _report_state_counts(states_body)
         _stop_server(proc)
         proc = None
         proc = _start_server(workspace, db_path, port)
         persisted_daily_status, _, persisted_daily_body = _request(port, "GET", f"/reports/daily?date={DAILY_DATE}")
         persisted_daily = _json(persisted_daily_body)
         persisted_total = _find_number(persisted_daily, "total_amount", "executive_total", "total", "sum_amount", "gross_amount")
-        persisted_exceptions_status, _, persisted_exceptions_body = _request(port, "GET", "/admin/exceptions", headers=admin_headers)
+        persisted_exceptions_status, _, _ = _request(port, "GET", "/admin/exceptions", headers=admin_headers)
+        persisted_merchant_status, _, persisted_merchant_body = _request(port, "GET", "/reports/merchant/M-100")
+        persisted_audit = _audit_section(persisted_merchant_body)
+        persisted_states_status, _, persisted_states_body = _request(port, "GET", "/reports/exceptions")
+        persisted_decision_states = _report_state_counts(persisted_states_body)
+        # Resolved decisions belong in reports/audit, not the unresolved queue.
+        # Both decisions must remain terminal even if audit rows alone survived.
+        persisted_decision_statuses = [
+            _request(
+                port,
+                "POST",
+                f"/admin/exceptions/{exception_id}/decision",
+                data={"decision": "reject", "reason": "restart terminal-state probe"},
+                headers=admin_headers,
+            )[0]
+            for exception_id in (amount_id, late_id)
+        ]
         checks["data_survives_app_restart"] = (
             persisted_daily_status == 200
             and persisted_total is not None
             and abs(persisted_total - EXPECTED_EXECUTIVE_TOTAL) <= 0.01
             and persisted_exceptions_status == 200
-            and "approved" in persisted_exceptions_body
+            and persisted_merchant_status == 200
+            and "evaluator approval" in persisted_audit
+            and "evaluator manual adjustment" in persisted_audit
+            and persisted_decision_statuses == [409, 409]
+            and states_status == persisted_states_status == 200
+            and decision_states is not None
+            and decision_states["approved"] >= 1
+            and decision_states["manually_adjusted"] >= 1
+            and decision_states == persisted_decision_states
         )
 
         details.update({
@@ -564,6 +635,8 @@ def _run_functional_checks(workspace: Path) -> tuple[dict[str, bool], dict[str, 
             "merchant_m100_status": merchant_m100_status,
             "xss_status": xss_status,
             "persisted_total": persisted_total,
+            "decision_states_before_restart": decision_states,
+            "decision_states_after_restart": persisted_decision_states,
             "db_path": str(db_path),
             "db_exists": db_path.exists(),
             "db_size": db_path.stat().st_size if db_path.exists() else 0,

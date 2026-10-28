@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess as sp
 import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 repo_root = Path(os.environ.get("BENCH_REPO_ROOT", "/bench"))
@@ -102,10 +104,16 @@ def _json_request(method: str, url: str, payload: dict | None = None, headers: d
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             raw = response.read().decode("utf-8")
-            return response.getcode(), json.loads(raw or "{}")
+            status = response.getcode()
     except urllib.error.HTTPError as error:
         raw = error.read().decode("utf-8")
-        return error.code, json.loads(raw or "{}")
+        status = error.code
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        return 0, {}
+    try:
+        return status, json.loads(raw or "{}")
+    except ValueError:
+        return status, {}
 
 
 def _wait_for_health(base_url: str) -> bool:
@@ -129,20 +137,81 @@ def _unwrap_collection(payload: dict | object, *keys: str) -> dict:
     return payload
 
 
-def _attachment_stored_path(payload: dict | object) -> str | None:
-    if not isinstance(payload, dict):
-        return None
-    attachment = payload.get("attachment")
-    if isinstance(attachment, dict):
-        for key in ["stored_path", "storage_path", "upload_path", "path"]:
-            value = attachment.get(key)
-            if isinstance(value, str) and value:
-                return value
-    for key in ["attachment_stored_path", "stored_path", "upload_path", "attachment_path"]:
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
+def _attachment_is_stored(upload_dir: Path, content: str) -> bool:
+    """Check submitted content on disk without requiring a public storage path."""
+    if not upload_dir.is_dir() or upload_dir.is_symlink():
+        return False
+    for path in upload_dir.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if not path.resolve().is_relative_to(upload_dir.resolve()):
+            continue
+        if path.read_bytes() == content.encode("utf-8"):
+            return True
+    return False
+
+
+def _history_items(payload: object) -> list:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("items", "entries", "history", "audit", "data"):
+            value = payload.get(key)
+            if isinstance(value, (dict, list)):
+                return _history_items(value)
+    return []
+
+
+def _audit_records_decision(item: dict, decision: str) -> bool:
+    aliases = {"approved": {"approve", "approved"}, "rejected": {"reject", "rejected"}}
+    nouns = {"approved": "approval", "rejected": "rejection"}
+    opposite = "rejected" if decision == "approved" else "approved"
+
+    def identifies(value, *, action=False):
+        words = set(re.findall(r"[a-z]+", str(value).lower()))
+        expected = aliases[decision] | ({nouns[decision]} if action else set())
+        other = aliases[opposite] | ({nouns[opposite]} if action else set())
+        return bool(words & expected), bool(words & other)
+
+    expected, other = identifies(item["action"], action=True)
+    if expected or other:
+        return expected and not other
+    detail = item["detail"]
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except ValueError:
+            pass
+    if isinstance(detail, dict):
+        detail = [detail[key] for key in ("decision", "state", "status", "action") if key in detail]
+    expected, other = identifies(detail)
+    return expected and not other
+
+
+def _valid_audit_history(payload: object, submission_id: object, initial_payload: object,
+                         decision: str = "approved") -> bool:
+    items = _history_items(payload)
+    initial = _history_items(initial_payload)
+    required = {"id", "submission_id", "action", "detail", "created_at"}
+    if not initial or len(items) <= len(initial) or not all(isinstance(item, dict) and required.issubset(item) for item in items):
+        return False
+    if not all(str(item["submission_id"]) == str(submission_id) and item["action"] and item["detail"] for item in items):
+        return False
+    if len({str(item["id"]) for item in items}) != len(items):
+        return False
+    # Moderation prepends new events and preserves the initial audit entries.
+    # Action names and a response-level total are not part of the PRD contract.
+    if items[-len(initial):] != initial:
+        return False
+    added = items[:-len(initial)]
+    if not any(_audit_records_decision(item, decision) for item in added):
+        return False
+    try:
+        timestamps = [datetime.fromisoformat(str(item["created_at"]).replace("Z", "+00:00")) for item in items]
+        timestamps = [stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp for stamp in timestamps]
+    except ValueError:
+        return False
+    return timestamps == sorted(timestamps, reverse=True)
 
 
 def _run_functional_checks() -> tuple[dict[str, bool], dict[str, object]]:
@@ -242,8 +311,18 @@ def _run_functional_checks() -> tuple[dict[str, bool], dict[str, object]]:
                 "submitter_email": "reject@example.test",
                 "body": "plain text",
                 "attachment_name": "notes.txt",
-                "attachment_content": "notes",
+                "attachment_content": "second attachment notes",
             },
+        )
+        initial_history_status, initial_history_payload = _json_request(
+            "GET",
+            f"{base_url}/admin/submissions/{first_payload.get('id')}/history",
+            headers={"X-Admin-Token": "queue-admin"},
+        )
+        initial_rejected_history_status, initial_rejected_history_payload = _json_request(
+            "GET",
+            f"{base_url}/admin/submissions/{second_payload.get('id')}/history",
+            headers={"X-Admin-Token": "queue-admin"},
         )
         pre_public_status, pre_public = _json_request("GET", f"{base_url}/public/submissions")
         approve_status, approve_payload = _json_request(
@@ -269,6 +348,11 @@ def _run_functional_checks() -> tuple[dict[str, bool], dict[str, object]]:
             f"{base_url}/admin/submissions/{first_payload.get('id')}/history",
             headers={"X-Admin-Token": "queue-admin"},
         )
+        rejected_history_status, rejected_history_payload = _json_request(
+            "GET",
+            f"{base_url}/admin/submissions/{second_payload.get('id')}/history",
+            headers={"X-Admin-Token": "queue-admin"},
+        )
         bad_page_status, _ = _json_request("GET", f"{base_url}/public/submissions?page=0")
         missing_status, _ = _json_request(
             "POST",
@@ -287,14 +371,20 @@ def _run_functional_checks() -> tuple[dict[str, bool], dict[str, object]]:
             invalid_json_status = 200
         except urllib.error.HTTPError as error:
             invalid_json_status = error.code
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            invalid_json_status = 0
 
-        first_attachment = _attachment_stored_path(first_payload)
-        attachment_prefix = f"{upload_dir.name}/"
+        attachments_stored = (
+            _attachment_is_stored(upload_dir, "hello world")
+            and _attachment_is_stored(upload_dir, "second attachment notes")
+        )
+        attachment_metadata = bool(first_payload.get("attachment")) or any(
+            key.startswith("attachment_") and value not in (None, "")
+            for key, value in first_payload.items()
+        )
         public_listing = _unwrap_collection(public_payload, "submissions", "results", "data")
         public_items = public_listing.get("items", []) if isinstance(public_listing, dict) else []
         public_item = public_items[0] if public_items else {}
-        history_listing = _unwrap_collection(history_payload, "history", "audit", "data")
-        history_items = history_listing.get("items", []) if isinstance(history_listing, dict) else []
         admin_rejected_listing = _unwrap_collection(admin_rejected, "submissions", "results", "data")
         rejected_items = admin_rejected_listing.get("items", []) if isinstance(admin_rejected_listing, dict) else []
         required_submission_fields = {"id", "title", "submitter_email", "status", "created_at", "updated_at"}
@@ -307,13 +397,6 @@ def _run_functional_checks() -> tuple[dict[str, bool], dict[str, object]]:
             "created_at",
             "updated_at",
         }.issubset(public_item.keys())
-        audit_fields_ok = bool(history_items) and {
-            "id",
-            "submission_id",
-            "action",
-            "detail",
-            "created_at",
-        }.issubset(history_items[0].keys())
 
         checks = {
             "functional_browser_homepage": (
@@ -349,15 +432,14 @@ def _run_functional_checks() -> tuple[dict[str, bool], dict[str, object]]:
             ),
             "functional_attachment_security_and_audit_history": (
                 traversal_status == 422
-                and isinstance(first_attachment, str)
-                and first_attachment.startswith(attachment_prefix)
-                and ".." not in first_attachment
-                and not first_attachment.startswith("/")
-                and (workspace / first_attachment).exists()
+                and attachments_stored
+                and attachment_metadata
+                and initial_history_status == 200
                 and history_status == 200
-                and history_listing.get("total") == 2
-                and audit_fields_ok
-                and [item.get("action") for item in history_items] == ["approved", "submitted"]
+                and _valid_audit_history(history_payload, first_payload.get("id"), initial_history_payload, "approved")
+                and initial_rejected_history_status == 200
+                and rejected_history_status == 200
+                and _valid_audit_history(rejected_history_payload, second_payload.get("id"), initial_rejected_history_payload, "rejected")
             ),
             "functional_pagination_filtering_and_status_codes": (
                 unauthorized_status == 401
@@ -410,6 +492,12 @@ def _run_functional_checks() -> tuple[dict[str, bool], dict[str, object]]:
             "pre_public": pre_public,
             "public_payload": public_payload,
             "history_payload": history_payload,
+            "initial_history_payload": initial_history_payload,
+            "initial_rejected_history_payload": initial_rejected_history_payload,
+            "rejected_history_payload": rejected_history_payload,
+            "attachments_stored": attachments_stored,
+            "attachment_metadata": attachment_metadata,
+            "traversal_status": traversal_status,
             "admin_rejected": admin_rejected,
             "data_path": str(data_path),
             "data_exists": data_path.exists(),

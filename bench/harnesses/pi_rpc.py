@@ -112,6 +112,18 @@ def _event_runtime_error(events: Sequence[dict[str, Any]]) -> str:
             payload = event
         stop_reason = str(payload.get("stopReason") or "")
         error_message = str(payload.get("errorMessage") or "")
+        if not stop_reason and not error_message:
+            # agent_end may wrap the actual terminal assistant message.
+            messages = event.get("messages")
+            if isinstance(messages, list):
+                payload = next((message for message in reversed(messages)
+                                if isinstance(message, dict) and message.get("role") == "assistant"), {})
+                stop_reason = str(payload.get("stopReason") or "")
+                error_message = str(payload.get("errorMessage") or "")
+        if payload.get("role") not in (None, "assistant") or (not stop_reason and not error_message):
+            continue
+        if stop_reason == "length":
+            return "model output limit reached (stopReason=length)"
         if stop_reason == "error" or error_message:
             return error_message or "Pi runtime error"
         return ""
@@ -137,7 +149,7 @@ def _assistant_text_from_events(events: Sequence[dict[str, Any]]) -> str:
             if not isinstance(update, dict):
                 continue
             update_type = str(update.get("type") or "")
-            if update_type in {"text_delta", "thinking_delta"}:
+            if update_type == "text_delta":
                 delta = str(update.get("delta") or "")
                 if delta:
                     streamed.append(delta)
@@ -151,7 +163,10 @@ def _text_is_doneish(text: str) -> bool:
 
 
 def _parent_doneish_seen(events: Sequence[dict[str, Any]]) -> bool:
-    return _text_is_doneish(_assistant_text_from_events(events[len(events) // 2 :]))
+    start = max((index + 1 for index, event in enumerate(events)
+                 if event.get("type") == "tool_execution_end"
+                 and event.get("toolName") == "orch_dispatch" and not event.get("isError")), default=0)
+    return _text_is_doneish(_assistant_text_from_events(events[start:]))
 
 
 def _orchestra_dispatch_seen(events: Sequence[dict[str, Any]]) -> bool:
@@ -395,6 +410,7 @@ class PiRpcHarness(BaseHarness):
     _pending_events: deque[dict[str, Any]] = field(default_factory=deque, init=False, repr=False)
     _state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _last_settle_status: str = field(default="not_started", init=False, repr=False)
+    _task_deadline: float | None = field(default=None, init=False, repr=False)
     _verbose_at_line_start: bool = field(default=True, init=False, repr=False)
 
     @property
@@ -421,6 +437,9 @@ class PiRpcHarness(BaseHarness):
         config_path = Path(f"/workspace/.pi/home/{run_id}/.pi/agent/orchestra")
         if not config_path.is_dir():
             return None
+        remaining = self._remaining_timeout(self._task_deadline)
+        if remaining == 0:
+            return None
         try:
             completed = subprocess.run(
                 [
@@ -436,7 +455,7 @@ class PiRpcHarness(BaseHarness):
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=min(10.0, remaining) if remaining is not None else 10.0,
                 cwd=workspace_dir(request.run_paths),
             )
         except Exception:
@@ -889,18 +908,37 @@ class PiRpcHarness(BaseHarness):
         grace_seconds = self._parent_done_grace_seconds()
         finalize_seconds = self._parent_finalize_window_seconds()
         quiet_seconds = self._orchestra_quiet_seconds()
-        deadline = time.monotonic() + self._child_wait_seconds(timeout)
+        # One task deadline covers child work, integration turns and finalization.
+        overall_deadline = self._task_deadline
+        if overall_deadline is None and timeout is not None:
+            overall_deadline = time.monotonic() + max(0.0, timeout)
+        deadline = overall_deadline if overall_deadline is not None else time.monotonic() + self._child_wait_seconds(None)
         grace_until = None
         quiet_until = None
         finalize_granted = False
         handled_dispatch_generation = 0
         last_wait_announcement = 0.0
         while True:
+            if overall_deadline is not None and self._remaining_timeout(overall_deadline) == 0:
+                if self._last_settle_status == "settled":
+                    self._last_settle_status = "timeout"
+                return False
+            if _event_runtime_error(self.events):
+                self._last_settle_status = "runtime_error"
+                return False
             doneish_seen = _parent_doneish_seen(self.events)
             snapshot = self._orchestra_status_snapshot()
             status_unavailable = isinstance(snapshot, dict) and snapshot.get("state") == "status_unavailable"
             children_cleared = self._children_cleared(snapshot)
             children_active = (snapshot is not None and not children_cleared) or status_unavailable
+            if overall_deadline is not None and self._remaining_timeout(overall_deadline) == 0:
+                if status_unavailable:
+                    self._last_settle_status = "authoritative_status_unavailable"
+                elif children_active:
+                    self._last_settle_status = "children_active_timeout"
+                else:
+                    self._last_settle_status = "timeout" if doneish_seen else "parent_not_done"
+                return False
             dispatch_generation = 0
             if isinstance(snapshot, dict) and isinstance(snapshot.get("dispatch_generation"), (int, float)):
                 dispatch_generation = int(snapshot["dispatch_generation"])
@@ -910,13 +948,14 @@ class PiRpcHarness(BaseHarness):
                 handled_dispatch_generation = dispatch_generation
                 finalize_granted = False
                 quiet_until = None
-                deadline = time.monotonic() + self._child_wait_seconds(timeout)
+                if overall_deadline is None:
+                    deadline = time.monotonic() + self._child_wait_seconds(None)
             if _consolidated_report_delivered(snapshot, children_cleared) and not finalize_granted:
                 # The consolidated session report opens a fresh parent turn; grant it a
                 # separate finalization window instead of an exhausted child deadline.
                 # Granted once so duplicate report events never re-extend the deadline.
                 finalize_granted = True
-                if finalize_seconds > 0:
+                if finalize_seconds > 0 and overall_deadline is None:
                     window_end = time.monotonic() + finalize_seconds
                     if deadline is None or window_end > deadline:
                         deadline = window_end
@@ -953,7 +992,8 @@ class PiRpcHarness(BaseHarness):
                     if quiet_remaining == 0:
                         self._last_settle_status = "settled"
                         return True
-                    event = self._next_event(timeout=min(5.0, quiet_remaining))
+                    remaining = self._remaining_timeout(deadline)
+                    event = self._next_event(timeout=min(5.0, quiet_remaining, remaining) if remaining is not None else min(5.0, quiet_remaining))
                     if event is None:
                         if self._process is not None and self._process.poll() is not None:
                             self._last_settle_status = "settled"
@@ -1017,8 +1057,9 @@ class PiRpcHarness(BaseHarness):
         return process.poll()
 
     def run(self, request: HarnessRequest) -> HarnessResult:
-        self.start(request)
         deadline = None if request.timeout_seconds is None else time.monotonic() + max(0.0, request.timeout_seconds)
+        self._task_deadline = deadline
+        self.start(request)
         # Orchestra tools are exposed by runtime config; no explicit enable command is sent.
         self.write_transcript(request, f"prompt: {request.prompt}")
         task_start = len(self.events)
@@ -1029,7 +1070,10 @@ class PiRpcHarness(BaseHarness):
             pass
         settled = self.wait_for_settled(timeout=self._remaining_timeout(deadline), start_index=task_start)
         if settled and _orchestra_dispatch_seen(self.events[task_start:]):
-            settled = self.wait_for_orchestra_children()
+            settled = self.wait_for_orchestra_children(timeout=self._remaining_timeout(deadline))
+        if settled and self._remaining_timeout(deadline) == 0:
+            settled = False
+            self._last_settle_status = "timeout"
         exit_code = self.stop()
         reported_exit_code = 0 if settled and self._last_settle_status == "settled" and exit_code == -9 else exit_code
         runtime_error = _event_runtime_error(self.events[task_start:])
@@ -1039,6 +1083,7 @@ class PiRpcHarness(BaseHarness):
             "event_count": len(self.events),
             "exit_code": reported_exit_code,
             "shutdown_exit_code": exit_code,
+            "task_timeout_seconds": request.timeout_seconds,
             "last_settle_status": self._last_settle_status,
             "state": dict(self._state),
         }

@@ -86,7 +86,7 @@ Behavior:
 
 ### Audit history
 - Every submission must record an initial audit entry.
-- Every approval/rejection must append another audit entry.
+- Every approval/rejection must append another audit entry for that submission identifying the decision in `action` or `detail`. Equivalent action names such as `approved` or `decision_approved`, or structured detail such as `{"decision": "approved"}`, are acceptable. An unrelated event such as `viewed` does not record a moderation decision.
 - Audit entries must include at least `id`, `submission_id`, `action`, `detail`, and `created_at`.
 
 ### Validation and status handling

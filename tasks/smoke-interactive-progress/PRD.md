@@ -10,5 +10,5 @@ Complete `lesson.py` so users can answer steps, receive immediate correctness fe
 - `start_session(user_id, lesson_id, answers)` creates a session at step 0 with zero correct answers.
 - `submit_answer(session, answer)` returns feedback containing `correct`, `current_step`, `completed`, and `score`.
 - Correct answers increment score; incorrect answers do not.
-- Each submission advances exactly one step.
+- Each submission advances exactly one step. Returned feedback reflects the updated session state: `current_step` equals `session['step']` after advancing (1 after the first submission, 2 after the second).
 - Submitting after completion raises `ValueError`.
