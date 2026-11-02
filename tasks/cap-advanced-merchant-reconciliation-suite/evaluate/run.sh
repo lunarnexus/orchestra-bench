@@ -296,7 +296,7 @@ def _report_state_counts(payload: object) -> dict[str, float] | None:
         parser = ReportText()
         parser.feed(payload)
         text = " ".join(parts).lower()
-        marker = re.search(r"(?:counts\s+by\s+state|state\s+counts)", text)
+        marker = re.search(r"(?:counts\s+by\s+state|state\s+counts|by\s+state)", text)
         if marker is None:
             return None
         pairs = re.findall(r"\b(pending|approved|rejected|manually_adjusted)\b\s*:?\s*(\d+(?:\.\d+)?)\b", text[marker.end():])

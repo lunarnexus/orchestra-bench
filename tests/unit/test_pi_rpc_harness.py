@@ -311,7 +311,7 @@ def test_run_captures_stderr_to_run_log_and_classifies_timeout_missing_settled_a
     nonzero_result = nonzero_harness.run(nonzero_request)
 
     assert timeout_result.status == "lifecycle_failed"
-    assert timeout_result.error == "timeout waiting for agent_settled"
+    assert timeout_result.error == "task deadline exceeded before lifecycle completion"
     assert missing_result.status == "lifecycle_failed"
     assert "agent_settled" in missing_result.error
     assert nonzero_result.status == "lifecycle_failed"
@@ -861,7 +861,7 @@ def test_run_quiet_window_catches_dispatch_after_apparent_completion(
     result = harness.run(request)
 
     assert result.status == "lifecycle_failed"
-    assert result.details["last_settle_status"] == "authoritative_status_unavailable"
+    assert result.details["last_settle_status"] == "task_deadline_exceeded"
 
 
 def test_run_refreshes_child_wait_for_repeated_post_report_dispatch_epochs(
@@ -1093,10 +1093,10 @@ def test_run_fails_parent_not_done_when_no_doneish_by_finalize_deadline(
 
     result = harness.run(request)
 
-    # Children are terminal via the consolidated report; only the parent final turn is missing.
+    # Children are terminal, but the parent has not finished by the overall deadline.
     assert result.status == "lifecycle_failed"
-    assert result.details["last_settle_status"] == "parent_not_done"
-    assert result.error == "parent did not emit BENCH_PARENT_DONE before the completion timeout"
+    assert result.details["last_settle_status"] == "task_deadline_exceeded"
+    assert result.error == "task deadline exceeded before lifecycle completion"
     assert _sent_prompt_messages(process) == ["Build the thing."]
 
 

@@ -62,6 +62,36 @@ def test_reasoning_limit_is_not_successful_settlement(tmp_path):
     assert "output limit" in result.error
 
 
+@pytest.mark.parametrize("expired", [False, True])
+def test_deadline_expiry_is_not_reported_as_unavailable_status(tmp_path, monkeypatch, expired):
+    process = _FakeJsonlProcess()
+
+    def on_send(command):
+        if command.get("type") == "get_state":
+            process.chunks.append(json.dumps({"type": "response", "command": "get_state", "success": True, "data": {}}) + "\n")
+        elif command.get("type") == "prompt":
+            process.chunks.extend([DISPATCH, '{"type":"agent_settled"}\n'])
+
+    process.on_send = on_send
+    harness = PiRpcHarness(["pi"], process_factory=lambda **_: process)
+
+    def wait_for_children(timeout=None):
+        harness._last_settle_status = "authoritative_status_unavailable"
+        if expired:
+            monkeypatch.setattr(harness, "_remaining_timeout", lambda deadline: 0)
+        return False
+
+    monkeypatch.setattr(harness, "wait_for_orchestra_children", wait_for_children)
+    result = harness.run(_request(tmp_path, timeout_seconds=10))
+    assert result.status == "lifecycle_failed"
+    if expired:
+        assert result.details["last_settle_status"] == "task_deadline_exceeded"
+        assert "task deadline exceeded" in result.error
+    else:
+        assert result.details["last_settle_status"] == "authoritative_status_unavailable"
+        assert "no authoritative orchestra status" in result.error
+
+
 def run_delayed_parent(tmp_path, monkeypatch, *, budget, gates, phase_budget):
     monkeypatch.setenv("BENCH_PARENT_DONE_GRACE_SECONDS", "0")
     monkeypatch.setenv("BENCH_ORCHESTRA_QUIET_SECONDS", "0")

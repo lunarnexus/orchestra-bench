@@ -77,11 +77,18 @@ def run_checks(evaluator, monkeypatch, tmp_path, *, reverse_audit=False,
     '{"summary":{"by_state":{"approved":1,"manually_adjusted":1}}}',
     '<p>Counts by state: approved: 1, manually_adjusted: 1</p>',
     '<h2>Counts by state</h2><ul><li>approved: 1</li><li>manually_adjusted: 1</li></ul>',
+    '<h2>By state</h2><ul><li>approved: 1</li><li>manually_adjusted: 1</li></ul>',
 ])
 def test_state_counts_accept_documented_json_or_html_reports(evaluator, payload):
     assert evaluator["_report_state_counts"](payload) == {
         "approved": 1, "manually_adjusted": 1, "pending": 0, "rejected": 0,
     }
+
+
+def test_state_counts_reject_unrelated_category_counts(evaluator):
+    assert evaluator["_report_state_counts"](
+        '<h2>By category</h2><p>approved: 1, manually_adjusted: 1</p>'
+    ) is None
 
 
 @pytest.mark.parametrize("decision_label", ["approve", "approved"])

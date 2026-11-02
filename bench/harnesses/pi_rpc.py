@@ -1071,9 +1071,9 @@ class PiRpcHarness(BaseHarness):
         settled = self.wait_for_settled(timeout=self._remaining_timeout(deadline), start_index=task_start)
         if settled and _orchestra_dispatch_seen(self.events[task_start:]):
             settled = self.wait_for_orchestra_children(timeout=self._remaining_timeout(deadline))
-        if settled and self._remaining_timeout(deadline) == 0:
+        if self._remaining_timeout(deadline) == 0 and self._last_settle_status != "runtime_error":
             settled = False
-            self._last_settle_status = "timeout"
+            self._last_settle_status = "task_deadline_exceeded"
         exit_code = self.stop()
         reported_exit_code = 0 if settled and self._last_settle_status == "settled" and exit_code == -9 else exit_code
         runtime_error = _event_runtime_error(self.events[task_start:])
@@ -1097,6 +1097,7 @@ class PiRpcHarness(BaseHarness):
             )
         elif not settled or self._last_settle_status != "settled":
             error_map = {
+                "task_deadline_exceeded": "task deadline exceeded before lifecycle completion",
                 "timeout": "timeout waiting for agent_settled",
                 "missing_settled": "missing agent_settled",
                 "parent_not_done": "parent did not emit BENCH_PARENT_DONE before the completion timeout",

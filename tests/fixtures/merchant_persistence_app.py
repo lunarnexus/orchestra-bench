@@ -105,7 +105,7 @@ def summary():
     counts = dict(Counter(item["state"] for item in state["exceptions"]))
     if HTML_STATE_REPORT:
         rows = "".join(f"<li>{key}: {count}</li>" for key, count in counts.items())
-        return HTMLResponse(f"<h2>Counts by state</h2><ul>{rows}</ul>")
+        return HTMLResponse(f"<h2>By state</h2><ul>{rows}</ul>")
     return {"by_state": counts, "total": len(state["exceptions"])}
 
 
